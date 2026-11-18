@@ -259,6 +259,72 @@ fn louvain_separates_two_joined_triangles() {
     assert_eq!(louvain(&view(3, TRIANGLE), 5), vec![0, 0, 0]);
 }
 
+/// Records every progress report, and answers `false` from the `stop_on`-th
+/// report onwards (counting from 1), so a stop can be put at any report --
+/// including one in the middle of a sweep.
+struct Reports {
+    seen: std::cell::RefCell<Vec<(usize, usize)>>,
+    stop_on: Option<usize>,
+}
+
+impl Reports {
+    fn new(stop_on: Option<usize>) -> Self {
+        Self { seen: std::cell::RefCell::new(Vec::new()), stop_on }
+    }
+    fn seen(&self) -> Vec<(usize, usize)> {
+        self.seen.borrow().clone()
+    }
+}
+
+impl crate::progress::Progress for Reports {
+    fn step(&self, done: usize, total: usize) -> bool {
+        let mut seen = self.seen.borrow_mut();
+        seen.push((done, total));
+        !self.stop_on.is_some_and(|k| seen.len() >= k)
+    }
+}
+
+#[test]
+fn louvain_with_reports_each_sweep_and_finds_what_louvain_finds() {
+    let v = two_triangles();
+    let reports = Reports::new(None);
+    assert_eq!(louvain_with(&v, 10, &reports).unwrap(), louvain(&v, 10));
+    let seen = reports.seen();
+    // Before the first sweep, then once per sweep, out of 10 passes x 10.
+    assert_eq!(seen[0], (0, 100));
+    for (k, &(done, total)) in seen.iter().enumerate() {
+        assert_eq!((done, total), (k, 100), "report {k} out of order: {seen:?}");
+    }
+    // Two triangles converge long before the bound.
+    assert!(seen.len() > 1 && seen.len() < 100, "{seen:?}");
+}
+
+#[test]
+fn louvain_with_stopped_returns_stopped_not_a_partition() {
+    let v = two_triangles();
+    // Before the first sweep: no sweep runs.
+    let before = Reports::new(Some(1));
+    assert_eq!(louvain_with(&v, 10, &before), Err(crate::progress::Stopped { done: 0, total: 100 }));
+    assert_eq!(before.seen(), vec![(0, 100)]);
+    // After the first sweep: nothing after it.
+    let after_one = Reports::new(Some(2));
+    assert_eq!(louvain_with(&v, 10, &after_one), Err(crate::progress::Stopped { done: 1, total: 100 }));
+    assert_eq!(after_one.seen(), vec![(0, 100), (1, 100)]);
+}
+
+#[test]
+fn louvain_with_is_stopped_part_way_through_a_sweep() {
+    // 3,000 nodes in a ring: one sweep visits them all, so a stop that waited
+    // for the sweep to end would be seen only after 3,000 nodes. The report at
+    // node 1,024 comes first, still at 0 sweeps done.
+    let n = 3000;
+    let ring: Vec<(usize, usize)> = (0..n).map(|i| (i, (i + 1) % n)).collect();
+    let v = view(n, &ring);
+    let reports = Reports::new(Some(2));
+    assert_eq!(louvain_with(&v, 10, &reports), Err(crate::progress::Stopped { done: 0, total: 100 }));
+    assert_eq!(reports.seen(), vec![(0, 100), (0, 100)], "the stop was not seen inside the sweep");
+}
+
 #[test]
 fn with_ids_pairs_communities_with_node_ids() {
     let v = view(3, &[]);

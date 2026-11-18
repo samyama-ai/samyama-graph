@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use super::handler::{
-    query_handler, export_handler, import_parquet_handler, status_handler, changes_handler, memory_handler, metrics_handler, slowlog_handler, slowlog_reset_handler, schema_handler, sample_handler,
+    query_handler, export_handler, import_parquet_handler, status_handler, changes_handler, memory_handler, metrics_handler, slowlog_handler, slowlog_reset_handler, running_algorithms_handler, cancel_running_algorithm_handler, schema_handler, sample_handler,
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
     set_enrich_policy_handler, enrich_handler, verify_handler,
@@ -199,10 +199,13 @@ pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::a
     use axum::http::Method;
     // The slow-query log holds query text from every tenant, literals
     // included, so reading it is an operator's view, not a reader's (#2079).
+    // Likewise the running algorithms: every tenant's calls are listed, and a
+    // cancel stops one whoever started it (#1693).
     if path.starts_with("/api/tenants")
         || path == "/api/snapshot/import"
         || path == "/api/enrich/policy"
         || path == "/api/slowlog"
+        || path.starts_with("/api/algorithms/running")
     {
         return Role::Admin;
     }
@@ -1020,6 +1023,8 @@ impl HttpServer {
             .route("/api/slowlog", get(slowlog_handler).delete(slowlog_reset_handler))
             .route("/api/schema", get(schema_handler))
             .route("/api/algorithms/catalog", get(algorithm_catalog_handler))
+            .route("/api/algorithms/running", get(running_algorithms_handler))
+            .route("/api/algorithms/running/:id/cancel", post(cancel_running_algorithm_handler))
             .route("/api/sample", post(sample_handler))
             .route(
                 "/api/import/csv",

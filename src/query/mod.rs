@@ -82,6 +82,7 @@ pub mod span;
 pub mod suggest;
 pub mod metrics;
 pub mod slowlog;
+pub mod running;
 
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};

@@ -1434,6 +1434,39 @@ pub async fn slowlog_reset_handler() -> impl IntoResponse {
     Json(json!({ "cleared": crate::query::slowlog::reset() }))
 }
 
+/// `GET /api/algorithms/running` — every graph algorithm call in progress, with
+/// how far it has got (ALGO-12, #1693).
+///
+/// `phase` says what `done` of `total` counts: nodes read into the algorithm's
+/// graph view, then the algorithm's own iterations or sweeps. Answered without
+/// the store lock, so it answers while the algorithm it reports on holds it.
+pub async fn running_algorithms_handler() -> impl IntoResponse {
+    Json(json!({ "running": crate::query::running::list() }))
+}
+
+/// `POST /api/algorithms/running/{id}/cancel` — stop one algorithm call.
+///
+/// 202: the call stops at its next progress report and its query fails with
+/// `Query cancelled: ...`; the server, the store and every other query carry
+/// on. 404: no call with that id is running -- it never existed or has
+/// already ended, and either way there is nothing to stop.
+pub async fn cancel_running_algorithm_handler(
+    axum::extract::Path(id): axum::extract::Path<u64>,
+) -> impl IntoResponse {
+    if crate::query::running::cancel(id) {
+        (StatusCode::ACCEPTED, Json(json!({ "id": id, "cancel_requested": true })))
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!(
+                    "no algorithm call {id} is running; GET /api/algorithms/running lists the ones that are"
+                )
+            })),
+        )
+    }
+}
+
 /// Handler for graph schema introspection
 /// How many nodes of a label `/api/schema` reads to work out which properties
 /// it has. A property graph lets two nodes of a label carry different keys, so
