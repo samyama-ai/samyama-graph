@@ -45,6 +45,23 @@ The panel and the log use the same threshold on purpose. A dashboard and a log
 that disagree about what "slow" means give an operator two numbers and a reason
 to trust neither.
 
+## Is it overloaded, and are writes reaching disk?
+
+- **Load: clients and queries running.** `samyama_active_connections` is what
+  `max_connections` counts: open RESP connections plus HTTP requests in
+  progress, the scrape itself included. It is absent on a server with no tenant
+  manager rather than a false 0. `samyama_queries_in_flight` is queries
+  executing now. A query still waiting for the store lock is not counted; its
+  wait is `lock_wait_ms` on its own response. Connections climbing while
+  running stays flat means clients are queued behind the lock.
+- **Persistence: writes reaching disk.** `samyama_persistence_degraded` turns 1
+  on the first write that fails to reach disk. From then on writes are refused
+  until a restart, so this is the one to alert on.
+  `samyama_mutations_persisted_total` and `samyama_persistence_errors_total`
+  count mutations written and failed attempts, over auto-commit statements and
+  transaction commits alike. A failed transaction commit is rolled back and
+  counted as an error without degrading the server.
+
 ## What is not here
 
 - **Per-query-shape latency.** The histogram is process-wide, so it says the
