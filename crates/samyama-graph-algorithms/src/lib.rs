@@ -90,3 +90,5 @@ pub use embeddings::{fastrp, node2vec, FastRpConfig, Node2VecConfig};
 #[cfg(test)]
 #[path = "lib_cov_tests.rs"]
 mod cov_tests;
+#[cfg(test)]
+mod frontier_parity_tests;
