@@ -92,8 +92,16 @@ impl Direction {
 /// The multigraph reading, for walks that count routes: two parallel edges
 /// are two shortest paths to Brandes, and dropping one halves a score.
 pub fn neighbours(view: &GraphView, u: usize, dir: Direction) -> impl Iterator<Item = usize> + '_ {
-    let succ: &[usize] = if dir == Direction::In { &[] } else { view.successors(u) };
-    let pred: &[usize] = if dir == Direction::Out { &[] } else { view.predecessors(u) };
+    let succ: &[usize] = if dir == Direction::In {
+        &[]
+    } else {
+        view.successors(u)
+    };
+    let pred: &[usize] = if dir == Direction::Out {
+        &[]
+    } else {
+        view.predecessors(u)
+    };
     succ.iter().chain(pred).copied()
 }
 
@@ -175,7 +183,11 @@ pub struct Bfs {
 impl Bfs {
     /// A frontier for a graph of `node_count` nodes, with nothing reached.
     pub fn new(node_count: usize) -> Self {
-        Self { depth: vec![UNREACHED; node_count], order: Vec::new(), head: 0 }
+        Self {
+            depth: vec![UNREACHED; node_count],
+            order: Vec::new(),
+            head: 0,
+        }
     }
 
     /// Forget the last walk. Costs the number of nodes it reached, not the
@@ -239,7 +251,13 @@ impl Bfs {
                     self.depth[to] = from_depth + 1;
                     self.order.push(to);
                 }
-                let edge = Edge { from, to, from_depth, to_depth: self.depth[to], discovered };
+                let edge = Edge {
+                    from,
+                    to,
+                    from_depth,
+                    to_depth: self.depth[to],
+                    discovered,
+                };
                 if visit(&edge) == Visit::Stop {
                     return true;
                 }
@@ -251,7 +269,11 @@ impl Bfs {
     /// Hop distance from `source` to every node along `dir`; read the answer
     /// with [`depth`](Self::depth) and [`reached`](Self::reached).
     pub fn distances(&mut self, view: &GraphView, source: usize, dir: Direction) -> &Self {
-        self.walk(&[source], |u, _| neighbours(view, u, dir), |_| Visit::Continue);
+        self.walk(
+            &[source],
+            |u, _| neighbours(view, u, dir),
+            |_| Visit::Continue,
+        );
         self
     }
 
@@ -282,17 +304,49 @@ pub const FRONTIER_TARGET: usize = 10;
 pub const BUILT_ON_FRONTIER: &[(&str, &str, &[&str])] = &[
     ("closeness_centrality", "centrality.rs", &["algo.closeness"]),
     ("harmonic_centrality", "centrality.rs", &["algo.harmonic"]),
-    ("betweenness_centrality", "centrality.rs", &["algo.betweenness"]),
-    ("eccentricity", "metrics.rs", &["algo.eccentricity", "algo.diameter", "algo.radius"]),
-    ("average_neighbour_degree", "metrics.rs", &["algo.averageNeighborDegree"]),
-    ("all_pairs_hops", "paths_extra.rs", &["algo.allPairsShortestPath", "algo.wienerIndex"]),
-    ("transitive_closure", "paths_extra.rs", &["algo.transitiveClosure"]),
-    ("global_efficiency", "structure_extra.rs", &["algo.globalEfficiency"]),
+    (
+        "betweenness_centrality",
+        "centrality.rs",
+        &["algo.betweenness"],
+    ),
+    (
+        "eccentricity",
+        "metrics.rs",
+        &["algo.eccentricity", "algo.diameter", "algo.radius"],
+    ),
+    (
+        "average_neighbour_degree",
+        "metrics.rs",
+        &["algo.averageNeighborDegree"],
+    ),
+    (
+        "all_pairs_hops",
+        "paths_extra.rs",
+        &["algo.allPairsShortestPath", "algo.wienerIndex"],
+    ),
+    (
+        "transitive_closure",
+        "paths_extra.rs",
+        &["algo.transitiveClosure"],
+    ),
+    (
+        "global_efficiency",
+        "structure_extra.rs",
+        &["algo.globalEfficiency"],
+    ),
     ("bipartite_sets", "structure_extra.rs", &["algo.bipartite"]),
     ("bfs", "pathfinding.rs", &["algo.shortestPath"]),
     ("bfs_all_shortest_paths", "pathfinding.rs", &[]),
-    ("all_shortest_paths", "pathfinding_extra.rs", &["algo.allShortestPaths"]),
-    ("negative_samples", "negative_sampling.rs", &["algo.negativeSampling"]),
+    (
+        "all_shortest_paths",
+        "pathfinding_extra.rs",
+        &["algo.allShortestPaths"],
+    ),
+    (
+        "negative_samples",
+        "negative_sampling.rs",
+        &["algo.negativeSampling"],
+    ),
 ];
 
 #[cfg(test)]
@@ -322,10 +376,22 @@ mod tests {
     #[test]
     fn neighbours_follow_the_direction_and_keep_every_edge() {
         let v = view();
-        assert_eq!(neighbours(&v, 1, Direction::Out).collect::<Vec<_>>(), vec![2]);
-        assert_eq!(neighbours(&v, 1, Direction::In).collect::<Vec<_>>(), vec![0, 0]);
-        assert_eq!(neighbours(&v, 1, Direction::Both).collect::<Vec<_>>(), vec![2, 0, 0]);
-        assert_eq!(neighbours(&v, 3, Direction::Both).collect::<Vec<_>>(), vec![3, 3]);
+        assert_eq!(
+            neighbours(&v, 1, Direction::Out).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            neighbours(&v, 1, Direction::In).collect::<Vec<_>>(),
+            vec![0, 0]
+        );
+        assert_eq!(
+            neighbours(&v, 1, Direction::Both).collect::<Vec<_>>(),
+            vec![2, 0, 0]
+        );
+        assert_eq!(
+            neighbours(&v, 3, Direction::Both).collect::<Vec<_>>(),
+            vec![3, 3]
+        );
         assert_eq!(neighbours(&v, 4, Direction::Both).count(), 0);
     }
 
@@ -350,13 +416,20 @@ mod tests {
         let v = view();
         let mut bfs = Bfs::new(v.node_count);
         let mut edges = Vec::new();
-        let stopped = bfs.walk(&[0], |u, _| neighbours(&v, u, Direction::Out), |e| {
-            edges.push(*e);
-            Visit::Continue
-        });
+        let stopped = bfs.walk(
+            &[0],
+            |u, _| neighbours(&v, u, Direction::Out),
+            |e| {
+                edges.push(*e);
+                Visit::Continue
+            },
+        );
         assert!(!stopped);
         assert_eq!(bfs.reached(), &[0, 1, 2]);
-        assert_eq!((bfs.depth(0), bfs.depth(2), bfs.depth(4)), (Some(0), Some(2), None));
+        assert_eq!(
+            (bfs.depth(0), bfs.depth(2), bfs.depth(4)),
+            (Some(0), Some(2), None)
+        );
         // The parallel edge is seen too, second, and is a shortest route.
         assert_eq!(edges.len(), 3);
         assert!(edges[0].discovered && !edges[1].discovered && edges[1].is_shortest());
@@ -371,8 +444,16 @@ mod tests {
         bfs.distances(&v, 3, Direction::Out);
         assert_eq!(bfs.reached(), &[3]);
         assert_eq!(bfs.depth(0), None, "the earlier walk's depths survived");
-        bfs.extend(&[0, 3], |u, _| neighbours(&v, u, Direction::Out), |_| Visit::Continue);
-        assert_eq!(bfs.reached(), &[3, 0, 1, 2], "extend re-walked or lost a node");
+        bfs.extend(
+            &[0, 3],
+            |u, _| neighbours(&v, u, Direction::Out),
+            |_| Visit::Continue,
+        );
+        assert_eq!(
+            bfs.reached(),
+            &[3, 0, 1, 2],
+            "extend re-walked or lost a node"
+        );
         assert_eq!(bfs.depth(3), Some(0));
     }
 
@@ -380,33 +461,53 @@ mod tests {
     fn several_sources_start_at_depth_zero() {
         let v = view();
         let mut bfs = Bfs::new(v.node_count);
-        bfs.walk(&[2, 4, 2], |u, _| neighbours(&v, u, Direction::Both), |_| Visit::Continue);
+        bfs.walk(
+            &[2, 4, 2],
+            |u, _| neighbours(&v, u, Direction::Both),
+            |_| Visit::Continue,
+        );
         assert_eq!(bfs.reached(), &[2, 4, 1, 0]);
-        assert_eq!((bfs.depth(4), bfs.depth(1), bfs.depth(0)), (Some(0), Some(1), Some(2)));
+        assert_eq!(
+            (bfs.depth(4), bfs.depth(1), bfs.depth(0)),
+            (Some(0), Some(1), Some(2))
+        );
     }
 
     #[test]
     fn visit_can_stop_the_walk_and_expand_can_prune_it() {
         let v = view();
         let mut bfs = Bfs::new(v.node_count);
-        let stopped = bfs.walk(&[0], |u, _| neighbours(&v, u, Direction::Out), |e| {
-            if e.to == 1 {
-                Visit::Stop
-            } else {
-                Visit::Continue
-            }
-        });
+        let stopped = bfs.walk(
+            &[0],
+            |u, _| neighbours(&v, u, Direction::Out),
+            |e| {
+                if e.to == 1 {
+                    Visit::Stop
+                } else {
+                    Visit::Continue
+                }
+            },
+        );
         assert!(stopped);
         assert_eq!(bfs.depth(2), None, "the walk went on after Stop");
         // Pruned at depth 1: 2 is never reached.
-        bfs.walk(&[0], |u, d| neighbours(&v, u, Direction::Out).filter(move |_| d < 1), |_| Visit::Continue);
+        bfs.walk(
+            &[0],
+            |u, d| neighbours(&v, u, Direction::Out).filter(move |_| d < 1),
+            |_| Visit::Continue,
+        );
         assert_eq!(bfs.reached(), &[0, 1]);
     }
 
     #[test]
     fn aggregation_folds_in_neighbour_order() {
         let v = view();
-        let degree = aggregate_neighbours(v.node_count, |u| neighbours(&v, u, Direction::Both), |_| 0, |n, _| n + 1);
+        let degree = aggregate_neighbours(
+            v.node_count,
+            |u| neighbours(&v, u, Direction::Both),
+            |_| 0,
+            |n, _| n + 1,
+        );
         assert_eq!(degree, vec![2, 3, 1, 2, 0]);
         let order = aggregate_neighbours(
             v.node_count,
@@ -473,7 +574,9 @@ mod tests {
         let mut seen = vec![name];
         let mut todo = vec![name];
         while let Some(f) = todo.pop() {
-            let Some(body) = function_body(text, f) else { continue };
+            let Some(body) = function_body(text, f) else {
+                continue;
+            };
             if body.contains("frontier::") {
                 return true;
             }
@@ -489,7 +592,9 @@ mod tests {
 
     /// The text of `fn name`'s body, braces matched.
     fn function_body<'a>(text: &'a str, name: &str) -> Option<&'a str> {
-        let start = [format!("pub fn {name}("), format!("fn {name}(")].iter().find_map(|s| text.find(s.as_str()))?;
+        let start = [format!("pub fn {name}("), format!("fn {name}(")]
+            .iter()
+            .find_map(|s| text.find(s.as_str()))?;
         let open = start + text[start..].find('{')?;
         let mut depth = 0;
         for (i, c) in text[open..].char_indices() {
@@ -512,7 +617,9 @@ mod tests {
         let code = text.split("#[cfg(test)]").next().unwrap_or(text);
         code.match_indices("fn ")
             .filter_map(|(i, _)| {
-                let name = code[i + 3..].split(|c: char| !(c.is_alphanumeric() || c == '_')).next()?;
+                let name = code[i + 3..]
+                    .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .next()?;
                 Some((name, function_body(code, name)?))
             })
             .collect()
@@ -520,12 +627,16 @@ mod tests {
 
     #[test]
     fn the_source_reader_finds_bodies_and_misses_absent_ones() {
-        let text = "fn a(x: u8) { if x { b(); } }\nfn b() { frontier::x(); }\n#[cfg(test)]\nfn c() {}";
+        let text =
+            "fn a(x: u8) { if x { b(); } }\nfn b() { frontier::x(); }\n#[cfg(test)]\nfn c() {}";
         assert_eq!(function_body(text, "a"), Some("{ if x { b(); } }"));
         assert_eq!(function_body(text, "nope"), None);
         let names: Vec<&str> = helpers(text).into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, vec!["a", "b"]);
         assert!(uses_frontier(text, "a"), "a reaches the frontier through b");
-        assert!(!uses_frontier("fn a() { b(); }\nfn b() { a(); }", "a"), "a cycle of calls ended the search wrongly");
+        assert!(
+            !uses_frontier("fn a() { b(); }\nfn b() { a(); }", "a"),
+            "a cycle of calls ended the search wrongly"
+        );
     }
 }
