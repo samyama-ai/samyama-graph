@@ -17,21 +17,32 @@ use samyama_graph_algorithms::frontier::{BUILT_ON_FRONTIER, FRONTIER_TARGET};
 
 /// Every catalogued `CALL` name the list says reaches the framework.
 fn listed_procedures() -> BTreeSet<&'static str> {
-    BUILT_ON_FRONTIER.iter().flat_map(|(_, _, calls)| calls.iter().copied()).collect()
+    BUILT_ON_FRONTIER
+        .iter()
+        .flat_map(|(_, _, calls)| calls.iter().copied())
+        .collect()
 }
 
 #[test]
 fn every_listed_call_name_is_a_catalogued_algorithm() {
-    let catalogued: BTreeSet<&str> =
-        ALGORITHM_CATALOG.iter().flat_map(|e| std::iter::once(e.name).chain(e.aliases.iter().copied())).collect();
-    let missing: Vec<&str> = listed_procedures().into_iter().filter(|p| !catalogued.contains(p)).collect();
+    let catalogued: BTreeSet<&str> = ALGORITHM_CATALOG
+        .iter()
+        .flat_map(|e| std::iter::once(e.name).chain(e.aliases.iter().copied()))
+        .collect();
+    let missing: Vec<&str> = listed_procedures()
+        .into_iter()
+        .filter(|p| !catalogued.contains(p))
+        .collect();
     assert!(missing.is_empty(), "listed but not callable: {missing:?}");
 }
 
 #[test]
 fn at_least_the_target_number_of_callable_algorithms_use_the_framework() {
     let n = listed_procedures().len();
-    assert!(n >= FRONTIER_TARGET, "{n} callable algorithms on the frontier, target {FRONTIER_TARGET}");
+    assert!(
+        n >= FRONTIER_TARGET,
+        "{n} callable algorithms on the frontier, target {FRONTIER_TARGET}"
+    );
 }
 
 /// A 4-cycle with a two-way tail, so every algorithm below has an answer:

@@ -54,7 +54,11 @@ fn random_edges(n: usize, m: usize, seed: u64) -> Vec<(usize, usize)> {
 fn graphs() -> Vec<(&'static str, GraphView)> {
     // Two components joined by nothing, plus an isolated node (index 24).
     let mut split = random_edges(12, 30, 7);
-    split.extend(random_edges(12, 30, 9).into_iter().map(|(a, b)| (a + 12, b + 12)));
+    split.extend(
+        random_edges(12, 30, 9)
+            .into_iter()
+            .map(|(a, b)| (a + 12, b + 12)),
+    );
     // A 4x4 grid: bipartite. The same grid with one diagonal: not.
     let mut grid = Vec::new();
     for r in 0..4 {
@@ -71,7 +75,18 @@ fn graphs() -> Vec<(&'static str, GraphView)> {
     let mut odd = grid.clone();
     odd.push((0, 5));
     // A DAG with several equally short routes.
-    let dag = vec![(0, 1), (0, 2), (1, 3), (2, 3), (3, 4), (3, 5), (4, 6), (5, 6), (1, 5), (0, 6)];
+    let dag = vec![
+        (0, 1),
+        (0, 2),
+        (1, 3),
+        (2, 3),
+        (3, 4),
+        (3, 5),
+        (4, 6),
+        (5, 6),
+        (1, 5),
+        (0, 6),
+    ];
     vec![
         ("random", view(30, &random_edges(30, 90, 3))),
         ("dense", view(15, &random_edges(15, 120, 5))),
@@ -85,36 +100,66 @@ fn graphs() -> Vec<(&'static str, GraphView)> {
 }
 
 fn fnv(text: &str) -> u64 {
-    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+    text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// Every answer of every algorithm on every graph, as one text per algorithm.
 fn answers() -> Vec<(&'static str, String)> {
     let mut out: Vec<(&'static str, String)> = Vec::new();
-    let mut add = |name: &'static str, text: String| match out.iter_mut().find(|(n, _)| *n == name) {
+    let mut add = |name: &'static str, text: String| match out.iter_mut().find(|(n, _)| *n == name)
+    {
         Some((_, all)) => all.push_str(&text),
         None => out.push((name, text)),
     };
     for (g, v) in graphs() {
         let n = v.node_count;
         for b in [true, false] {
-            add("closeness", format!("{g}{b}{:?}", closeness_centrality(&v, b)));
-            add("harmonic", format!("{g}{b}{:?}", harmonic_centrality(&v, b)));
-            add("betweenness", format!("{g}{b}{:?}", betweenness_centrality(&v, b)));
+            add(
+                "closeness",
+                format!("{g}{b}{:?}", closeness_centrality(&v, b)),
+            );
+            add(
+                "harmonic",
+                format!("{g}{b}{:?}", harmonic_centrality(&v, b)),
+            );
+            add(
+                "betweenness",
+                format!("{g}{b}{:?}", betweenness_centrality(&v, b)),
+            );
             add("eccentricity", format!("{g}{b}{:?}", eccentricity(&v, b)));
             add("diameter", format!("{g}{b}{:?}", diameter(&v, b)));
             add("radius", format!("{g}{b}{:?}", radius(&v, b)));
-            add("average_neighbour_degree", format!("{g}{b}{:?}", average_neighbour_degree(&v, b)));
-            add("degree_assortativity", format!("{g}{b}{:?}", degree_assortativity(&v, b)));
-            add("global_efficiency", format!("{g}{b}{:?}", global_efficiency(&v, b)));
-            add("bipartite_sets", format!("{g}{b}{:?}", bipartite_sets(&v, b)));
-            add("maximal_matching", format!("{g}{b}{:?}", maximal_matching(&v, b)));
+            add(
+                "average_neighbour_degree",
+                format!("{g}{b}{:?}", average_neighbour_degree(&v, b)),
+            );
+            add(
+                "degree_assortativity",
+                format!("{g}{b}{:?}", degree_assortativity(&v, b)),
+            );
+            add(
+                "global_efficiency",
+                format!("{g}{b}{:?}", global_efficiency(&v, b)),
+            );
+            add(
+                "bipartite_sets",
+                format!("{g}{b}{:?}", bipartite_sets(&v, b)),
+            );
+            add(
+                "maximal_matching",
+                format!("{g}{b}{:?}", maximal_matching(&v, b)),
+            );
         }
         let mut hops: Vec<_> = all_pairs_hops(&v).into_iter().collect();
         hops.sort_unstable();
         add("all_pairs_hops", format!("{g}{hops:?}"));
         add("wiener_index", format!("{g}{:?}", wiener_index(&v)));
-        add("transitive_closure", format!("{g}{:?}", transitive_closure(&v)));
+        add(
+            "transitive_closure",
+            format!("{g}{:?}", transitive_closure(&v)),
+        );
         for s in 0..n {
             for t in 0..n {
                 let path = bfs(&v, s as NodeId, t as NodeId).map(|p| (p.path, p.cost));
@@ -124,15 +169,30 @@ fn answers() -> Vec<(&'static str, String)> {
                     .map(|p| (p.path, p.cost))
                     .collect();
                 add("bfs_all_shortest_paths", format!("{g}{s}{t}{all:?}"));
-                add("all_shortest_paths", format!("{g}{s}{t}{:?}", all_shortest_paths(&v, s, t, 5)));
+                add(
+                    "all_shortest_paths",
+                    format!("{g}{s}{t}{:?}", all_shortest_paths(&v, s, t, 5)),
+                );
             }
         }
         // Ids that are not in the view.
         add("bfs", format!("{g}{:?}", bfs(&v, 999, 0).map(|p| p.path)));
-        add("bfs_all_shortest_paths", format!("{g}{:?}", bfs_all_shortest_paths(&v, 0, 999).len()));
-        add("all_shortest_paths", format!("{g}{:?}", all_shortest_paths(&v, 0, 999, 5)));
+        add(
+            "bfs_all_shortest_paths",
+            format!("{g}{:?}", bfs_all_shortest_paths(&v, 0, 999).len()),
+        );
+        add(
+            "all_shortest_paths",
+            format!("{g}{:?}", all_shortest_paths(&v, 0, 999, 5)),
+        );
         for k in [2, 3] {
-            add("negative_samples_khop", format!("{g}{k}{:?}", negative_samples(&v, NegativeStrategy::KHop(k), 40, 11)));
+            add(
+                "negative_samples_khop",
+                format!(
+                    "{g}{k}{:?}",
+                    negative_samples(&v, NegativeStrategy::KHop(k), 40, 11)
+                ),
+            );
         }
     }
     out
@@ -162,13 +222,24 @@ const BEFORE: &[(&str, u64)] = &[
 
 #[test]
 fn ported_algorithms_answer_bit_for_bit_as_before() {
-    let now: Vec<(&str, u64)> = answers().iter().map(|(name, text)| (*name, fnv(text))).collect();
-    assert_eq!(now.len(), BEFORE.len(), "the list of fingerprinted algorithms changed");
+    let now: Vec<(&str, u64)> = answers()
+        .iter()
+        .map(|(name, text)| (*name, fnv(text)))
+        .collect();
+    assert_eq!(
+        now.len(),
+        BEFORE.len(),
+        "the list of fingerprinted algorithms changed"
+    );
     let changed: Vec<String> = now
         .iter()
         .zip(BEFORE)
         .filter(|((a_name, a), (b_name, b))| a_name != b_name || a != b)
         .map(|((name, a), (_, b))| format!("{name}: 0x{b:016x} before, 0x{a:016x} now"))
         .collect();
-    assert!(changed.is_empty(), "answers changed:\n{}", changed.join("\n"));
+    assert!(
+        changed.is_empty(),
+        "answers changed:\n{}",
+        changed.join("\n")
+    );
 }
