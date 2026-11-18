@@ -212,10 +212,12 @@ jobs:
         with:
           ref: v${{ needs.tag.outputs.version }}
 
-      - uses: dtolnay/rust-toolchain@stable
-
+      # On AlmaLinux 9 in a container, so the binary runs on glibc 2.34 and newer
+      # (#2203). Built on the runner itself it needed glibc 2.39, and the
+      # tarball and packages ran on Ubuntu 24.04 and on nothing older. The
+      # script fails if the binary needs a newer glibc than that.
       - name: Build
-        run: cargo build --release --bin samyama
+        run: ops/packaging/build-portable.sh
 
       # The binary has to start on the architecture it was built for, or the
       # asset is a file rather than a release. This is the check #1327 asks for
@@ -251,10 +253,40 @@ jobs:
           tar -czf "$NAME.tar.gz" "$NAME"
           sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
 
+      # .deb and .rpm of the binary the step above started (#2203), each
+      # installed and run as a service in a fresh container before it is
+      # attached: Debian and Ubuntu for the .deb, AlmaLinux for the .rpm.
+      - name: Build the .deb and .rpm
+        env:
+          VERSION: ${{ needs.tag.outputs.version }}
+          NFPM_VERSION: v2.41.1
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            x86_64-*) ARCH=amd64 ;;
+            aarch64-*) ARCH=arm64 ;;
+          esac
+          go install "github.com/goreleaser/nfpm/v2/cmd/nfpm@${NFPM_VERSION}"
+          mkdir -p dist
+          for format in deb rpm; do
+            VERSION="$VERSION" ARCH="$ARCH" \
+              "$(go env GOPATH)/bin/nfpm" package -f ops/nfpm.yaml -p "$format" -t dist/
+          done
+          (cd dist && for f in *; do sha256sum "$f" > "$f.sha256"; done)
+          ls -l dist
+
+      - name: The packages install and run as a service
+        run: |
+          set -euo pipefail
+          for image in debian:12 ubuntu:24.04; do
+            ops/packaging/smoke-in-container.sh "$image" dist/*.deb
+          done
+          ops/packaging/smoke-in-container.sh almalinux:9 dist/*.rpm
+
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.tag.outputs.version }}
         run: |
           NAME="samyama-v${VERSION}-${{ matrix.target }}"
-          gh release upload "v$VERSION" "$NAME.tar.gz" "$NAME.tar.gz.sha256" --clobber
+          gh release upload "v$VERSION" "$NAME.tar.gz" "$NAME.tar.gz.sha256" dist/* --clobber
