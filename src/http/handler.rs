@@ -118,7 +118,13 @@ pub(crate) fn reject_foreign_graph(graph: &str) -> Option<axum::response::Respon
 }
 
 /// Request for exporting a query result as Arrow or Parquet (#1097).
+///
+/// `deny_unknown_fields` because a field this struct did not declare was
+/// dropped with HTTP 200: `seed` was, and the bytes came back identical to the
+/// call without it, so a caller believed a sample was seeded when it was not
+/// (ML-08, #1747).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportRequest {
     pub query: String,
     #[serde(default = "default_graph")]
@@ -127,6 +133,48 @@ pub struct ExportRequest {
     /// one that needs no intermediate file at either end.
     #[serde(default = "default_export_format")]
     pub format: String,
+    /// Seeds `rand()` and `randomUUID()` for this statement, so the same query
+    /// over the same graph with the same seed returns the same bytes.
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// The graph this export must run against, as an earlier export's
+    /// manifest reported it. When the graph's content hash differs, the export
+    /// is refused with 409 instead of quietly building a different dataset.
+    #[serde(default)]
+    pub snapshot_hash: Option<String>,
+}
+
+/// The manifest an export carries (ML-08, #1747): what the bytes are, and
+/// everything needed to rebuild them -- `(snapshot_hash, query, seed)` plus
+/// the format and the engine whose random stream the seed drove.
+#[derive(Serialize)]
+pub struct DatasetManifest {
+    pub snapshot_hash: String,
+    pub query: String,
+    pub seed: Option<u64>,
+    pub format: String,
+    pub graph: String,
+    pub engine_version: String,
+    pub rows: usize,
+    pub content_hash: String,
+}
+
+/// JSON with every non-ASCII character escaped, so it can travel as an HTTP
+/// header value: a query can hold any text, and a header holds ASCII.
+fn ascii_json(value: &impl Serialize) -> String {
+    let json = serde_json::to_string(value).unwrap_or_default();
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut units = [0u16; 2];
+            for u in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{:04x}", u));
+            }
+        }
+    }
+    out
 }
 
 fn default_export_format() -> String {
@@ -146,8 +194,20 @@ fn default_export_format() -> String {
 pub async fn export_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
-    Json(payload): Json<ExportRequest>,
+    body: Result<Json<ExportRequest>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
+    // 400 naming the field, rather than axum's bare 422: an unknown field is
+    // now refused, and the caller who typed `sed` needs to be told which one.
+    let payload = match body {
+        Ok(Json(p)) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid export request: {}", e.body_text()) })),
+            )
+                .into_response()
+        }
+    };
     // Export runs its statement, writes included, so it is checked the same
     // way as `/api/query`.
     if let Some(Extension(Subject(user))) = &subject {
@@ -186,15 +246,38 @@ pub async fn export_handler(
     // Nodes are resolved to the store's merged view *inside* the read guard, so
     // export renders their real properties without holding the lock through
     // Parquet encoding (#545).
-    let batch = {
+    //
+    // The content hash is taken under the same guard as the query, so it names
+    // the graph the rows were read from and not one a write produced between.
+    let (batch, snapshot_hash) = {
         let store_guard = state.store.read().await;
-        state
+        let snapshot_hash = crate::snapshot::content_hash::cached_content_hash(&store_guard);
+        if let Some(pinned) = &payload.snapshot_hash {
+            if *pinned != snapshot_hash {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": format!(
+                            "the graph is not the one this export was pinned to: its content \
+                             hash is {snapshot_hash}, not {pinned}. Load that snapshot to \
+                             rebuild the dataset, or drop `snapshot_hash` to export from the \
+                             graph as it is now."
+                        ),
+                        "snapshot_hash": snapshot_hash,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        let _seeded = payload.seed.map(crate::query::executor::operator::statement_rng::seed);
+        let batch = state
             .engine
             .execute(&payload.query, &*store_guard)
             .map(|mut b| {
                 crate::export::resolve_nodes(&mut b, &*store_guard);
                 b
-            })
+            });
+        (batch, snapshot_hash)
     };
     let batch = match batch {
         Ok(b) => b,
@@ -251,6 +334,32 @@ pub async fn export_handler(
             );
             if let Ok(v) = format!("attachment; filename=\"{filename}\"").parse() {
                 headers.insert(axum::http::header::CONTENT_DISPOSITION, v);
+            }
+            // The dataset manifest (ML-08, #1747), in headers for the same
+            // reason as the CSV report: the body is the file. The three
+            // headers anyone needs most are also given on their own.
+            let manifest = DatasetManifest {
+                snapshot_hash: snapshot_hash.clone(),
+                query: payload.query.clone(),
+                seed: payload.seed,
+                format: format.clone(),
+                graph: payload.graph.clone(),
+                engine_version: crate::VERSION.to_string(),
+                rows: batch.records.len(),
+                content_hash: crate::snapshot::content_hash::bytes_hash(&bytes),
+            };
+            for (name, value) in [
+                ("x-samyama-dataset-manifest", ascii_json(&manifest)),
+                ("x-samyama-snapshot-hash", manifest.snapshot_hash.clone()),
+                ("x-samyama-content-hash", manifest.content_hash.clone()),
+                (
+                    "x-samyama-seed",
+                    manifest.seed.map(|s| s.to_string()).unwrap_or_else(|| "none".to_string()),
+                ),
+            ] {
+                if let Ok(v) = value.parse() {
+                    headers.insert(axum::http::HeaderName::from_static(name), v);
+                }
             }
             if let Some(r) = &csv_report {
                 // Header values are ASCII-only; the report is counts and field
