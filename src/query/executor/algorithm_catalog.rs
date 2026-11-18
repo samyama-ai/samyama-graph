@@ -259,6 +259,9 @@ const fn aka(p: Param, also: &'static str) -> Param {
 const LABEL: Param = opt("label", T::String);
 const EDGE_TYPE: Param = opt("edgeType", T::String);
 const UNDIRECTED: Param = key("undirected", T::Boolean, D::Boolean(true));
+/// Keep the result with the graph and update it from what was added since the
+/// last call (ALGO-14); see `crate::algo::incremental`.
+const INCREMENTAL: Param = key("incremental", T::Boolean, D::Boolean(false));
 const SOURCE: Param = pos("source", T::NodeId, true);
 const TARGET: Param = pos("target", T::NodeId, true);
 /// `label` and `edgeType` from the config map, for every algorithm that builds
@@ -288,6 +291,7 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         pos("edgeType", T::String, false),
         key("damping", T::Float, D::Float(0.85)),
         key("iterations", T::Integer, D::Integer(20)),
+        INCREMENTAL,
     ]),
     ("algo.articleRank", &[LABEL, EDGE_TYPE, key("dampingFactor", T::Float, D::Float(0.85)), key("iterations", T::Integer, D::Integer(20))]),
     ("algo.personalizedPageRank", &[
@@ -307,13 +311,13 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
     ]),
     ("algo.hits", &[LABEL, EDGE_TYPE, key("iterations", T::Integer, D::Integer(500)), key("tolerance", T::Float, D::Float(1e-8))]),
     ("algo.voteRank", &[pos("k", T::Integer, false), LABEL, EDGE_TYPE, key("k", T::Integer, D::Integer(10))]),
-    ("algo.degree", METRIC),
+    ("algo.degree", &[LABEL, EDGE_TYPE, UNDIRECTED, INCREMENTAL]),
     ("algo.closeness", METRIC),
     ("algo.betweenness", METRIC),
     ("algo.harmonic", METRIC),
     ("algo.eigenvector", METRIC),
     ("algo.kCore", METRIC),
-    ("algo.wcc", &[pos("label", T::String, false), pos("edgeType", T::String, false), LABEL, EDGE_TYPE]),
+    ("algo.wcc", &[pos("label", T::String, false), pos("edgeType", T::String, false), LABEL, EDGE_TYPE, INCREMENTAL]),
     ("algo.scc", &[]),
     ("algo.cdlp", &[pos("label", T::String, false), pos("edgeType", T::String, false), key("maxIterations", T::Integer, D::Integer(100))]),
     ("algo.louvain", FILTERS),

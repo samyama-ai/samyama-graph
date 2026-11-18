@@ -18406,6 +18406,70 @@ impl AlgorithmOperator {
     /// `CALL algo.pageRank({graph: 'social'})`.
     pub const GRAPH_KEY: &'static str = "graph";
 
+    /// The config key that keeps an algorithm's state with the graph between
+    /// calls and updates it from what was added (ALGO-14, #1697):
+    /// `CALL algo.pageRank({incremental: true})`. Read by `algo.pageRank`,
+    /// `algo.wcc` and `algo.degree`; see `crate::algo::incremental`.
+    pub const INCREMENTAL_KEY: &'static str = "incremental";
+
+    /// Whether this call asked for `incremental: true`.
+    ///
+    /// The value must be a boolean: `incremental: 'yes'` is refused rather
+    /// than read as false and run from scratch, which would look like it
+    /// worked. A projection is refused alongside it: a projection is fixed
+    /// when it is made, and the incremental state follows the live graph, so
+    /// the two would answer about different graphs.
+    fn incremental_requested(&self) -> ExecutionResult<bool> {
+        let mut on = false;
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                match m.get(Self::INCREMENTAL_KEY) {
+                    None => {}
+                    Some(PropertyValue::Boolean(b)) => on = *b,
+                    Some(other) => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "{}: `{}` must be true or false, got {other:?}",
+                            self.name,
+                            Self::INCREMENTAL_KEY
+                        )))
+                    }
+                }
+            }
+        }
+        if on && Self::config_has_key(&self.args, Self::GRAPH_KEY) {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: `{}` follows the live graph and a graph projection is fixed when it \
+                 is made, so `{}` and `{}` cannot be given together",
+                self.name,
+                Self::INCREMENTAL_KEY,
+                Self::INCREMENTAL_KEY,
+                Self::GRAPH_KEY
+            )));
+        }
+        Ok(on)
+    }
+
+    /// The query error for a failed incremental call, worded as the plain
+    /// call's errors are: a deadline stop is still `Query timed out`.
+    fn incremental_failed(&self, e: crate::algo::incremental::IncrementalError) -> ExecutionError {
+        use crate::algo::incremental::IncrementalError as E;
+        match e {
+            E::ViewStopped(s) => ExecutionError::RuntimeError(format!(
+                "Query timed out: {} stopped building its graph view after {} of {} nodes",
+                self.name, s.done, s.total
+            )),
+            E::RunStopped(s) => ExecutionError::RuntimeError(format!(
+                "Query timed out: {} stopped after {} of {} sweeps",
+                self.name, s.done, s.total
+            )),
+            E::Damping(d) => ExecutionError::bad_argument(format!(
+                "{}: with `{}: true`, damping must be above 0 and below 1, got {d}",
+                self.name,
+                Self::INCREMENTAL_KEY
+            )),
+        }
+    }
+
     /// Algorithms that cannot run on a projection, and why. A projection keeps
     /// topology and one weight; these read more of the graph than that, or no
     /// graph view at all. Matched on the canonical name.
@@ -18793,7 +18857,17 @@ impl AlgorithmOperator {
     }
 
     fn execute_pagerank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "pageRank", &["damping", "iterations"])?;
+        Self::reject_unknown_config_keys(&self.args, "pageRank", &["damping", "incremental", "iterations"])?;
+        let incremental = self.incremental_requested()?;
+        if incremental && Self::config_has_key(&self.args, "iterations") {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: `iterations` has no meaning with `{}: true`, which updates its scores \
+                 until every residual is below {} rather than for a number of iterations",
+                self.name,
+                Self::INCREMENTAL_KEY,
+                crate::algo::RESIDUAL_TOLERANCE
+            )));
+        }
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
         let mut edge_type = None;
@@ -18822,11 +18896,32 @@ impl AlgorithmOperator {
             }
         }
 
+        if incremental {
+            let (scores, _) = crate::algo::incremental::page_rank(
+                store,
+                label.as_deref(),
+                edge_type.as_deref(),
+                config.damping_factor,
+                &DeadlineProgress,
+                &DeadlineProgress,
+            )
+            .map_err(|e| self.incremental_failed(e))?;
+            return self.push_pagerank_rows(store, scores);
+        }
+
         // Build view and run
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         let scores = crate::algo::page_rank_with(&view, config, &DeadlineProgress)
             .map_err(|stopped| algorithm_timed_out("algo.pageRank", stopped))?;
+        self.push_pagerank_rows(store, scores)
+    }
 
+    /// One `(node, score)` row per scored node, highest score first.
+    fn push_pagerank_rows(
+        &mut self,
+        store: &GraphStore,
+        scores: impl IntoIterator<Item = (u64, f64)>,
+    ) -> ExecutionResult<()> {
         // Convert to records. One per node, with a copy of the node, so on a
         // large graph this is not free either: checked like the iterations.
         for (i, (algo_id, score)) in scores.into_iter().enumerate() {
@@ -18912,7 +19007,7 @@ impl AlgorithmOperator {
         // and reported success -- the silent drop `reject_unknown_config_keys`
         // exists to refuse. The filters are read from the map as well as
         // positionally, as the centrality procedures read them.
-        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label"])?;
+        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "incremental", "label"])?;
         // Arguments: (label?, edge_type?) or ({label, edgeType})
         let mut label = None;
         let mut edge_type = None;
@@ -18938,13 +19033,26 @@ impl AlgorithmOperator {
             }
         }
 
+        if self.incremental_requested()? {
+            let (components, _) =
+                crate::algo::incremental::wcc(store, label.as_deref(), edge_type.as_deref(), &DeadlineProgress)
+                    .map_err(|e| self.incremental_failed(e))?;
+            return self.push_component_rows(store, components);
+        }
+
         // Build view and run WCC
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         let result = crate::algo::weakly_connected_components(&view);
+        self.push_component_rows(store, result.node_component)
+    }
 
-        // Convert to records
-        // For WCC, we return (node, componentId)
-        for (node_id, component_id) in result.node_component {
+    /// One `(node, componentId)` row per node, by component then node id.
+    fn push_component_rows(
+        &mut self,
+        store: &GraphStore,
+        components: impl IntoIterator<Item = (u64, usize)>,
+    ) -> ExecutionResult<()> {
+        for (node_id, component_id) in components {
             let nid = NodeId::new(node_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(nid) {
@@ -19236,7 +19344,15 @@ impl AlgorithmOperator {
         store: &GraphStore,
         which: Centrality,
     ) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "undirected"])?;
+        // Only degree has an incremental form: the others' scores depend on
+        // paths through the whole graph, which one new relationship can change
+        // anywhere.
+        let keys: &[&str] = match which {
+            Centrality::Degree => &["edgeType", "incremental", "label", "undirected"],
+            _ => &["edgeType", "label", "undirected"],
+        };
+        Self::reject_unknown_config_keys(&self.args, &self.name, keys)?;
+        let incremental = self.incremental_requested()?;
         let (mut label, mut edge_type, mut undirected) = (None, None, None);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19257,6 +19373,17 @@ impl AlgorithmOperator {
             if let Some(Expression::Literal(PropertyValue::String(s))) = self.args.first() {
                 label = Some(s.clone());
             }
+        }
+        if incremental {
+            // `undirected` is accepted and, as in the plain call, changes
+            // nothing: degree is in plus out either way.
+            let (mut scores, _) =
+                crate::algo::incremental::degree(store, label.as_deref(), edge_type.as_deref(), &DeadlineProgress)
+                    .map_err(|e| self.incremental_failed(e))?;
+            // `ranked`'s order: score descending, then node id.
+            scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+            self.push_centrality_rows(store, scores);
+            return Ok(());
         }
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         // Undirected by default: centrality on a social or dependency graph is
@@ -19288,7 +19415,13 @@ impl AlgorithmOperator {
                 })?
             }
         };
-        for (node_id, score) in crate::algo::ranked(&view, &scores) {
+        self.push_centrality_rows(store, crate::algo::ranked(&view, &scores));
+        Ok(())
+    }
+
+    /// One `(node, score)` row per entry, in the order given.
+    fn push_centrality_rows(&mut self, store: &GraphStore, ranked: Vec<(u64, f64)>) {
+        for (node_id, score) in ranked {
             let mut record = Record::new();
             let nid = NodeId::new(node_id);
             match store.get_node(nid) {
@@ -19298,7 +19431,6 @@ impl AlgorithmOperator {
             record.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
             self.results.push(record);
         }
-        Ok(())
     }
 
     /// `algo.jaccard({limit: 10})` and friends.
