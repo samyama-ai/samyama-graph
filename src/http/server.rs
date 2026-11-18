@@ -737,9 +737,12 @@ impl AppState {
         if let Some(pm) = &self.persistence {
             let mutations = store.take_write_log();
             let _persist =
-                tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64).entered();
+                tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64, entities = tracing::field::Empty).entered();
             match pm.apply_mutations(graph, &store, &mutations) {
-                Ok(n) => tracing::debug!("persisted {n} entities from {} mutations", mutations.len()),
+                Ok(n) => {
+                    _persist.record("entities", n as i64);
+                    tracing::debug!("persisted {n} entities from {} mutations", mutations.len())
+                }
                 Err(e) => {
                     // `mutate` returns the body's own value and has no channel
                     // for an error, so the handler cannot be told here. What it
