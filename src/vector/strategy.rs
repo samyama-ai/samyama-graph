@@ -54,6 +54,72 @@ impl FilterPlan {
         let exact_work = reachable as f64 * (1.0 + f * dimensions as f64);
         Self::priced(n, dimensions, k, ef, m, s, exact_work, Some(candidates))
     }
+    /// [`estimate`](Self::estimate) for an IVF index (#1975), which has no
+    /// graph to widen: a filtered search scans its nearest `nprobe` lists
+    /// with the predicate, and probes more until `k` pass.
+    pub fn estimate_ivf(
+        n: usize,
+        dimensions: usize,
+        k: usize,
+        nlist: usize,
+        nprobe: usize,
+        selectivity: f64,
+    ) -> Self {
+        let s = clamp_selectivity(selectivity);
+        let exact_work = n as f64 * (1.0 + s * dimensions as f64);
+        Self::priced_ivf(n, dimensions, k, nlist, nprobe, s, exact_work, None)
+    }
+    /// [`estimate_enumerated`](Self::estimate_enumerated) for an IVF index.
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate_enumerated_ivf(
+        n: usize,
+        dimensions: usize,
+        k: usize,
+        nlist: usize,
+        nprobe: usize,
+        candidates: usize,
+        filter_selectivity: f64,
+    ) -> Self {
+        let f = clamp_selectivity(filter_selectivity);
+        let reachable = candidates.min(n);
+        let s = if n == 0 { 0.0 } else { reachable as f64 / n as f64 * f };
+        let exact_work = reachable as f64 * (1.0 + f * dimensions as f64);
+        Self::priced_ivf(n, dimensions, k, nlist, nprobe, s, exact_work, Some(candidates))
+    }
+    /// Ranking the centroids, then reading the vectors of the probed lists
+    /// -- `nprobe / nlist` of the index, or as many as it takes for `k` to
+    /// pass -- and scoring the ones that pass.
+    #[allow(clippy::too_many_arguments)]
+    fn priced_ivf(
+        n: usize,
+        dimensions: usize,
+        k: usize,
+        nlist: usize,
+        nprobe: usize,
+        s: f64,
+        exact_work: f64,
+        candidates: Option<usize>,
+    ) -> Self {
+        let nlist = nlist.max(1);
+        let fetch = if s == 0.0 { n as f64 } else { k as f64 / s };
+        let probed = n as f64 * nprobe.min(nlist) as f64 / nlist as f64;
+        let scanned = probed.max(fetch).min(n as f64);
+        let widen_work = (nlist * dimensions) as f64 + scanned * (1.0 + s * dimensions as f64);
+        Self::decide(s, exact_work, widen_work, candidates)
+    }
+    fn decide(s: f64, exact_work: f64, widen_work: f64, candidates: Option<usize>) -> Self {
+        Self {
+            strategy: if exact_work <= widen_work {
+                FilterStrategy::Exact
+            } else {
+                FilterStrategy::Widen
+            },
+            selectivity: s,
+            exact_work,
+            widen_work,
+            candidates,
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     fn priced(
         n: usize,
@@ -73,17 +139,7 @@ impl FilterPlan {
         let width = (ef as f64).max(2.0 * fetch).min(n as f64);
         // Include layer-0 links, plus predicates on returned candidates.
         let widen_work = width * (2 * m) as f64 * dimensions as f64 + fetch;
-        Self {
-            strategy: if exact_work <= widen_work {
-                FilterStrategy::Exact
-            } else {
-                FilterStrategy::Widen
-            },
-            selectivity: s,
-            exact_work,
-            widen_work,
-            candidates,
-        }
+        Self::decide(s, exact_work, widen_work, candidates)
     }
     pub fn describe(&self) -> String {
         let order = match (self.candidates, self.strategy) {

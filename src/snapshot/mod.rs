@@ -1800,8 +1800,8 @@ fn import_tenant_inner(
                              skipped the snapshot's ({})",
                             key.0,
                             key.1,
-                            ours.get(&key).map_or("absent".to_string(), |p| p.to_string()),
-                            theirs.get(&key).map_or("absent".to_string(), |p| p.to_string()),
+                            ours.get(&key).map_or("absent".to_string(), describe_vector_params),
+                            theirs.get(&key).map_or("absent".to_string(), describe_vector_params),
                         );
                         index_conflicts += 1;
                     }
@@ -1910,35 +1910,55 @@ fn sample_value(value: serde_json::Value) -> serde_json::Value {
 fn vector_key(def: &crate::index::catalog::IndexDefinition) -> Option<(String, String)> {
     use crate::index::catalog::IndexDefinition as D;
     match def {
-        D::Vector { label, property, .. } | D::VectorParams { label, property, .. } => {
-            Some((label.clone(), property.clone()))
-        }
+        D::Vector { label, property, .. }
+        | D::VectorParams { label, property, .. }
+        | D::VectorKind { label, property, .. } => Some((label.clone(), property.clone())),
         _ => None,
     }
 }
 
-/// The HNSW parameters each declared vector index is built with. An index
-/// with no `VectorParams` record has the defaults, which is why that record
-/// is not written for them (#1971).
+/// The HNSW parameters and the kind (#1975) each declared vector index is
+/// built with. An index with no `VectorParams` record has the default
+/// parameters, and one with no `VectorKind` record is HNSW, which is why
+/// those records are not written for them (#1971).
 fn effective_vector_params(
     defs: &[crate::index::catalog::IndexDefinition],
-) -> std::collections::HashMap<(String, String), crate::vector::HnswParams> {
+) -> std::collections::HashMap<(String, String), (crate::vector::HnswParams, crate::vector::IndexKind)> {
     use crate::index::catalog::IndexDefinition as D;
-    let mut out = std::collections::HashMap::new();
+    let mut out: std::collections::HashMap<_, (crate::vector::HnswParams, crate::vector::IndexKind)> =
+        std::collections::HashMap::new();
     for def in defs {
         if let D::Vector { label, property, .. } = def {
             out.entry((label.clone(), property.clone()))
-                .or_insert_with(crate::vector::HnswParams::default);
+                .or_insert_with(Default::default);
         }
     }
     for def in defs {
-        if let D::VectorParams { label, property, m, ef_construction, ef } = def {
-            if let Some(p) = out.get_mut(&(label.clone(), property.clone())) {
-                *p = crate::vector::HnswParams { m: *m, ef_construction: *ef_construction, ef: *ef };
+        match def {
+            D::VectorParams { label, property, m, ef_construction, ef } => {
+                if let Some(p) = out.get_mut(&(label.clone(), property.clone())) {
+                    p.0 = crate::vector::HnswParams { m: *m, ef_construction: *ef_construction, ef: *ef };
+                }
             }
+            D::VectorKind { label, property, kind } => {
+                if let Some(p) = out.get_mut(&(label.clone(), property.clone())) {
+                    p.1 = *kind;
+                }
+            }
+            _ => {}
         }
     }
     out
+}
+
+/// How a conflict message names a vector index's build parameters.
+fn describe_vector_params(
+    (params, kind): &(crate::vector::HnswParams, crate::vector::IndexKind),
+) -> String {
+    match kind {
+        crate::vector::IndexKind::Hnsw => params.to_string(),
+        crate::vector::IndexKind::Ivf(p) => format!("kind=ivf, nlist={:?}, nprobe={:?}", p.nlist, p.nprobe),
+    }
 }
 
 /// The target's definition that `incoming` would silently replace, if any.
@@ -1968,6 +1988,11 @@ fn conflicting_definition<'a>(
             (
                 D::VectorParams { label: la, property: pa, .. },
                 D::VectorParams { label: lb, property: pb, .. },
+            ) => la == lb && pa == pb,
+            // Another kind for the same index (#1975).
+            (
+                D::VectorKind { label: la, property: pa, .. },
+                D::VectorKind { label: lb, property: pb, .. },
             ) => la == lb && pa == pb,
             _ => false,
         }

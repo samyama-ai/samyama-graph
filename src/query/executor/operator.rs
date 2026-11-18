@@ -14875,6 +14875,8 @@ pub struct VectorSearchOperator {
     /// index's default.
     ef: Option<usize>,
     plan: Option<crate::vector::strategy::FilterPlan>,
+    /// The index's kind, when the planner knew it, for EXPLAIN (#1975).
+    kind: Option<crate::vector::IndexKind>,
     /// The hierarchy subtree the search is restricted to (#445).
     scope: Option<HierarchyScope>,
     /// Search results
@@ -14904,6 +14906,7 @@ impl VectorSearchOperator {
             filter: None,
             ef: None,
             plan: None,
+            kind: None,
             scope: None,
             results: Vec::new(),
             current: 0,
@@ -14919,6 +14922,12 @@ impl VectorSearchOperator {
     /// Search with this width rather than the index's default (#1971).
     pub fn with_ef(mut self, ef: Option<usize>) -> Self {
         self.ef = ef;
+        self
+    }
+
+    /// The kind of the index searched, so EXPLAIN can name it (#1975).
+    pub fn with_kind(mut self, kind: Option<crate::vector::IndexKind>) -> Self {
+        self.kind = kind;
         self
     }
 
@@ -15067,8 +15076,13 @@ impl PhysicalOperator for VectorSearchOperator {
 
     fn describe(&self) -> OperatorDescription {
         let mut details = format!("{}.{}, k={}", self.label, self.property_key, self.k);
+        if let Some(kind) = self.kind {
+            details.push_str(&format!(", index={}", kind.name()));
+        }
         if let Some(ef) = self.ef {
-            details.push_str(&format!(", ef={ef}"));
+            // An IVF index's search width is its `nprobe` (#1975).
+            let width = if self.kind.is_some_and(|k| k.is_ivf()) { "nprobe" } else { "ef" };
+            details.push_str(&format!(", {width}={ef}"));
         }
         if let Some(f) = &self.filter {
             details.push_str(&format!(", filter: {}", format_expression(f)));
@@ -16029,6 +16043,8 @@ pub struct CreateVectorIndexOperator {
     quantization: crate::vector::index::Quantization,
     /// `m`, `ef_construction` and the default `ef` (#1971).
     params: crate::vector::HnswParams,
+    /// HNSW or IVF (#1975).
+    kind: crate::vector::IndexKind,
     /// The name the DDL gave this index, kept so Neo4j's form of
     /// `db.index.vector.queryNodes(indexName, k, vector)` can resolve it (#1041).
     name: Option<String>,
@@ -16044,6 +16060,7 @@ impl CreateVectorIndexOperator {
             similarity,
             quantization: crate::vector::index::Quantization::None,
             params: crate::vector::HnswParams::default(),
+            kind: crate::vector::IndexKind::Hnsw,
             name: None,
             executed: false,
         }
@@ -16061,6 +16078,11 @@ impl CreateVectorIndexOperator {
 
     pub fn with_params(mut self, params: crate::vector::HnswParams) -> Self {
         self.params = params;
+        self
+    }
+
+    pub fn with_kind(mut self, kind: crate::vector::IndexKind) -> Self {
+        self.kind = kind;
         self
     }
 }
@@ -16084,9 +16106,9 @@ impl PhysicalOperator for CreateVectorIndexOperator {
             _ => return Err(ExecutionError::RuntimeError(format!("Unsupported similarity metric: {}", self.similarity))),
         };
 
-        store.create_vector_index_with_params(self.name.as_deref(), self.label.as_str(),
-                                              &self.property_key, self.dimensions, metric,
-                                              self.quantization, self.params)
+        store.create_vector_index_with_kind(self.name.as_deref(), self.label.as_str(),
+                                            &self.property_key, self.dimensions, metric,
+                                            self.quantization, self.params, self.kind)
             .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
         // Backfill nodes that already carry the embedding. Registering the index without
@@ -16115,11 +16137,19 @@ impl PhysicalOperator for CreateVectorIndexOperator {
             Some(name) => format!("{} ON {}", name, target),
             None => target,
         };
+        // HNSW prints its parameters as before #1975; IVF names its kind.
+        let params = match self.kind {
+            crate::vector::IndexKind::Hnsw => self.params.to_string(),
+            crate::vector::IndexKind::Ivf(p) => {
+                let show = |v: Option<usize>| v.map_or_else(|| "auto".to_string(), |v| v.to_string());
+                format!("kind=ivf, nlist={}, nprobe={}", show(p.nlist), show(p.nprobe))
+            }
+        };
         OperatorDescription {
             name: "CreateVectorIndex".to_string(),
             details: format!(
                 "{} dims={} {} quantization={:?} {}",
-                named, self.dimensions, self.similarity, self.quantization, self.params
+                named, self.dimensions, self.similarity, self.quantization, params
             ),
             children: Vec::new(),
         }
@@ -16587,7 +16617,11 @@ impl PhysicalOperator for ShowIndexesOperator {
                         // other kinds use for their name.
                         let index = store.vector_index.get_index(&k.label, &k.property_key);
                         let index = index.as_ref().map(|i| i.read().unwrap());
-                        let params = index.as_ref().map(|i| i.params()).unwrap_or_default();
+                        // An IVF index names its kind instead (#1975).
+                        let params = index
+                            .as_ref()
+                            .map(|i| i.describe())
+                            .unwrap_or_else(|| crate::vector::HnswParams::default().to_string());
                         // Deleted and replaced vectors stay in the graph until
                         // a fifth of it is dead and it is rebuilt (#1968), and a
                         // search walks through them. How many there are is what
