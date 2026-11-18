@@ -8,6 +8,7 @@ mod gpu_parity_coverage;
 #[cfg(all(test, feature = "gpu"))]
 mod gpu_parity_tests;
 pub mod pagerank;
+pub mod frontier;
 pub mod progress;
 pub mod community;
 pub mod pathfinding;
