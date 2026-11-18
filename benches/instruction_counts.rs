@@ -13,10 +13,9 @@
 //! after the count stops. Every input is deterministic: a random graph or vector set would move
 //! the count between runs, which is exactly what a gate must not do.
 //!
-//! Not measured here: the HNSW search. hnsw_rs draws each node's layer from an
-//! unseeded RNG, so the graph -- and the instructions a search takes -- differ
-//! on every build of the index. The distance kernels it spends its time in are
-//! measured instead.
+//! The HNSW search is measured on an index built from fixed vectors: hnsw_rs
+//! 0.3.5 seeds its layer generator with a constant (#2146), so the same input
+//! builds the same graph and a search takes the same path every run.
 
 #[cfg(target_os = "linux")]
 use std::hint::black_box;
@@ -34,7 +33,9 @@ use samyama::query::ast::Query;
 #[cfg(target_os = "linux")]
 use samyama::query::parser::parse_query;
 #[cfg(target_os = "linux")]
-use samyama::vector::distance;
+use samyama::vector::{distance, DistanceMetric};
+#[cfg(target_os = "linux")]
+use samyama::graph::{Label, PropertyValue};
 
 #[cfg(target_os = "linux")]
 const QUERY: &str = "MATCH (a:Person {name: $name})-[:KNOWS]->(b:Person) \
@@ -103,6 +104,26 @@ fn vectors_setup() -> Pairs {
     (0..256).map(|_| ((0..128).map(|_| next()).collect(), (0..128).map(|_| next()).collect())).collect()
 }
 
+/// 2,000 `:Item` nodes with 128-dimensional embeddings from the same fixed
+/// sequence as `vectors_setup`, in a cosine HNSW index, and one query vector.
+#[cfg(target_os = "linux")]
+fn hnsw_setup() -> (GraphStore, Vec<f32>) {
+    let mut g = GraphStore::new();
+    g.create_vector_index("Item", "embedding", 128, DistanceMetric::Cosine).unwrap();
+    let mut vs = vectors_setup().into_iter().flat_map(|(a, b)| [a, b]).cycle();
+    for i in 0..2000 {
+        let mut v = vs.next().unwrap();
+        v[i % 128] += 1.0; // distinct, still deterministic
+        let props = std::collections::HashMap::from([
+            ("id".to_string(), PropertyValue::Integer(i as i64)),
+            ("embedding".to_string(), PropertyValue::Vector(v)),
+        ]);
+        g.create_node_with_properties("default", vec![Label::new("Item")], props);
+    }
+    let q = vs.next().unwrap();
+    (g, q)
+}
+
 #[cfg(target_os = "linux")]
 fn snapshot_setup() -> (GraphStore, Vec<u8>) {
     let g = graph();
@@ -155,6 +176,14 @@ fn vector_distance(pairs: Pairs) -> (f32, Pairs) {
 
 #[cfg(target_os = "linux")]
 #[library_benchmark]
+#[bench::top10_of_2000(setup = hnsw_setup)]
+fn hnsw_search(input: (GraphStore, Vec<f32>)) -> (usize, (GraphStore, Vec<f32>)) {
+    let hits = input.0.vector_search("Item", "embedding", black_box(&input.1), 10).unwrap();
+    (black_box(hits.len()), input)
+}
+
+#[cfg(target_os = "linux")]
+#[library_benchmark]
 #[bench::export_2000(setup = snapshot_setup)]
 fn snapshot_export(input: (GraphStore, Vec<u8>)) -> (Vec<u8>, (GraphStore, Vec<u8>)) {
     let mut buf = Vec::new();
@@ -174,7 +203,7 @@ fn snapshot_import(input: (GraphStore, Vec<u8>)) -> (GraphStore, (GraphStore, Ve
 #[cfg(target_os = "linux")]
 library_benchmark_group!(
     name = hot_loops;
-    benchmarks = parse, expand, oeh_probe, vector_distance, snapshot_export, snapshot_import
+    benchmarks = parse, expand, oeh_probe, vector_distance, hnsw_search, snapshot_export, snapshot_import
 );
 
 #[cfg(target_os = "linux")]
