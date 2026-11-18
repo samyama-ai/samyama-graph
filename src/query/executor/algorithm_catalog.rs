@@ -432,6 +432,26 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         LABEL,
         EDGE_TYPE,
     ]),
+    // Leakage-safe splits (ML-05, #1730). `property` is required by the
+    // `time` and `source` strategies and refused by the others; `edgeType` is
+    // required by `entity`.
+    ("algo.split", &[
+        Param { name: "strategy", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        key("ratios", T::List, D::FloatList(&[0.8, 0.1, 0.1])),
+        key("seed", T::Integer, D::Integer(42)),
+        opt("property", T::String),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    // `hops` is read by the `entity` strategy only.
+    ("algo.splitLeakage", &[
+        Param { name: "strategy", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        key("splitProperty", T::String, D::String("split")),
+        key("hops", T::Integer, D::Integer(3)),
+        opt("property", T::String),
+        LABEL,
+        EDGE_TYPE,
+    ]),
 ];
 
 impl AlgorithmEntry {
