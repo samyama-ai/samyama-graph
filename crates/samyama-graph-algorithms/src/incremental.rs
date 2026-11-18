@@ -65,7 +65,10 @@ struct NodeIndex {
 
 impl NodeIndex {
     fn from_view(view: &GraphView) -> Self {
-        Self { ids: view.index_to_node.clone(), index: view.node_to_index.clone() }
+        Self {
+            ids: view.index_to_node.clone(),
+            index: view.node_to_index.clone(),
+        }
     }
 
     fn len(&self) -> usize {
@@ -105,8 +108,13 @@ pub struct IncrementalDegree {
 
 impl IncrementalDegree {
     pub fn from_view(view: &GraphView) -> Self {
-        let degree = (0..view.node_count).map(|i| view.out_degree(i) + view.in_degree(i)).collect();
-        Self { nodes: NodeIndex::from_view(view), degree }
+        let degree = (0..view.node_count)
+            .map(|i| view.out_degree(i) + view.in_degree(i))
+            .collect();
+        Self {
+            nodes: NodeIndex::from_view(view),
+            degree,
+        }
     }
 
     pub fn node_count(&self) -> usize {
@@ -140,7 +148,12 @@ impl IncrementalDegree {
             return self.nodes.ids.iter().map(|&id| (id, 0.0)).collect();
         }
         let denom = (n - 1) as f64;
-        self.nodes.ids.iter().zip(&self.degree).map(|(&id, &d)| (id, d as f64 / denom)).collect()
+        self.nodes
+            .ids
+            .iter()
+            .zip(&self.degree)
+            .map(|(&id, &d)| (id, d as f64 / denom))
+            .collect()
     }
 }
 
@@ -154,7 +167,9 @@ pub struct IncrementalWcc {
 
 impl std::fmt::Debug for IncrementalWcc {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IncrementalWcc").field("nodes", &self.nodes.len()).finish_non_exhaustive()
+        f.debug_struct("IncrementalWcc")
+            .field("nodes", &self.nodes.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -168,7 +183,10 @@ impl IncrementalWcc {
                 sets.union(u, v);
             }
         }
-        Self { nodes: NodeIndex::from_view(view), sets }
+        Self {
+            nodes: NodeIndex::from_view(view),
+            sets,
+        }
     }
 
     pub fn node_count(&self) -> usize {
@@ -196,7 +214,9 @@ impl IncrementalWcc {
 
     /// Every node and its component id, in index order.
     pub fn components(&mut self) -> Vec<(NodeId, usize)> {
-        (0..self.nodes.len()).map(|i| (self.nodes.ids[i], self.sets.find(i))).collect()
+        (0..self.nodes.len())
+            .map(|i| (self.nodes.ids[i], self.sets.find(i)))
+            .collect()
     }
 }
 
@@ -259,7 +279,11 @@ impl IncrementalPageRank {
     /// residual than a queue; then the queue clears what the sweeps leave.
     /// Each sweep shrinks the total residual by at least `damping`, so the
     /// number of sweeps is bounded and reported to `progress` as the total.
-    pub fn from_view(view: &GraphView, damping: f64, progress: &dyn Progress) -> Result<Self, IncrementalPageRankError> {
+    pub fn from_view(
+        view: &GraphView,
+        damping: f64,
+        progress: &dyn Progress,
+    ) -> Result<Self, IncrementalPageRankError> {
         if !(damping > 0.0 && damping < 1.0) {
             return Err(IncrementalPageRankError::Damping(damping));
         }
@@ -276,7 +300,12 @@ impl IncrementalPageRank {
         };
 
         let sweeps = Self::sweeps_needed(n, damping);
-        let stop = |done| IncrementalPageRankError::Stopped(Stopped { done, total: sweeps });
+        let stop = |done| {
+            IncrementalPageRankError::Stopped(Stopped {
+                done,
+                total: sweeps,
+            })
+        };
         if !progress.step(0, sweeps) {
             return Err(stop(0));
         }
@@ -314,7 +343,11 @@ impl IncrementalPageRank {
         let share: Vec<f64> = (0..n)
             .map(|u| {
                 let k = self.successors[u].len();
-                if k == 0 { 0.0 } else { d * self.residual[u] / k as f64 }
+                if k == 0 {
+                    0.0
+                } else {
+                    d * self.residual[u] / k as f64
+                }
             })
             .collect();
         for (x, r) in self.estimate.iter_mut().zip(&self.residual) {
@@ -440,7 +473,12 @@ impl IncrementalPageRank {
         if total <= 0.0 {
             return Vec::new();
         }
-        self.nodes.ids.iter().zip(&self.estimate).map(|(&id, &x)| (id, x / total)).collect()
+        self.nodes
+            .ids
+            .iter()
+            .zip(&self.estimate)
+            .map(|(&id, &x)| (id, x / total))
+            .collect()
     }
 }
 
@@ -455,7 +493,8 @@ mod tests {
     fn view(nodes: &[NodeId], edges: &[(NodeId, NodeId)]) -> GraphView {
         let mut ids = nodes.to_vec();
         ids.sort_unstable();
-        let index: HashMap<NodeId, usize> = ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
+        let index: HashMap<NodeId, usize> =
+            ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         let n = ids.len();
         let mut out = vec![Vec::new(); n];
         let mut inc = vec![Vec::new(); n];
@@ -501,7 +540,14 @@ mod tests {
 
     /// PageRank run long enough to be the fixed point, to compare against.
     fn exact_pagerank(v: &GraphView) -> HashMap<NodeId, f64> {
-        page_rank(v, PageRankConfig { iterations: 1000, tolerance: 0.0, ..PageRankConfig::default() })
+        page_rank(
+            v,
+            PageRankConfig {
+                iterations: 1000,
+                tolerance: 0.0,
+                ..PageRankConfig::default()
+            },
+        )
     }
 
     fn l1(a: &[(NodeId, f64)], b: &HashMap<NodeId, f64>) -> f64 {
@@ -530,8 +576,14 @@ mod tests {
         let bound = stated_bound(&state);
         let got = state.scores();
         let err = l1(&got, &exact_pagerank(&v));
-        assert!(err <= bound, "L1 error {err} above the stated bound {bound}");
-        assert!((got.iter().map(|(_, s)| s).sum::<f64>() - 1.0).abs() < 1e-9, "scores do not sum to 1");
+        assert!(
+            err <= bound,
+            "L1 error {err} above the stated bound {bound}"
+        );
+        assert!(
+            (got.iter().map(|(_, s)| s).sum::<f64>() - 1.0).abs() < 1e-9,
+            "scores do not sum to 1"
+        );
     }
 
     #[test]
@@ -539,13 +591,17 @@ mod tests {
         let n = 400;
         let all = random_edges(n, 2400, 11);
         let (first, later) = all.split_at(2000);
-        let mut state = IncrementalPageRank::from_view(&view(&ids(n), first), 0.85, &NoProgress).unwrap();
+        let mut state =
+            IncrementalPageRank::from_view(&view(&ids(n), first), 0.85, &NoProgress).unwrap();
         for &(s, t) in later {
             assert!(state.add_edge(s, t));
         }
         let bound = stated_bound(&state);
         let err = l1(&state.scores(), &exact_pagerank(&view(&ids(n), &all)));
-        assert!(err <= bound, "L1 error {err} above the stated bound {bound}");
+        assert!(
+            err <= bound,
+            "L1 error {err} above the stated bound {bound}"
+        );
     }
 
     #[test]
@@ -553,7 +609,8 @@ mod tests {
         // 3 is dangling until it gains an edge; 1 -> 1 is a self-loop; 0 -> 2
         // twice is a parallel pair; 9 arrives later, joins, and 10 stays alone.
         let base = [(0, 1), (0, 2), (0, 2), (1, 1), (2, 0)];
-        let mut state = IncrementalPageRank::from_view(&view(&[0, 1, 2, 3], &base), 0.85, &NoProgress).unwrap();
+        let mut state =
+            IncrementalPageRank::from_view(&view(&[0, 1, 2, 3], &base), 0.85, &NoProgress).unwrap();
         assert!(state.add_node(9));
         assert!(!state.add_node(9), "a node was added twice");
         assert!(state.add_node(10));
@@ -563,33 +620,50 @@ mod tests {
         }
         let all: Vec<_> = base.iter().chain(&added).copied().collect();
         let bound = stated_bound(&state);
-        let err = l1(&state.scores(), &exact_pagerank(&view(&[0, 1, 2, 3, 9, 10], &all)));
-        assert!(err <= bound, "L1 error {err} above the stated bound {bound}");
+        let err = l1(
+            &state.scores(),
+            &exact_pagerank(&view(&[0, 1, 2, 3, 9, 10], &all)),
+        );
+        assert!(
+            err <= bound,
+            "L1 error {err} above the stated bound {bound}"
+        );
     }
 
     #[test]
     fn one_new_relationship_costs_under_a_tenth_of_a_batch_run() {
         let n = 20_000;
-        let mut state =
-            IncrementalPageRank::from_view(&view(&ids(n), &random_edges(n, 100_000, 3)), 0.85, &NoProgress).unwrap();
+        let mut state = IncrementalPageRank::from_view(
+            &view(&ids(n), &random_edges(n, 100_000, 3)),
+            0.85,
+            &NoProgress,
+        )
+        .unwrap();
         state.add_edge(17, 4242);
         let pushes = state.settle();
         // The batch run updates every node once per iteration; ALGO-14's
         // target is an update at a tenth of that or less. Each push is one
         // node update over the same successor list a batch iteration reads.
         let batch_updates = PageRankConfig::default().iterations * n as usize;
-        assert!(pushes * 10 < batch_updates, "{pushes} pushes against {batch_updates} batch node updates");
+        assert!(
+            pushes * 10 < batch_updates,
+            "{pushes} pushes against {batch_updates} batch node updates"
+        );
         assert!(state.max_residual() <= RESIDUAL_TOLERANCE);
         // Tighter, and what `FIRST_BUILD_HEADROOM` is for: this graph and edge
         // take 481 pushes with the headroom and 1,614 without it, when nodes
         // the first build left just under the tolerance tip over. A twentieth
         // of a sweep sits between the two.
-        assert!(pushes < n as usize / 20, "{pushes} pushes: the first build left no headroom");
+        assert!(
+            pushes < n as usize / 20,
+            "{pushes} pushes: the first build left no headroom"
+        );
     }
 
     #[test]
     fn an_edge_to_an_unknown_node_changes_nothing() {
-        let mut state = IncrementalPageRank::from_view(&view(&[0, 1], &[(0, 1)]), 0.85, &NoProgress).unwrap();
+        let mut state =
+            IncrementalPageRank::from_view(&view(&[0, 1], &[(0, 1)]), 0.85, &NoProgress).unwrap();
         let before = state.scores();
         assert!(!state.add_edge(0, 99));
         assert!(!state.add_edge(99, 0));
@@ -601,7 +675,10 @@ mod tests {
         let v = view(&[0, 1], &[(0, 1)]);
         for d in [0.0, 1.0, -0.5, 1.5, f64::NAN] {
             let err = IncrementalPageRank::from_view(&v, d, &NoProgress).unwrap_err();
-            assert!(matches!(err, IncrementalPageRankError::Damping(_)), "{d}: {err:?}");
+            assert!(
+                matches!(err, IncrementalPageRankError::Damping(_)),
+                "{d}: {err:?}"
+            );
             assert!(err.to_string().contains("damping"), "{err}");
         }
     }
@@ -619,7 +696,10 @@ mod tests {
         let stop = StopAt(2, Default::default());
         let err = IncrementalPageRank::from_view(&v, 0.85, &stop).unwrap_err();
         let total = IncrementalPageRank::sweeps_needed(200, 0.85);
-        assert_eq!(err, IncrementalPageRankError::Stopped(Stopped { done: 2, total }));
+        assert_eq!(
+            err,
+            IncrementalPageRankError::Stopped(Stopped { done: 2, total })
+        );
         assert_eq!(*stop.1.borrow(), vec![(0, total), (1, total), (2, total)]);
     }
 
@@ -658,7 +738,14 @@ mod tests {
         let n = 600;
         let all = random_edges(n, 500, 17);
         let (first, later) = all.split_at(350);
-        let mut state = IncrementalWcc::from_view(&view(&ids(n - 50), &first.iter().copied().filter(|&(s, t)| s < n - 50 && t < n - 50).collect::<Vec<_>>()));
+        let mut state = IncrementalWcc::from_view(&view(
+            &ids(n - 50),
+            &first
+                .iter()
+                .copied()
+                .filter(|&(s, t)| s < n - 50 && t < n - 50)
+                .collect::<Vec<_>>(),
+        ));
         for id in n - 50..n {
             assert!(state.add_node(id));
         }
@@ -695,10 +782,21 @@ mod tests {
         let n = 300;
         let all = random_edges(n, 900, 23);
         let (first, later) = all.split_at(600);
-        let mut state = IncrementalDegree::from_view(&view(&ids(n - 1), &first.iter().copied().filter(|&(s, t)| s < n - 1 && t < n - 1).collect::<Vec<_>>()));
+        let mut state = IncrementalDegree::from_view(&view(
+            &ids(n - 1),
+            &first
+                .iter()
+                .copied()
+                .filter(|&(s, t)| s < n - 1 && t < n - 1)
+                .collect::<Vec<_>>(),
+        ));
         assert!(state.add_node(n - 1));
         assert!(!state.add_node(n - 1), "a node was added twice");
-        for &(s, t) in first.iter().filter(|&&(s, t)| s == n - 1 || t == n - 1).chain(later) {
+        for &(s, t) in first
+            .iter()
+            .filter(|&&(s, t)| s == n - 1 || t == n - 1)
+            .chain(later)
+        {
             assert!(state.add_edge(s, t));
         }
         assert!(!state.add_edge(0, 10_000));

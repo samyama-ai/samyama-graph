@@ -23,19 +23,30 @@ fn pagerank_bound() -> f64 {
 }
 
 fn write(store: &mut GraphStore, q: &str) {
-    QueryEngine::new().execute_mut(q, store, TENANT).unwrap_or_else(|e| panic!("{q}: {e}"));
+    QueryEngine::new()
+        .execute_mut(q, store, TENANT)
+        .unwrap_or_else(|e| panic!("{q}: {e}"));
 }
 
 /// `id -> value` for a `RETURN id(node) AS id, <col> AS v` query.
 fn by_id(store: &GraphStore, q: &str) -> HashMap<i64, f64> {
-    let batch = QueryEngine::new().execute(q, store).unwrap_or_else(|e| panic!("{q}: {e}"));
+    let batch = QueryEngine::new()
+        .execute(q, store)
+        .unwrap_or_else(|e| panic!("{q}: {e}"));
     batch
         .records
         .iter()
         .map(|r| {
-            let id = r.get("id").and_then(|v| v.as_property()).and_then(|p| p.as_integer()).unwrap();
+            let id = r
+                .get("id")
+                .and_then(|v| v.as_property())
+                .and_then(|p| p.as_integer())
+                .unwrap();
             let v = r.get("v").and_then(|v| v.as_property()).unwrap();
-            let v = v.as_float().or_else(|| v.as_integer().map(|i| i as f64)).unwrap();
+            let v = v
+                .as_float()
+                .or_else(|| v.as_integer().map(|i| i as f64))
+                .unwrap();
             (id, v)
         })
         .collect()
@@ -46,15 +57,32 @@ fn call(algorithm: &str, column: &str, config: &str) -> String {
 }
 
 fn degree(store: &GraphStore, incremental: bool) -> HashMap<i64, f64> {
-    by_id(store, &call("algo.degree", "score", &format!("{{incremental: {incremental}}}")))
+    by_id(
+        store,
+        &call(
+            "algo.degree",
+            "score",
+            &format!("{{incremental: {incremental}}}"),
+        ),
+    )
 }
 
 fn components(store: &GraphStore, incremental: bool) -> HashMap<i64, f64> {
-    by_id(store, &call("algo.wcc", "componentId", &format!("{{incremental: {incremental}}}")))
+    by_id(
+        store,
+        &call(
+            "algo.wcc",
+            "componentId",
+            &format!("{{incremental: {incremental}}}"),
+        ),
+    )
 }
 
 fn pagerank_incremental(store: &GraphStore) -> HashMap<i64, f64> {
-    by_id(store, &call("algo.pageRank", "score", "{incremental: true}"))
+    by_id(
+        store,
+        &call("algo.pageRank", "score", "{incremental: true}"),
+    )
 }
 
 /// The plain call, iterated to its fixed point so it is the thing the
@@ -108,16 +136,47 @@ fn created_relationships_are_applied_as_deltas_and_match_a_plain_call() {
     pagerank_incremental(&s);
     components(&s, true);
 
-    write(&mut s, "MATCH (a:P), (b:P) WHERE id(a) = 3 AND id(b) = 25 CREATE (a)-[:L]->(b)");
-    write(&mut s, "MATCH (a:P) WHERE id(a) = 7 CREATE (a)-[:L]->(:P)-[:L]->(a)");
+    write(
+        &mut s,
+        "MATCH (a:P), (b:P) WHERE id(a) = 3 AND id(b) = 25 CREATE (a)-[:L]->(b)",
+    );
+    write(
+        &mut s,
+        "MATCH (a:P) WHERE id(a) = 7 CREATE (a)-[:L]->(:P)-[:L]->(a)",
+    );
 
     assert_eq!(degree(&s, true), degree(&s, false));
-    assert_eq!(last(&s, Algorithm::Degree), Refresh::Updated { nodes: 1, relationships: 3 });
+    assert_eq!(
+        last(&s, Algorithm::Degree),
+        Refresh::Updated {
+            nodes: 1,
+            relationships: 3
+        }
+    );
     let err = l1(&pagerank_incremental(&s), &pagerank_converged(&s));
-    assert!(err <= pagerank_bound(), "PageRank L1 {err} above {}", pagerank_bound());
-    assert_eq!(last(&s, Algorithm::PageRank), Refresh::Updated { nodes: 1, relationships: 3 });
-    assert!(same_partition(&components(&s, true), &components(&s, false)));
-    assert_eq!(last(&s, Algorithm::Wcc), Refresh::Updated { nodes: 1, relationships: 3 });
+    assert!(
+        err <= pagerank_bound(),
+        "PageRank L1 {err} above {}",
+        pagerank_bound()
+    );
+    assert_eq!(
+        last(&s, Algorithm::PageRank),
+        Refresh::Updated {
+            nodes: 1,
+            relationships: 3
+        }
+    );
+    assert!(same_partition(
+        &components(&s, true),
+        &components(&s, false)
+    ));
+    assert_eq!(
+        last(&s, Algorithm::Wcc),
+        Refresh::Updated {
+            nodes: 1,
+            relationships: 3
+        }
+    );
 }
 
 #[test]
@@ -125,13 +184,27 @@ fn separate_components_merge_when_joined() {
     let mut s = GraphStore::new();
     write(&mut s, "CREATE (:P)-[:L]->(:P), (:P)-[:L]->(:P), (:P)");
     let before = components(&s, true);
-    let distinct = |c: &HashMap<i64, f64>| c.values().map(|v| v.to_bits()).collect::<std::collections::HashSet<_>>().len();
+    let distinct = |c: &HashMap<i64, f64>| {
+        c.values()
+            .map(|v| v.to_bits())
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+    };
     assert_eq!(distinct(&before), 3);
-    write(&mut s, "MATCH (a:P), (b:P) WHERE id(a) = 1 AND id(b) = 3 CREATE (a)-[:L]->(b)");
+    write(
+        &mut s,
+        "MATCH (a:P), (b:P) WHERE id(a) = 1 AND id(b) = 3 CREATE (a)-[:L]->(b)",
+    );
     let after = components(&s, true);
     assert_eq!(distinct(&after), 2);
     assert!(same_partition(&after, &components(&s, false)));
-    assert!(matches!(last(&s, Algorithm::Wcc), Refresh::Updated { relationships: 1, .. }));
+    assert!(matches!(
+        last(&s, Algorithm::Wcc),
+        Refresh::Updated {
+            relationships: 1,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -143,12 +216,25 @@ fn deletes_rebuild_and_still_match_a_plain_call() {
 
     write(&mut s, "MATCH (a:P)-[r:L]->(b:P) WHERE id(a) = 4 DELETE r");
     assert_eq!(degree(&s, true), degree(&s, false));
-    assert_eq!(last(&s, Algorithm::Degree), Refresh::Rebuilt { reason: RebuildReason::Rewritten });
+    assert_eq!(
+        last(&s, Algorithm::Degree),
+        Refresh::Rebuilt {
+            reason: RebuildReason::Rewritten
+        }
+    );
 
     write(&mut s, "MATCH (a:P) WHERE id(a) = 12 DETACH DELETE a");
     assert_eq!(degree(&s, true), degree(&s, false));
-    assert!(same_partition(&components(&s, true), &components(&s, false)));
-    assert_eq!(last(&s, Algorithm::Wcc), Refresh::Rebuilt { reason: RebuildReason::Rewritten });
+    assert!(same_partition(
+        &components(&s, true),
+        &components(&s, false)
+    ));
+    assert_eq!(
+        last(&s, Algorithm::Wcc),
+        Refresh::Rebuilt {
+            reason: RebuildReason::Rewritten
+        }
+    );
     // Two cuts in a ring leave dangling ends, which the unfiltered bound does
     // not cover; the batch run is the reference at its fixed point either way.
     let err = l1(&pagerank_incremental(&s), &pagerank_converged(&s));
@@ -158,7 +244,12 @@ fn deletes_rebuild_and_still_match_a_plain_call() {
 #[test]
 fn a_label_filtered_call_follows_labels_set_and_removed() {
     let mut s = ring(12);
-    let q = |s: &GraphStore| by_id(s, &call("algo.degree", "score", "{label: 'Q', incremental: true}"));
+    let q = |s: &GraphStore| {
+        by_id(
+            s,
+            &call("algo.degree", "score", "{label: 'Q', incremental: true}"),
+        )
+    };
     let plain = |s: &GraphStore| by_id(s, &call("algo.degree", "score", "{label: 'Q'}"));
     write(&mut s, "MATCH (n:P) WHERE id(n) < 4 SET n:Q");
     assert_eq!(q(&s), plain(&s));
@@ -168,7 +259,11 @@ fn a_label_filtered_call_follows_labels_set_and_removed() {
     assert_eq!(q(&s), plain(&s));
     write(&mut s, "CREATE (:Q)");
     assert_eq!(q(&s), plain(&s));
-    let labelled = QueryEngine::new().execute("MATCH (n:Q) RETURN n", &s).unwrap().records.len();
+    let labelled = QueryEngine::new()
+        .execute("MATCH (n:Q) RETURN n", &s)
+        .unwrap()
+        .records
+        .len();
     assert_eq!(q(&s).len(), labelled);
 }
 
@@ -177,10 +272,17 @@ fn a_rolled_back_transaction_leaves_the_answer_a_plain_call_gives() {
     let mut s = ring(10);
     degree(&s, true);
     s.begin_session_transaction().unwrap();
-    write(&mut s, "MATCH (a:P), (b:P) WHERE id(a) = 0 AND id(b) = 5 CREATE (a)-[:L]->(b)");
+    write(
+        &mut s,
+        "MATCH (a:P), (b:P) WHERE id(a) = 0 AND id(b) = 5 CREATE (a)-[:L]->(b)",
+    );
     write(&mut s, "MATCH (a:P)-[r:L]->(b:P) WHERE id(a) = 2 DELETE r");
     write(&mut s, "CREATE (:P)");
-    assert_eq!(degree(&s, true), degree(&s, false), "inside the transaction");
+    assert_eq!(
+        degree(&s, true),
+        degree(&s, false),
+        "inside the transaction"
+    );
     s.rollback_session_transaction().unwrap();
     assert_eq!(degree(&s, true), degree(&s, false), "after the rollback");
     assert_eq!(degree(&s, true).len(), 10);
@@ -215,43 +317,87 @@ fn a_random_mix_of_writes_never_leaves_an_incremental_answer_wrong() {
                 pick(next(1000)),
                 pick(next(1000))
             ),
-            5 | 6 => format!("MATCH (a:P) WHERE id(a) = {} CREATE (a)-[:L]->(:P)", pick(next(1000))),
+            5 | 6 => format!(
+                "MATCH (a:P) WHERE id(a) = {} CREATE (a)-[:L]->(:P)",
+                pick(next(1000))
+            ),
             7 => "CREATE (:P)".to_string(),
-            8 => format!("MATCH (a:P)-[r]->() WHERE id(a) = {} DELETE r", pick(next(1000))),
-            _ if ids.len() > 5 => format!("MATCH (a:P) WHERE id(a) = {} DETACH DELETE a", pick(next(1000))),
+            8 => format!(
+                "MATCH (a:P)-[r]->() WHERE id(a) = {} DELETE r",
+                pick(next(1000))
+            ),
+            _ if ids.len() > 5 => format!(
+                "MATCH (a:P) WHERE id(a) = {} DETACH DELETE a",
+                pick(next(1000))
+            ),
             _ => "CREATE (:P)".to_string(),
         };
         write(&mut s, &q);
         assert_eq!(degree(&s, true), degree(&s, false), "step {step}: {q}");
-        assert!(same_partition(&components(&s, true), &components(&s, false)), "step {step}: {q}");
+        assert!(
+            same_partition(&components(&s, true), &components(&s, false)),
+            "step {step}: {q}"
+        );
         for algorithm in [Algorithm::Degree, Algorithm::Wcc] {
             match last(&s, algorithm) {
                 Refresh::Updated { .. } => updates += 1,
-                Refresh::Rebuilt { reason: RebuildReason::Rewritten } => rebuilds += 1,
+                Refresh::Rebuilt {
+                    reason: RebuildReason::Rewritten,
+                } => rebuilds += 1,
                 other => panic!("step {step}: {q}: {algorithm:?} {other:?}"),
             }
         }
     }
     // Both paths were exercised, so the comparison above covered both.
-    assert!(updates > 0 && rebuilds > 0, "updates {updates}, rebuilds {rebuilds}");
+    assert!(
+        updates > 0 && rebuilds > 0,
+        "updates {updates}, rebuilds {rebuilds}"
+    );
 }
 
 #[test]
 fn bad_arguments_are_refused_with_the_reason() {
     let s = ring(4);
-    let refused = |q: &str| QueryEngine::new().execute(q, &s).err().map(|e| e.to_string()).unwrap_or_default();
+    let refused = |q: &str| {
+        QueryEngine::new()
+            .execute(q, &s)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+    };
     let cases = [
-        ("CALL algo.pageRank({incremental: 'yes'}) YIELD node RETURN node", "must be true or false"),
-        ("CALL algo.pageRank({incremental: true, iterations: 5}) YIELD node RETURN node", "`iterations` has no meaning"),
-        ("CALL algo.pageRank({incremental: true, damping: 1.0}) YIELD node RETURN node", "damping must be above 0 and below 1"),
-        ("CALL algo.wcc({incremental: true, graph: 'g'}) YIELD node RETURN node", "cannot be given together"),
-        ("CALL algo.closeness({incremental: true}) YIELD node RETURN node", "unknown config key `incremental`"),
+        (
+            "CALL algo.pageRank({incremental: 'yes'}) YIELD node RETURN node",
+            "must be true or false",
+        ),
+        (
+            "CALL algo.pageRank({incremental: true, iterations: 5}) YIELD node RETURN node",
+            "`iterations` has no meaning",
+        ),
+        (
+            "CALL algo.pageRank({incremental: true, damping: 1.0}) YIELD node RETURN node",
+            "damping must be above 0 and below 1",
+        ),
+        (
+            "CALL algo.wcc({incremental: true, graph: 'g'}) YIELD node RETURN node",
+            "cannot be given together",
+        ),
+        (
+            "CALL algo.closeness({incremental: true}) YIELD node RETURN node",
+            "unknown config key `incremental`",
+        ),
     ];
     for (q, expected) in cases {
         let e = refused(q);
-        assert!(e.contains(expected), "{q}\n  expected `{expected}`, got: {e}");
+        assert!(
+            e.contains(expected),
+            "{q}\n  expected `{expected}`, got: {e}"
+        );
     }
-    assert!(s.incremental_states().status().is_empty(), "a refused call kept a state");
+    assert!(
+        s.incremental_states().status().is_empty(),
+        "a refused call kept a state"
+    );
 }
 
 #[test]
@@ -263,5 +409,11 @@ fn graphs_keep_their_own_state() {
     write(&mut a, "CREATE (:P)");
     assert_eq!(degree(&a, true).len(), 6);
     assert_eq!(degree(&b, true).len(), 8);
-    assert_eq!(last(&b, Algorithm::Degree), Refresh::Updated { nodes: 0, relationships: 0 });
+    assert_eq!(
+        last(&b, Algorithm::Degree),
+        Refresh::Updated {
+            nodes: 0,
+            relationships: 0
+        }
+    );
 }

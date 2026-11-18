@@ -33,8 +33,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use samyama_graph_algorithms::{
-    IncrementalDegree, IncrementalPageRank, IncrementalPageRankError, IncrementalWcc, NodeId as AlgoNodeId,
-    Progress, Stopped,
+    IncrementalDegree, IncrementalPageRank, IncrementalPageRankError, IncrementalWcc,
+    NodeId as AlgoNodeId, Progress, Stopped,
 };
 use serde::Serialize;
 
@@ -80,11 +80,19 @@ pub struct StateKey {
 
 impl StateKey {
     pub fn new(algorithm: Algorithm, label: Option<&str>, edge_type: Option<&str>) -> Self {
-        Self { algorithm, label: label.map(str::to_string), edge_type: edge_type.map(str::to_string), damping_bits: 0 }
+        Self {
+            algorithm,
+            label: label.map(str::to_string),
+            edge_type: edge_type.map(str::to_string),
+            damping_bits: 0,
+        }
     }
 
     pub fn page_rank(label: Option<&str>, edge_type: Option<&str>, damping: f64) -> Self {
-        Self { damping_bits: damping.to_bits(), ..Self::new(Algorithm::PageRank, label, edge_type) }
+        Self {
+            damping_bits: damping.to_bits(),
+            ..Self::new(Algorithm::PageRank, label, edge_type)
+        }
     }
 }
 
@@ -190,7 +198,9 @@ pub struct IncrementalStates {
 
 impl std::fmt::Debug for IncrementalStates {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IncrementalStates").field("kept", &lock(&self.slots).len()).finish()
+        f.debug_struct("IncrementalStates")
+            .field("kept", &lock(&self.slots).len())
+            .finish()
     }
 }
 
@@ -227,7 +237,10 @@ impl std::error::Error for IncrementalError {}
 impl IncrementalStates {
     /// The kept states, for diagnostics and tests.
     pub fn status(&self) -> Vec<StateStatus> {
-        let slots: Vec<(StateKey, Slot)> = lock(&self.slots).iter().map(|(k, s)| (k.clone(), s.clone())).collect();
+        let slots: Vec<(StateKey, Slot)> = lock(&self.slots)
+            .iter()
+            .map(|(k, s)| (k.clone(), s.clone()))
+            .collect();
         let mut out: Vec<StateStatus> = slots
             .into_iter()
             .filter_map(|(key, slot)| {
@@ -244,7 +257,11 @@ impl IncrementalStates {
             })
             .collect();
         out.sort_by(|a, b| {
-            (a.algorithm.call_name(), &a.label, &a.edge_type).cmp(&(b.algorithm.call_name(), &b.label, &b.edge_type))
+            (a.algorithm.call_name(), &a.label, &a.edge_type).cmp(&(
+                b.algorithm.call_name(),
+                &b.label,
+                &b.edge_type,
+            ))
         });
         out
     }
@@ -287,7 +304,11 @@ fn in_filter(store: &GraphStore, id: crate::graph::NodeId, label: Option<&Label>
 }
 
 /// Apply the additions since `saved.at`, or say why they cannot be.
-fn catch_up(store: &GraphStore, key: &StateKey, saved: &mut Saved) -> Result<Refresh, RebuildReason> {
+fn catch_up(
+    store: &GraphStore,
+    key: &StateKey,
+    saved: &mut Saved,
+) -> Result<Refresh, RebuildReason> {
     let label = key.label.as_deref().map(Label::new);
     let edge_type = key.edge_type.as_deref().map(EdgeType::new);
     let (mut nodes, mut relationships) = (0, 0);
@@ -299,11 +320,16 @@ fn catch_up(store: &GraphStore, key: &StateKey, saved: &mut Saved) -> Result<Ref
                 }
             }
             Addition::Edge(id) => {
-                let Some(edge) = store.get_edge(id) else { continue };
+                let Some(edge) = store.get_edge(id) else {
+                    continue;
+                };
                 if edge_type.as_ref().is_some_and(|t| edge.edge_type != *t) {
                     continue;
                 }
-                if saved.kept.add_edge(edge.source.as_u64(), edge.target.as_u64()) {
+                if saved
+                    .kept
+                    .add_edge(edge.source.as_u64(), edge.target.as_u64())
+                {
                     relationships += 1;
                 }
             }
@@ -315,11 +341,16 @@ fn catch_up(store: &GraphStore, key: &StateKey, saved: &mut Saved) -> Result<Ref
         None => store.node_count(),
     };
     let unfiltered = label.is_none() && edge_type.is_none();
-    if saved.kept.node_count() != expected_nodes || (unfiltered && saved.relationships != store.edge_count()) {
+    if saved.kept.node_count() != expected_nodes
+        || (unfiltered && saved.relationships != store.edge_count())
+    {
         return Err(RebuildReason::CountMismatch);
     }
     saved.at = store.structure_log().position();
-    Ok(Refresh::Updated { nodes, relationships })
+    Ok(Refresh::Updated {
+        nodes,
+        relationships,
+    })
 }
 
 /// Run `read` on the state for `key`, brought up to date with `store` first.
@@ -364,10 +395,22 @@ fn with_state<T>(
             .map_err(IncrementalError::ViewStopped)?;
             let kept = build(&view, run_progress)?;
             let (calls, rebuilds, last) = match (&previous, guard.as_ref()) {
-                (Some(Err(reason)), Some(old)) => (old.calls, old.rebuilds + 1, Refresh::Rebuilt { reason: *reason }),
+                (Some(Err(reason)), Some(old)) => (
+                    old.calls,
+                    old.rebuilds + 1,
+                    Refresh::Rebuilt { reason: *reason },
+                ),
                 _ => (0, 0, Refresh::Built),
             };
-            *guard = Some(Saved { kept, at, relationships: view.out_targets.len(), calls, rebuilds, last, last_used: 0 });
+            *guard = Some(Saved {
+                kept,
+                at,
+                relationships: view.out_targets.len(),
+                calls,
+                rebuilds,
+                last,
+                last_used: 0,
+            });
             last
         }
     };
@@ -474,7 +517,11 @@ mod tests {
     /// The batch PageRank, run to its fixed point.
     fn batch_pr(s: &GraphStore) -> HashMap<u64, f64> {
         let view = crate::algo::build_view(s, None, None, None);
-        let config = crate::algo::PageRankConfig { iterations: 1000, tolerance: 0.0, ..Default::default() };
+        let config = crate::algo::PageRankConfig {
+            iterations: 1000,
+            tolerance: 0.0,
+            ..Default::default()
+        };
         crate::algo::page_rank(&view, config)
     }
 
@@ -498,11 +545,27 @@ mod tests {
         s.create_edge(extra, ids[0], "L").unwrap();
         s.create_edge(ids[7], extra, "L").unwrap();
         let (second, how) = pr(&s);
-        assert_eq!(how, Refresh::Updated { nodes: 1, relationships: 3 });
-        assert!(l1(&second, &batch_pr(&s)) <= BOUND, "updated scores drifted from a batch run");
+        assert_eq!(
+            how,
+            Refresh::Updated {
+                nodes: 1,
+                relationships: 3
+            }
+        );
+        assert!(
+            l1(&second, &batch_pr(&s)) <= BOUND,
+            "updated scores drifted from a batch run"
+        );
 
         let (_, how) = pr(&s);
-        assert_eq!(how, Refresh::Updated { nodes: 0, relationships: 0 }, "an unchanged graph did work");
+        assert_eq!(
+            how,
+            Refresh::Updated {
+                nodes: 0,
+                relationships: 0
+            },
+            "an unchanged graph did work"
+        );
     }
 
     #[test]
@@ -512,7 +575,12 @@ mod tests {
         let e = s.create_edge(ids[1], ids[20], "L").unwrap();
         s.delete_edge(e).unwrap();
         let (scores, how) = pr(&s);
-        assert_eq!(how, Refresh::Rebuilt { reason: RebuildReason::Rewritten });
+        assert_eq!(
+            how,
+            Refresh::Rebuilt {
+                reason: RebuildReason::Rewritten
+            }
+        );
         assert!(l1(&scores, &batch_pr(&s)) <= BOUND);
         let status = s.incremental_states().status();
         assert_eq!((status[0].calls, status[0].rebuilds), (2, 1), "{status:?}");
@@ -527,7 +595,12 @@ mod tests {
         assert_eq!((rows.len(), how), (1, Refresh::Built));
         s.add_label_to_node("default", ids[1], "Q").unwrap();
         let (rows, how) = filtered(&s);
-        assert_eq!(how, Refresh::Rebuilt { reason: RebuildReason::Rewritten });
+        assert_eq!(
+            how,
+            Refresh::Rebuilt {
+                reason: RebuildReason::Rewritten
+            }
+        );
         // 0 -> 1 is in the ring, so the two Q nodes are one component.
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].1, rows[1].1);
@@ -542,12 +615,19 @@ mod tests {
         // would look like this: the saved position already past the addition,
         // so the state never hears of it.
         {
-            let slot = s.incremental_states().slot(&StateKey::new(Algorithm::Degree, None, None));
+            let slot = s
+                .incremental_states()
+                .slot(&StateKey::new(Algorithm::Degree, None, None));
             let mut guard = slot.lock().unwrap();
             guard.as_mut().unwrap().at = s.structure_log().position();
         }
         let (rows, how) = degree(&s, None, None, &NoProgress).unwrap();
-        assert_eq!(how, Refresh::Rebuilt { reason: RebuildReason::CountMismatch });
+        assert_eq!(
+            how,
+            Refresh::Rebuilt {
+                reason: RebuildReason::CountMismatch
+            }
+        );
         let view = crate::algo::build_view(&s, None, None, None);
         let batch = crate::algo::degree_centrality(&view, true);
         let got: HashMap<u64, f64> = rows.into_iter().collect();
@@ -564,12 +644,19 @@ mod tests {
         degree(&s, None, None, &NoProgress).unwrap();
         s.create_node("P");
         {
-            let slot = s.incremental_states().slot(&StateKey::new(Algorithm::Degree, None, None));
+            let slot = s
+                .incremental_states()
+                .slot(&StateKey::new(Algorithm::Degree, None, None));
             let mut guard = slot.lock().unwrap();
             guard.as_mut().unwrap().at = s.structure_log().position();
         }
         let (rows, how) = degree(&s, None, None, &NoProgress).unwrap();
-        assert_eq!(how, Refresh::Rebuilt { reason: RebuildReason::CountMismatch });
+        assert_eq!(
+            how,
+            Refresh::Rebuilt {
+                reason: RebuildReason::CountMismatch
+            }
+        );
         assert_eq!(rows.len(), 11, "the missed node is not in the answer");
     }
 
@@ -597,7 +684,13 @@ mod tests {
         s.create_edge(ids[0], ids[3], "L").unwrap();
         s.create_edge(ids[1], ids[4], "M").unwrap();
         let (rows, how) = wcc(&s, None, Some("M"), &NoProgress).unwrap();
-        assert_eq!(how, Refresh::Updated { nodes: 0, relationships: 1 });
+        assert_eq!(
+            how,
+            Refresh::Updated {
+                nodes: 0,
+                relationships: 1
+            }
+        );
         let c: HashMap<u64, usize> = rows.into_iter().collect();
         assert_eq!(c[&ids[1].as_u64()], c[&ids[4].as_u64()]);
         assert_ne!(c[&ids[0].as_u64()], c[&ids[3].as_u64()]);
@@ -612,7 +705,10 @@ mod tests {
         }
         let kept = lock(&s.incremental_states().slots);
         assert_eq!(kept.len(), MAX_KEPT_STATES);
-        assert!(!kept.contains_key(&StateKey::page_rank(None, None, 0.5)), "the oldest state was kept");
+        assert!(
+            !kept.contains_key(&StateKey::page_rank(None, None, 0.5)),
+            "the oldest state was kept"
+        );
     }
 
     #[test]
@@ -637,7 +733,13 @@ mod tests {
         let err = page_rank(&s, None, None, 0.85, &Never, &NoProgress).unwrap_err();
         assert!(matches!(err, IncrementalError::ViewStopped(_)), "{err:?}");
         let err = page_rank(&s, None, None, 0.85, &NoProgress, &Never).unwrap_err();
-        assert!(matches!(err, IncrementalError::RunStopped(Stopped { done: 0, .. })), "{err:?}");
-        assert!(s.incremental_states().status().is_empty(), "a stopped build was kept");
+        assert!(
+            matches!(err, IncrementalError::RunStopped(Stopped { done: 0, .. })),
+            "{err:?}"
+        );
+        assert!(
+            s.incremental_states().status().is_empty(),
+            "a stopped build was kept"
+        );
     }
 }

@@ -83,7 +83,10 @@ impl StructureLog {
     }
 
     pub fn position(&self) -> LogPosition {
-        LogPosition { next: self.first + self.additions.len() as u64, rewrites: self.rewrites }
+        LogPosition {
+            next: self.first + self.additions.len() as u64,
+            rewrites: self.rewrites,
+        }
     }
 
     pub(crate) fn node_added(&mut self, id: NodeId) {
@@ -141,7 +144,10 @@ mod tests {
         log.start_recording();
         log.node_added(n(2));
         log.edge_added(EdgeId::new(7));
-        assert_eq!(log.since(at).unwrap().collect::<Vec<_>>(), vec![Addition::Node(n(2)), Addition::Edge(EdgeId::new(7))]);
+        assert_eq!(
+            log.since(at).unwrap().collect::<Vec<_>>(),
+            vec![Addition::Node(n(2)), Addition::Edge(EdgeId::new(7))]
+        );
         assert_eq!(log.since(log.position()).unwrap().count(), 0);
     }
 
@@ -156,7 +162,10 @@ mod tests {
         // A position taken after the rewrite is fine.
         let after = log.position();
         log.node_added(n(2));
-        assert_eq!(log.since(after).unwrap().collect::<Vec<_>>(), vec![Addition::Node(n(2))]);
+        assert_eq!(
+            log.since(after).unwrap().collect::<Vec<_>>(),
+            vec![Addition::Node(n(2))]
+        );
     }
 
     #[test]
@@ -178,7 +187,10 @@ mod tests {
         let recent = log.position();
         log.node_added(n(u64::MAX));
         assert_eq!(log.since(oldest).err(), Some(CatchUp::Dropped));
-        assert_eq!(log.since(recent).unwrap().collect::<Vec<_>>(), vec![Addition::Node(n(u64::MAX))]);
+        assert_eq!(
+            log.since(recent).unwrap().collect::<Vec<_>>(),
+            vec![Addition::Node(n(u64::MAX))]
+        );
         assert!(log.additions.len() <= MAX_RECORDED_ADDITIONS);
     }
 }
