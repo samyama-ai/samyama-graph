@@ -523,12 +523,13 @@ impl<'a> QueryExecutor<'a> {
         }
 
         // Plan the query: a stage of the request's trace (#2077).
-        let mut plan = tracing::debug_span!("samyama.query.plan")
-            .in_scope(|| self.planner.plan(query, self.store))?;
+        let span = plan_span();
+        let mut plan = span.in_scope(|| self.planner.plan(query, self.store))?;
         // TRUST-06: the hash of the plan that runs, taken before it is
         // consumed. Re-planning later could describe a different plan: the
         // planner reads statistics that move with the data.
         let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
+        record_plan(&span, &mut plan.root, self.store, plan_hash);
 
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain && query.plan_json {
@@ -860,12 +861,14 @@ impl<'a> MutQueryExecutor<'a> {
         }
 
         // Plan the query (need immutable borrow temporarily)
+        let span = plan_span();
         let mut plan = {
             let store_ref: &GraphStore = self.store;
-            tracing::debug_span!("samyama.query.plan").in_scope(|| self.planner.plan(query, store_ref))?
+            span.in_scope(|| self.planner.plan(query, store_ref))?
         };
         // TRUST-06, as on the read executor.
         let plan_hash = self.plan_hash.then(|| plan.root.describe().structural_hash());
+        record_plan(&span, &mut plan.root, &*self.store, plan_hash);
 
         // Handle EXPLAIN - return plan description instead of executing
         if query.explain && query.plan_json {
@@ -1361,6 +1364,38 @@ struct EstimatedNode {
 /// An operator whose `children_mut` does not match the children `describe`
 /// reports is printed from `describe` with no numbers below it, rather than
 /// with numbers attached to the wrong lines.
+/// The `samyama.query.plan` span, with the fields `record_plan` fills (#2077).
+fn plan_span() -> tracing::Span {
+    tracing::debug_span!(
+        "samyama.query.plan",
+        estimated_rows = tracing::field::Empty,
+        estimated_cost = tracing::field::Empty,
+        plan_hash = tracing::field::Empty,
+    )
+}
+
+/// The planner's estimate for the whole plan and its hash, on the plan span.
+///
+/// Only when the span is recorded: estimating walks every operator and
+/// hashing describes the tree, which a request nobody is tracing must not pay
+/// for. The figures are EXPLAIN's (`estimate_node`), so a trace and an EXPLAIN
+/// of the same plan agree; the hash is the one TRUST-06 reports, taken here
+/// when the request did not ask for it.
+fn record_plan(span: &tracing::Span, root: &mut OperatorBox, store: &GraphStore, plan_hash: Option<u64>) {
+    if span.is_disabled() {
+        return;
+    }
+    let tree = estimate_node(root, store);
+    if let Some(rows) = tree.rows {
+        span.record("estimated_rows", rows);
+    }
+    if let Some(cost) = tree.cost {
+        span.record("estimated_cost", cost);
+    }
+    let hash = plan_hash.unwrap_or_else(|| root.describe().structural_hash());
+    span.record("plan_hash", format!("{hash:016x}").as_str());
+}
+
 fn estimate_node(op: &mut OperatorBox, store: &GraphStore) -> EstimatedNode {
     let description = op.describe();
     let mut children: Vec<EstimatedNode> = op

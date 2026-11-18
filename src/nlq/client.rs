@@ -401,7 +401,19 @@ impl NLQClient {
             })
             .transpose()?;
         let sent = prepared_schema.as_ref();
-        let answer = match self.config.provider {
+        // One span per model call (#2077), so a trace shows an NLQ request's
+        // time in the provider beside the graph work. Tokens and latency are
+        // recorded once the answer is in.
+        let span = tracing::info_span!(
+            "samyama.ai.llm_call",
+            provider = ?self.config.provider,
+            model = %self.config.model,
+            prompt_tokens = tracing::field::Empty,
+            completion_tokens = tracing::field::Empty,
+            latency_ms = tracing::field::Empty,
+            failed = tracing::field::Empty,
+        );
+        let answer = tracing::Instrument::instrument(async { match self.config.provider {
             LLMProvider::OpenAI => self.openai_chat(prompt, sent).await,
             LLMProvider::Ollama => self.ollama_chat(prompt, sent).await,
             LLMProvider::Gemini => self.gemini_chat(prompt, sent).await,
@@ -421,8 +433,18 @@ impl NLQClient {
                 check_implemented(&self.config.provider)
                     .map(|()| (String::new(), TokenUsage::default()))
             }
-        };
+        } }, span.clone()).await;
         let latency = started.elapsed();
+        span.record("latency_ms", latency.as_millis() as i64);
+        span.record("failed", answer.is_err());
+        if let Ok((_, usage)) = &answer {
+            if let Some(n) = usage.prompt_tokens {
+                span.record("prompt_tokens", n as i64);
+            }
+            if let Some(n) = usage.completion_tokens {
+                span.record("completion_tokens", n as i64);
+            }
+        }
         match answer {
             Ok((text, usage)) => {
                 crate::nlq::metrics::record_call(latency, &usage);
