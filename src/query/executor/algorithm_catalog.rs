@@ -441,6 +441,64 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         LABEL,
         EDGE_TYPE,
     ]),
+    // Neighbour sampling (ML-02, #1717). `seeds` is one node id or a list.
+    // `batchSize` has no fixed default: left out, every seed is one batch.
+    ("algo.sample.neighbors", &[
+        pos("seeds", T::List, true),
+        Param { name: "fanout", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None },
+        key("direction", T::String, D::String("out")),
+        opt("weightProperty", T::String),
+        opt("batchSize", T::Integer),
+        key("seed", T::Integer, D::Integer(42)),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    // Subgraph sampling (ML-03, #1720). The seed nodes are one node id or a
+    // list; forest fire may start anywhere, stratified takes none.
+    ("algo.sample.forestFire", &[
+        pos("seeds", T::List, false),
+        Param { name: "size", kind: ParamKind::Config, ty: T::Integer, required: true, default: None, also: None },
+        key("forwardProbability", T::Float, D::Float(0.7)),
+        key("direction", T::String, D::String("out")),
+        key("seed", T::Integer, D::Integer(42)),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    ("algo.sample.snowball", &[
+        pos("seeds", T::List, true),
+        key("hops", T::Integer, D::Integer(2)),
+        // -1 takes every neighbour.
+        key("perNode", T::Integer, D::Integer(-1)),
+        opt("maxNodes", T::Integer),
+        key("direction", T::String, D::String("out")),
+        key("seed", T::Integer, D::Integer(42)),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    ("algo.sample.egoNetwork", &[
+        pos("seeds", T::List, true),
+        key("hops", T::Integer, D::Integer(1)),
+        key("direction", T::String, D::String("out")),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    ("algo.sample.randomWalk", &[
+        pos("seeds", T::List, true),
+        Param { name: "size", kind: ParamKind::Config, ty: T::Integer, required: true, default: None, also: None },
+        key("restartProbability", T::Float, D::Float(0.15)),
+        // Left out, 100 steps per node of `size`.
+        opt("maxSteps", T::Integer),
+        key("direction", T::String, D::String("out")),
+        key("seed", T::Integer, D::Integer(42)),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    // Exactly one of `fraction` and `perStratum` is given.
+    ("algo.sample.stratified", &[
+        opt("fraction", T::Float),
+        opt("perStratum", T::Integer),
+        key("seed", T::Integer, D::Integer(42)),
+    ]),
 ];
 
 impl AlgorithmEntry {
