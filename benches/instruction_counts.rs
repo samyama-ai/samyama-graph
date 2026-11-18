@@ -88,9 +88,13 @@ fn oeh_setup() -> (OehIndex, u32) {
     (OehIndex::build(poset).unwrap(), n)
 }
 
+/// Pairs of vectors whose distances are measured.
+#[cfg(target_os = "linux")]
+type Pairs = Vec<(Vec<f32>, Vec<f32>)>;
+
 #[cfg(target_os = "linux")]
 /// 256 pairs of 128-dimensional vectors from a fixed linear congruential sequence.
-fn vectors_setup() -> Vec<(Vec<f32>, Vec<f32>)> {
+fn vectors_setup() -> Pairs {
     let mut s = 0x2207_u64;
     let mut next = move || {
         s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -140,7 +144,7 @@ fn oeh_probe(input: (OehIndex, u32)) -> (u32, (OehIndex, u32)) {
 #[cfg(target_os = "linux")]
 #[library_benchmark]
 #[bench::cosine_and_l2_256x128(setup = vectors_setup)]
-fn vector_distance(pairs: Vec<(Vec<f32>, Vec<f32>)>) -> (f32, Vec<(Vec<f32>, Vec<f32>)>) {
+fn vector_distance(pairs: Pairs) -> (f32, Pairs) {
     let mut acc = 0.0;
     for (a, b) in &pairs {
         let (dot, na, nb) = distance::cosine_parts(black_box(a), black_box(b));
