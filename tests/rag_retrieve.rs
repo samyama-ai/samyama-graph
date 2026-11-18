@@ -244,3 +244,30 @@ fn explain_shows_the_search_under_the_retrieval() {
     let search = plan.find("VectorSearch").expect("VectorSearch in the plan");
     assert!(rag < search, "{plan}");
 }
+
+#[test]
+fn a_seeds_score_is_the_one_the_vector_search_ranked_it_by() {
+    // #2232: "scores match what ranked it". Compared value for value with
+    // queryNodes, not only in order.
+    let s = fixture();
+    let scored = |q: &str| -> Vec<(String, f64)> {
+        let b = QueryEngine::new().execute(q, &s).unwrap_or_else(|e| panic!("{q}: {e}"));
+        b.records
+            .iter()
+            .map(|r| match r.get("sc") {
+                Some(Value::Property(PropertyValue::Float(f))) => (text(r.get("n")), *f),
+                other => panic!("{q}: {other:?}"),
+            })
+            .collect()
+    };
+    let search = scored(
+        "CALL db.index.vector.queryNodes('Chunk', 'emb', [1.0, 0.0], 3) YIELD node, score \
+         RETURN node.name AS n, score AS sc",
+    );
+    let retrieved = scored(
+        "CALL ai.rag.retrieve('Chunk', 'emb', [1.0, 0.0], 3, 0) YIELD node, score \
+         RETURN node.name AS n, score AS sc",
+    );
+    assert_eq!(retrieved.len(), 3);
+    assert_eq!(retrieved, search);
+}

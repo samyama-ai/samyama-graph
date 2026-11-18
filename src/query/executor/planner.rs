@@ -899,12 +899,10 @@ fn plan_return_projection(
     (operator, output_columns)
 }
 
-/// The named procedures `plan_call` dispatches (`db.*`, and `ai.rag.retrieve`),
-/// spelled as it accepts them.
+/// The `db.*` procedures `plan_call` dispatches, spelled as it accepts them.
 /// Offered as "did you mean" for an unknown procedure (DX-06);
 /// `every_listed_procedure_plans` keeps the list honest.
 pub const KNOWN_DB_PROCEDURES: &[&str] = &[
-    "ai.rag.retrieve",
     "db.checkIntegrity",
     "db.index.fulltext.queryNodes",
     "db.index.point.nearest",
@@ -916,10 +914,16 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
     "db.schema.visualization",
 ];
 
+/// Named procedures outside `db.*`, offered as "did you mean" beside
+/// [`KNOWN_DB_PROCEDURES`] but not listed among the schema procedures when
+/// nothing is close (#2098).
+pub const KNOWN_OTHER_PROCEDURES: &[&str] = &["ai.rag.retrieve"];
+
 /// The refusal for a procedure name nothing dispatches: a likely intended
 /// name when there is one, and otherwise where the procedures are.
 pub fn unknown_procedure_message(name: &str) -> String {
-    match crate::query::suggest::closest(name, KNOWN_DB_PROCEDURES.iter().copied()) {
+    let known = KNOWN_DB_PROCEDURES.iter().chain(KNOWN_OTHER_PROCEDURES).copied();
+    match crate::query::suggest::closest(name, known) {
         Some(known) => format!("Unknown procedure: `{name}`. Did you mean `{known}`?"),
         None => format!(
             "Unknown procedure: `{name}`. The schema procedures are {}; graph \
