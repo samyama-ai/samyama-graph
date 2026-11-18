@@ -1189,7 +1189,8 @@ fn unknown_config_keys_are_refused_naming_the_rest() {
         "{e}"
     );
     assert!(
-        e.contains("This algorithm reads: damping, iterations"),
+        // `incremental` since ALGO-14 (#1697).
+        e.contains("This algorithm reads: damping, incremental, iterations"),
         "{e}"
     );
     let e = algo_err(&mut store, "algo.wcc", vec![lmap(&[("bogus", pint(1))])]);
