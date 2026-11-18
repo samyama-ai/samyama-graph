@@ -562,7 +562,7 @@ impl CommandHandler {
                 Err(e) => return RespValue::Error(format!("ERR {e}")),
             };
         // Snapshot the schema and drop the read guard before the LLM call.
-        let schema = store.read().await.schema_summary();
+        let schema = crate::store_lock::read(&store).await.schema_summary();
         // `text_to_cypher` refuses a generated write, as it does for /api/nlq.
         match pipeline.text_to_cypher(question, &schema).await {
             Ok(cypher) => RespValue::BulkString(Some(cypher.into_bytes())),
@@ -623,7 +623,7 @@ impl CommandHandler {
         // persistence: the durable half is `drop_graph` above, which removes the
         // rows outright. `clear()` journals nothing and does not need to -- one
         // journal entry per node of a dropped graph is the wrong shape for it.
-        let mut store_guard = store.write().await;
+        let mut store_guard = crate::store_lock::write(&store).await;
         store_guard.clear();
         let _ = store_guard.take_write_log();
         drop(store_guard);
@@ -897,7 +897,7 @@ mod tests {
         let offenders: Vec<(usize, &str)> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains("store.write().await"))
+            .filter(|(_, l)| l.contains("crate::store_lock::write(&store).await"))
             .filter(|(i, _)| {
                 let above = &lines[i.saturating_sub(8)..*i];
                 let waived = above
@@ -1111,7 +1111,7 @@ mod tests {
         ]);
         let _ = handler.handle_command(&cmd, &store, None).await;
         assert_eq!(
-            store.read().await.get_nodes_by_label(&crate::graph::Label::new("Leak")).len(),
+            crate::store_lock::read(&store).await.get_nodes_by_label(&crate::graph::Label::new("Leak")).len(),
             0,
             "a rejected query must not write to the default graph"
         );
@@ -2000,7 +2000,7 @@ mod tests {
                 )
                 .await;
             assert!(err_text(&r).contains("bound to tenant 'acme'"), "{r:?}");
-            assert_eq!(st.read().await.node_count(), 0);
+            assert_eq!(crate::store_lock::read(&st).await.node_count(), 0);
         }
 
         #[tokio::test]
@@ -2018,7 +2018,7 @@ mod tests {
                 err_text(&r),
                 "ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY"
             );
-            assert_eq!(st.read().await.node_count(), 0);
+            assert_eq!(crate::store_lock::read(&st).await.node_count(), 0);
             let r = handler
                 .handle_command(
                     &cmd(&["GRAPH.RO_QUERY", "default", "RETURN 5 AS five"]),
@@ -2039,7 +2039,7 @@ mod tests {
         async fn graph_delete_refuses_foreign_and_non_string_names_and_keeps_the_data() {
             let handler = CommandHandler::new(None);
             let st = store();
-            st.write().await.create_node("Keep");
+            crate::store_lock::write(&st).await.create_node("Keep");
             let r = handler
                 .handle_command(&cmd(&["GRAPH.DELETE", "analytics"]), &st, None)
                 .await;
@@ -2061,7 +2061,7 @@ mod tests {
                 .await;
             assert!(err_text(&r).contains("bound to tenant"), "{r:?}");
             assert_eq!(
-                st.read().await.node_count(),
+                crate::store_lock::read(&st).await.node_count(),
                 1,
                 "a refused delete cleared the store"
             );
@@ -2087,7 +2087,7 @@ mod tests {
                 .handle_command(&cmd(&["GRAPH.DELETE", "default"]), &st, Some(&admin))
                 .await;
             assert_eq!(r, RespValue::SimpleString("OK".into()));
-            assert_eq!(st.read().await.node_count(), 0);
+            assert_eq!(crate::store_lock::read(&st).await.node_count(), 0);
             assert_eq!(
                 pm.recover("default").unwrap().0.len(),
                 0,
@@ -2173,7 +2173,7 @@ mod tests {
             use crate::persistence::tenant::LLMProvider;
             let handler = CommandHandler::new(None);
             let s = store();
-            s.write().await.create_node("Person");
+            crate::store_lock::write(&s).await.create_node("Person");
             // A model that answers with a destructive statement beginning MATCH,
             // the shape the old prefix check let through (#1156).
             let srv = MockHttp::serve(vec![(
@@ -2189,7 +2189,7 @@ mod tests {
                 .await;
             assert!(err_text(&r).contains("write operations"), "{r:?}");
             assert_eq!(srv.requests().len(), 3, "invalid structured output is repaired twice");
-            assert_eq!(s.read().await.node_count(), 1, "nothing was deleted");
+            assert_eq!(crate::store_lock::read(&s).await.node_count(), 1, "nothing was deleted");
         }
 
         #[tokio::test]

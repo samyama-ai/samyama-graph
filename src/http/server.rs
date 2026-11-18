@@ -1228,7 +1228,7 @@ mod tests {
 
         // Write through the state
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let n = store.create_node("Test");
             store.get_node_mut(n).unwrap().set_property("key", "value");
         }
@@ -1236,7 +1236,7 @@ mod tests {
         // Read through a clone
         let cloned = state.clone();
         {
-            let store = cloned.store.read().await;
+            let store = crate::store_lock::read(&cloned.store).await;
             assert_eq!(store.node_count(), 1);
         }
     }

@@ -315,7 +315,7 @@ mod tests {
         assert_eq!(run.records.len(), 1);
         assert!(run.records[0].error.is_none());
         assert!(run.records[0].result.as_ref().unwrap()["results"].is_array());
-        assert_eq!(store.read().await.edge_count(), 1);
+        assert_eq!(crate::store_lock::read(&store).await.edge_count(), 1);
     }
 
     #[tokio::test]

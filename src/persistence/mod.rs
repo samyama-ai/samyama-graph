@@ -210,7 +210,7 @@ impl PersistenceManager {
 
         tokio::spawn(async move {
             let (vector_index, property_index) = {
-                let guard = store.read().await;
+                let guard = crate::store_lock::read(&store).await;
                 (Arc::clone(&guard.vector_index), Arc::clone(&guard.property_index))
             };
             GraphStore::start_background_indexer_with_store(

@@ -2540,7 +2540,7 @@ async fn start_server() {
         let indexer_tenants = Arc::clone(&shared_tenants);
         tokio::spawn(async move {
             let (vector_index, property_index) = {
-                let guard = indexer_store.read().await;
+                let guard = samyama::store_lock::read(&indexer_store).await;
                 (Arc::clone(&guard.vector_index), Arc::clone(&guard.property_index))
             };
             samyama::graph::GraphStore::start_background_indexer_with_store(

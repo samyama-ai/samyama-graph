@@ -151,7 +151,7 @@ async fn write_telemetry(
     prompt: &str,
     records: &[ToolCallRecord],
 ) -> AgentResult<()> {
-    let mut guard = store.write().await;
+    let mut guard = crate::store_lock::write(&store).await;
 
     // Find-or-create Question node by qid.
     let q_node = find_node_by_property(&guard, "Question", "qid", qid)
@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(run.total_token_cost, run.records.iter().map(|r| r.token_cost).sum::<u64>());
 
         // Telemetry: one Question, three Tool nodes, one USED_TOOL edge per call.
-        let g = store.read().await;
+        let g = crate::store_lock::read(&store).await;
         let q = find_node_by_property(&g, "Question", "qid", &run.question_id).expect("question node");
         assert_eq!(g.node_property(q, "text"), Some(PropertyValue::String("what?".into())));
         assert_eq!(g.get_nodes_by_label(&Label::new("Tool")).len(), 3);
@@ -375,7 +375,7 @@ mod tests {
         let plan = ToolPlan { calls: vec![call("echo", false), call("echo", false)] };
         exec.execute("same", &plan).await.unwrap();
         exec.execute("same", &plan).await.unwrap();
-        let g = store.read().await;
+        let g = crate::store_lock::read(&store).await;
         assert_eq!(g.get_nodes_by_label(&Label::new("Question")).len(), 1);
         assert_eq!(g.get_nodes_by_label(&Label::new("Tool")).len(), 1);
         let q = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("same")).unwrap();
@@ -388,7 +388,7 @@ mod tests {
         let run = exec.execute("nothing", &ToolPlan::default()).await.unwrap();
         assert!(run.records.is_empty());
         assert_eq!(run.total_token_cost, 0);
-        let g = store.read().await;
+        let g = crate::store_lock::read(&store).await;
         assert_eq!(g.get_nodes_by_label(&Label::new("Question")).len(), 1);
         assert!(g.get_nodes_by_label(&Label::new("Tool")).is_empty());
         assert!(find_node_by_property(&g, "Question", "qid", "no-such-qid").is_none());
@@ -404,7 +404,7 @@ mod tests {
         exec.execute("first", &ToolPlan::default()).await.unwrap();
         exec.execute("second", &ToolPlan::default()).await.unwrap();
         exec.execute("second", &ToolPlan::default()).await.unwrap();
-        let g = store.read().await;
+        let g = crate::store_lock::read(&store).await;
         assert_eq!(g.get_nodes_by_label(&Label::new("Question")).len(), 2);
         let q1 = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("first"));
         let q2 = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("second"));

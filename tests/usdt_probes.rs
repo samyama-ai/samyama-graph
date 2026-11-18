@@ -50,6 +50,8 @@ fn every_probe_is_fired_from_the_engine() {
         ("query_done", "src/query/mod.rs"),
         ("persist_start", "src/persistence/mod.rs"),
         ("persist_done", "src/persistence/mod.rs"),
+        ("lock_wait_start", "src/store_lock.rs"),
+        ("lock_acquired", "src/store_lock.rs"),
     ];
     assert_eq!(callers.len(), PROBES.len(), "a probe was added without a caller here");
     for (f, file) in callers {
