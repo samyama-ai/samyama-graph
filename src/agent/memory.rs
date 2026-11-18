@@ -2,7 +2,10 @@
 
 use crate::graph::{EdgeType, GraphStore, Label, NodeId, PropertyValue};
 
-const TENANT: &str = "default";
+/// `AgentDecision` is agent memory, so it belongs in the single memory label
+/// list (#2242) once that exists -- export exclusion and the publish gate read
+/// that list, and a decision's `rationale` is free text a tenant would not want
+/// in a published snapshot. Until then this label is not excluded from either.
 const DECISION_LABEL: &str = "AgentDecision";
 const CAUSED_BY: &str = "CAUSED_BY";
 const EVIDENCED_BY: &str = "EVIDENCED_BY";
@@ -28,21 +31,50 @@ pub struct DecisionTrace {
     pub steps: Vec<DecisionStep>,
 }
 
+/// One decision to record. A struct rather than eight positional parameters:
+/// `Some("trace-a"), None, "search", "Need evidence"` reads as four
+/// interchangeable arguments at a call site and the compiler cannot tell a
+/// transposed pair from a correct one.
+#[derive(Clone, Copy, Debug)]
+pub struct DecisionInput<'a> {
+    pub session_id: &'a str,
+    /// `None` starts a new trace.
+    pub trace_id: Option<&'a str>,
+    /// Links this step to an earlier decision in the same trace.
+    pub parent_step_id: Option<NodeId>,
+    pub action: &'a str,
+    pub rationale: &'a str,
+    /// May refer to any graph nodes, not only memory ones.
+    pub evidence_node_ids: &'a [NodeId],
+    pub outcome: &'a str,
+}
+
 /// Record one decision and its causal/evidence edges in the graph.
 ///
-/// Passing no trace ID starts a new trace. `parent_step_id` links this step to
-/// an earlier decision in the same trace; evidence IDs may refer to any graph
-/// nodes and are checked before the trace is changed.
+/// `tenant` names the tenant whose index events this write publishes under; it
+/// is not where the rows persist, because nothing here persists them yet. A
+/// decision trace does not reach WAL or RocksDB until this moves onto the
+/// shared persisted-write helper (#2241), so today it is lost on restart or
+/// saved by whichever unrelated write happens to drain the log next.
+///
+/// Inputs are checked before the first node is created. That covers a missing
+/// evidence node and a parent in another trace; it does not make the whole
+/// record atomic, since an edge that fails mid-loop leaves the node and the
+/// edges before it in the store.
 pub fn record_decision(
     store: &mut GraphStore,
-    session_id: &str,
-    trace_id: Option<&str>,
-    parent_step_id: Option<NodeId>,
-    action: &str,
-    rationale: &str,
-    evidence_node_ids: &[NodeId],
-    outcome: &str,
+    tenant: &str,
+    input: DecisionInput<'_>,
 ) -> Result<DecisionStep, String> {
+    let DecisionInput {
+        session_id,
+        trace_id,
+        parent_step_id,
+        action,
+        rationale,
+        evidence_node_ids,
+        outcome,
+    } = input;
     if session_id.trim().is_empty() {
         return Err("session_id must not be empty".into());
     }
@@ -87,7 +119,7 @@ pub fn record_decision(
     ];
     for (key, value) in fields {
         store
-            .set_node_property(TENANT, node_id, key, value)
+            .set_node_property(tenant, node_id, key, value)
             .map_err(|error| format!("could not store decision field `{key}`: {error}"))?;
     }
 
@@ -123,6 +155,12 @@ pub fn inspect_trace(store: &GraphStore, trace_id: &str) -> DecisionTrace {
     }
 }
 
+/// Every `AgentDecision` node in the store is read and then filtered by trace,
+/// so this costs the whole label, not one trace. `record_decision` calls it to
+/// pick the next `step_order`, which makes recording the Nth decision O(all
+/// decisions recorded so far). Fine for a first slice and for the sizes the
+/// tests use; the memory benchmark harness (#2243) is where it will show, and
+/// a per-trace index is the fix when it does.
 fn trace_steps(store: &GraphStore, trace_id: &str) -> Vec<DecisionStep> {
     let Some(nodes) = store.nodes_with_label(&Label::new(DECISION_LABEL)) else {
         return Vec::new();
@@ -182,6 +220,39 @@ fn read_step(store: &GraphStore, node_id: NodeId) -> Option<DecisionStep> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::event::IndexEvent;
+
+    /// The tenant used to be a `const "default"`, which published every
+    /// tenant's decision writes under `default` to the index, auto-embed and
+    /// agent-trigger subscribers. Asserting the event proves the parameter is
+    /// carried rather than merely accepted.
+    #[test]
+    fn the_tenant_argument_reaches_the_index_event() {
+        let (mut store, mut rx) = GraphStore::with_async_indexing();
+        record_decision(
+            &mut store,
+            "tenant-b",
+            DecisionInput {
+                session_id: "session-a",
+                trace_id: Some("trace-a"),
+                parent_step_id: None,
+                action: "observe",
+                rationale: "first step",
+                evidence_node_ids: &[],
+                outcome: "done",
+            },
+        )
+        .unwrap();
+
+        let mut seen = None;
+        while let Ok(event) = rx.try_recv() {
+            if let IndexEvent::PropertySet { tenant_id, .. } = event {
+                seen = Some(tenant_id);
+                break;
+            }
+        }
+        assert_eq!(seen.as_deref(), Some("tenant-b"));
+    }
 
     #[test]
     fn records_and_inspects_a_causal_trace_with_evidence() {
@@ -189,24 +260,30 @@ mod tests {
         let evidence = store.create_node("Observation");
         let first = record_decision(
             &mut store,
-            "session-a",
-            Some("trace-a"),
-            None,
-            "search",
-            "Need supporting evidence",
-            &[evidence],
-            "found one observation",
+            "default",
+            DecisionInput {
+                session_id: "session-a",
+                trace_id: Some("trace-a"),
+                parent_step_id: None,
+                action: "search",
+                rationale: "Need supporting evidence",
+                evidence_node_ids: &[evidence],
+                outcome: "found one observation",
+            },
         )
         .unwrap();
         let second = record_decision(
             &mut store,
-            "session-b",
-            Some("trace-a"),
-            Some(first.node_id),
-            "answer",
-            "Use the retrieved observation",
-            &[evidence],
-            "answered",
+            "default",
+            DecisionInput {
+                session_id: "session-b",
+                trace_id: Some("trace-a"),
+                parent_step_id: Some(first.node_id),
+                action: "answer",
+                rationale: "Use the retrieved observation",
+                evidence_node_ids: &[evidence],
+                outcome: "answered",
+            },
         )
         .unwrap();
 
@@ -226,37 +303,46 @@ mod tests {
         let mut store = GraphStore::new();
         let parent = record_decision(
             &mut store,
-            "session-a",
-            Some("trace-a"),
-            None,
-            "observe",
-            "first step",
-            &[],
-            "done",
+            "default",
+            DecisionInput {
+                session_id: "session-a",
+                trace_id: Some("trace-a"),
+                parent_step_id: None,
+                action: "observe",
+                rationale: "first step",
+                evidence_node_ids: &[],
+                outcome: "done",
+            },
         )
         .unwrap();
         let before = store.node_count();
         assert!(record_decision(
             &mut store,
-            "session-a",
-            Some("trace-a"),
-            None,
-            "answer",
-            "missing evidence",
-            &[NodeId::new(999_999)],
-            "done",
+            "default",
+            DecisionInput {
+                session_id: "session-a",
+                trace_id: Some("trace-a"),
+                parent_step_id: None,
+                action: "answer",
+                rationale: "missing evidence",
+                evidence_node_ids: &[NodeId::new(999_999)],
+                outcome: "done",
+            },
         )
         .unwrap_err()
         .contains("evidence node"));
         assert!(record_decision(
             &mut store,
-            "session-a",
-            Some("trace-b"),
-            Some(parent.node_id),
-            "answer",
-            "wrong trace",
-            &[],
-            "done",
+            "default",
+            DecisionInput {
+                session_id: "session-a",
+                trace_id: Some("trace-b"),
+                parent_step_id: Some(parent.node_id),
+                action: "answer",
+                rationale: "wrong trace",
+                evidence_node_ids: &[],
+                outcome: "done",
+            },
         )
         .unwrap_err()
         .contains("same trace"));
@@ -268,13 +354,16 @@ mod tests {
         let mut store = GraphStore::new();
         let step = record_decision(
             &mut store,
-            "session-a",
-            None,
-            None,
-            "inspect",
-            "start trace",
-            &[],
-            "done",
+            "default",
+            DecisionInput {
+                session_id: "session-a",
+                trace_id: None,
+                parent_step_id: None,
+                action: "inspect",
+                rationale: "start trace",
+                evidence_node_ids: &[],
+                outcome: "done",
+            },
         )
         .unwrap();
         assert!(!step.trace_id.is_empty());
