@@ -81,6 +81,33 @@ static QUERIES_TOTAL: AtomicU64 = AtomicU64::new(0);
 static QUERIES_FAILED: AtomicU64 = AtomicU64::new(0);
 static SLOW_QUERIES: AtomicU64 = AtomicU64::new(0);
 
+static IN_FLIGHT: AtomicU64 = AtomicU64::new(0);
+
+/// A query counted as executing until this is dropped (#2080).
+///
+/// A guard rather than a pair of calls, so an early `?` return or a panic
+/// still takes the query back out of the count; a gauge that only ever rises
+/// is worse than no gauge. One relaxed atomic each way, and no lock.
+#[must_use = "the query is counted only while this is held"]
+pub struct InFlight(());
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Count a query as executing. Hold the result for as long as it runs.
+pub fn in_flight() -> InFlight {
+    IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+    InFlight(())
+}
+
+/// Queries executing now.
+pub fn queries_in_flight() -> u64 {
+    IN_FLIGHT.load(Ordering::Relaxed)
+}
+
 /// Record one executed query.
 ///
 /// `slow` is whatever the engine's own slow-query threshold decided, rather
@@ -178,6 +205,31 @@ pub fn render() -> String {
          # TYPE samyama_slow_queries_total counter\n\
          samyama_slow_queries_total {}\n",
         s.slow
+    ));
+    out.push_str(&format!(
+        "# HELP samyama_queries_in_flight Queries executing now: from parse to the last row, holding the store lock. A query still waiting for the lock is not counted; its wait is in lock_wait_ms on its response.\n\
+         # TYPE samyama_queries_in_flight gauge\n\
+         samyama_queries_in_flight {}\n",
+        queries_in_flight()
+    ));
+    let durability = crate::persistence::health::counters();
+    out.push_str(&format!(
+        "# HELP samyama_persistence_degraded 1 once a write has failed to reach disk; writes are refused until a restart. 0 otherwise, including on a server with no persistence.\n\
+         # TYPE samyama_persistence_degraded gauge\n\
+         samyama_persistence_degraded {}\n",
+        u8::from(crate::persistence::health::is_degraded())
+    ));
+    out.push_str(&format!(
+        "# HELP samyama_mutations_persisted_total Mutations written to disk, over auto-commit statements and committed transactions.\n\
+         # TYPE samyama_mutations_persisted_total counter\n\
+         samyama_mutations_persisted_total {}\n",
+        durability.mutations_persisted
+    ));
+    out.push_str(&format!(
+        "# HELP samyama_persistence_errors_total Attempts to write mutations to disk that failed. The first one marks the server degraded; a failed transaction commit is rolled back and does not.\n\
+         # TYPE samyama_persistence_errors_total counter\n\
+         samyama_persistence_errors_total {}\n",
+        durability.errors
     ));
     out
 }
