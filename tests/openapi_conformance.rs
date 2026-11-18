@@ -181,6 +181,16 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
             vec![bare("unknown id", "/optimize/solve/nope/cancel")]
         }
         ("GET", "/api/memory") => vec![bare("memory", "/api/memory")],
+        ("GET", "/api/slowlog") => vec![
+            bare("slowlog", "/api/slowlog"),
+            bare("a limit", "/api/slowlog?limit=1"),
+            bare("a negative limit", "/api/slowlog?limit=-1"),
+        ],
+        ("DELETE", "/api/slowlog") => vec![bare("reset", "/api/slowlog")],
+        ("GET", "/api/changes") => vec![
+            bare("no token", "/api/changes"),
+            bare("a token that does not parse", "/api/changes?since=nope"),
+        ],
         ("GET", "/metrics") => vec![bare("metrics", "/metrics")],
         ("GET", "/api/status") => vec![bare("status", "/api/status")],
         ("GET", "/api/tenants") => vec![bare("list", "/api/tenants")],

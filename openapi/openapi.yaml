@@ -706,6 +706,8 @@ paths:
             type: integer
             minimum: 0
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The slow-query log
           content:
