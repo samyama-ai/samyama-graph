@@ -899,10 +899,12 @@ fn plan_return_projection(
     (operator, output_columns)
 }
 
-/// The `db.*` procedures `plan_call` dispatches, spelled as it accepts them.
+/// The named procedures `plan_call` dispatches (`db.*`, and `ai.rag.retrieve`),
+/// spelled as it accepts them.
 /// Offered as "did you mean" for an unknown procedure (DX-06);
 /// `every_listed_procedure_plans` keeps the list honest.
 pub const KNOWN_DB_PROCEDURES: &[&str] = &[
+    "ai.rag.retrieve",
     "db.checkIntegrity",
     "db.index.fulltext.queryNodes",
     "db.index.point.nearest",
@@ -4080,6 +4082,43 @@ impl QueryPlanner {
                 call_clause.arguments.clone(),
                 &yields,
             )?));
+        }
+
+        if call_clause.procedure_name == super::rag_ops::NAME {
+            // (label, property, queryVector, k, hops) (#2098). The first four
+            // are `db.index.vector.queryNodes`' own, planned by it, so the two
+            // read their arguments the same way and refuse the same mistakes.
+            let args = &call_clause.arguments;
+            if args.len() != 5 {
+                return Err(ExecutionError::PlanningError(format!(
+                    "{} takes (label, property, queryVector, k, hops)",
+                    super::rag_ops::NAME
+                )));
+            }
+            let hops = match super::operator::eval_expression(&args[4], &super::Record::new(), store) {
+                Ok(super::Value::Property(PropertyValue::Integer(h))) if h >= 0 => h as usize,
+                _ => {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "{}: hops must be a non-negative integer",
+                        super::rag_ops::NAME
+                    )))
+                }
+            };
+            let search = CallClause {
+                procedure_name: "db.index.vector.queryNodes".to_string(),
+                arguments: args[..4].to_vec(),
+                yield_items: ["node", "score"]
+                    .iter()
+                    .map(|n| crate::query::ast::YieldItem { name: n.to_string(), alias: None })
+                    .collect(),
+            };
+            let search = self.plan_call_filtered(&search, store, None, None)?;
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::rag_ops::RagRetrieveOperator::new(search, hops, &yields)?));
         }
 
         if call_clause.procedure_name == "db.index.vector.queryNodes" {
