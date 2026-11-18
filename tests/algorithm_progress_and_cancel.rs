@@ -174,9 +174,19 @@ fn post(uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::post(uri).header("content-type", "application/json").body(Body::from(body.to_string())).unwrap()
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn over_http_a_long_algorithm_is_listed_cancelled_and_the_server_answers_throughout() {
+#[test]
+fn over_http_a_long_algorithm_is_listed_cancelled_and_the_server_answers_throughout() {
+    // The lock is held outside the runtime, not across its awaits.
     let _serial = one_at_a_time();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(over_http());
+}
+
+async fn over_http() {
     let app = HttpServer::new(Arc::new(RwLock::new(build())), 0).router();
 
     // Nothing of ours is running yet; the listing answers anyway.
