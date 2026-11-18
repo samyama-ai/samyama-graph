@@ -2,7 +2,10 @@
 //! Each holds every index's vector list and, where it could be written, its
 //! HNSW graph (#1973). The vector list is required; the graph is an
 //! accelerator, and a graph file that fails its checksum only costs a rebuild.
+//! An IVF index's centroids (#1975) are an accelerator in the same sense.
+
 use super::index::graph_io::GRAPH_SUFFIXES;
+use super::index::ivf::PARTITION_SUFFIX;
 use super::{VectorError, VectorResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -19,6 +22,11 @@ struct Manifest {
 }
 fn bad(message: impl Into<String>) -> VectorError {
     VectorError::IndexError(message.into())
+}
+/// Whether `name` is an accelerator -- an HNSW graph file or IVF centroids --
+/// rather than a file the generation cannot do without.
+fn accelerator(name: &str) -> bool {
+    GRAPH_SUFFIXES.iter().any(|s| name.ends_with(s)) || name.ends_with(PARTITION_SUFFIX)
 }
 fn filename(s: &str) -> VectorResult<()> {
     let mut parts = Path::new(s).components();
@@ -92,7 +100,7 @@ pub(super) fn verify(path: &Path) -> VectorResult<BTreeSet<String>> {
     let mut graphs = BTreeSet::new();
     for (name, expected) in &manifest.files {
         filename(name)?;
-        let graph = GRAPH_SUFFIXES.iter().any(|s| name.ends_with(s));
+        let graph = accelerator(name);
         let matches = match digest(&path.join(name)) {
             Ok(actual) => actual == *expected,
             Err(_) if graph => false,
@@ -122,7 +130,7 @@ pub(super) fn verify(path: &Path) -> VectorResult<BTreeSet<String>> {
             .as_str()
             .ok_or_else(|| bad("missing filename"))?;
         filename(file)?;
-        if GRAPH_SUFFIXES.iter().any(|s| file.ends_with(s)) {
+        if accelerator(file) {
             return Err(bad("vector list named as a graph file"));
         }
         if !manifest.files.contains_key(file) {
