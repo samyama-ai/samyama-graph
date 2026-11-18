@@ -580,6 +580,11 @@ mod tests {
         let batch_updates = PageRankConfig::default().iterations * n as usize;
         assert!(pushes * 10 < batch_updates, "{pushes} pushes against {batch_updates} batch node updates");
         assert!(state.max_residual() <= RESIDUAL_TOLERANCE);
+        // Tighter, and what `FIRST_BUILD_HEADROOM` is for: this graph and edge
+        // take 481 pushes with the headroom and 1,614 without it, when nodes
+        // the first build left just under the tolerance tip over. A twentieth
+        // of a sweep sits between the two.
+        assert!(pushes < n as usize / 20, "{pushes} pushes: the first build left no headroom");
     }
 
     #[test]
