@@ -301,6 +301,9 @@ impl QueryEngine {
         succeeded: bool,
         is_write: bool,
     ) {
+        // Every statement ends here, run or refused, so its USDT probe does
+        // too (#2219).
+        crate::usdt::query_done(query_str, elapsed, rows, !succeeded, is_write);
         let ms = elapsed.as_millis() as u64;
         let slow = self.slow_query_ms != 0 && ms >= self.slow_query_ms;
 
@@ -520,6 +523,7 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        crate::usdt::query_start(query_str, false);
         let parse_started = std::time::Instant::now();
         let mut query = self.parse_to_run(query_str)?;
         // Only a non-Cypher dialect rewrites the AST, so only that pays for a
@@ -609,6 +613,7 @@ impl QueryEngine {
         sink: &mut dyn FnMut(&[String], Vec<executor::Record>) -> Result<(), String>,
         time_limit: Option<std::time::Duration>,
     ) -> Result<StreamedResult, Box<dyn std::error::Error>> {
+        crate::usdt::query_start(query_str, false);
         let query = self.parse_to_run(query_str)?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
@@ -714,6 +719,9 @@ impl QueryEngine {
                 // A hit is a query answered, and it returned before anything
                 // was counted: `/metrics` showed fewer queries than were served
                 // and a latency histogram of misses only (#2080).
+                // Served without running, so its start is reported here, at
+                // once before its end (#2219).
+                crate::usdt::query_start(query_str, false);
                 self.log_if_slow(query_str, started.elapsed(), hit.records.len(), true, false);
                 return Ok((hit.clone(), true));
             }
@@ -863,6 +871,7 @@ impl QueryEngine {
         params: &BoundParams,
         time_limit: Option<std::time::Duration>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        crate::usdt::query_start(query_str, true);
         let query = self.parse_to_run(query_str)?;
         let deadline = self.deadline(time_limit);
 

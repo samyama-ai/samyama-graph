@@ -387,6 +387,21 @@ impl PersistenceManager {
         store: &GraphStore,
         mutations: &[crate::graph::event::Mutation],
     ) -> Result<usize, PersistenceError> {
+        // The one path auto-commit statements and transaction commits both
+        // take to disk, so its USDT probes see every persist (#2219).
+        crate::usdt::persist_start(mutations.len());
+        let started = std::time::Instant::now();
+        let outcome = self.apply_mutations_inner(tenant, store, mutations);
+        crate::usdt::persist_done(mutations.len(), started.elapsed(), outcome.is_err());
+        outcome
+    }
+
+    fn apply_mutations_inner(
+        &self,
+        tenant: &str,
+        store: &GraphStore,
+        mutations: &[crate::graph::event::Mutation],
+    ) -> Result<usize, PersistenceError> {
         use crate::graph::event::Mutation;
         use std::collections::HashMap;
 
