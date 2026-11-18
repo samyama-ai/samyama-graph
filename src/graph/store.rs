@@ -1088,8 +1088,9 @@ pub struct MemoryReport {
 }
 
 impl MemoryReport {
-    /// Everything the walk attributes. Deliberately not called `total`: the vector,
-    /// property and hierarchy index managers are behind `Arc` and are not walked, so
+    /// Everything the walk attributes. Deliberately not called `total`: the
+    /// indexes (vector and hierarchy included) are counted by
+    /// `GraphStore::index_memory`, not here, and allocator slack by nothing, so
     /// this is a floor on the graph's footprint and not the process's.
     pub fn attributed(&self) -> usize {
         self.node_columns
@@ -1736,9 +1737,9 @@ impl GraphStore {
     /// walked, so this is O(nodes + edges) and is a diagnostic rather than
     /// something to call per query.
     ///
-    /// Heap only. The `Arc`-held index managers report their own sizes if they can;
-    /// what is not attributed here is named in `unattributed_note` rather than
-    /// silently folded into another line.
+    /// Heap only, and the graph only. The `Arc`-held index managers report their
+    /// own sizes through [`GraphStore::index_memory`] rather than being folded
+    /// into a line here, so the two never count the same bytes.
     /// Resident bytes of every index the store holds, one row each, largest
     /// first (COST-06, NDS-14).
     ///
