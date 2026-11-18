@@ -1804,7 +1804,8 @@ impl QueryPlanner {
                     clause.similarity.clone(),
                 ).with_name(clause.index_name.clone())
                  .with_quantization(clause.quantization)
-                 .with_params(clause.params)),
+                 .with_params(clause.params)
+                 .with_kind(clause.kind)),
                 output_columns: vec![],
                 is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
@@ -4250,6 +4251,11 @@ impl QueryPlanner {
                 store.vector_index.get_index(&label, &property).and_then(|index| {
                     let index = index.read().ok()?;
                     let params = index.params();
+                    if let Some((nlist, nprobe)) = ivf_probe(&index, ef) {
+                        return Some(crate::vector::strategy::FilterPlan::estimate_enumerated_ivf(
+                            index.len(), index.dimensions(), k, nlist, nprobe, subtree, filter_selectivity,
+                        ));
+                    }
                     Some(crate::vector::strategy::FilterPlan::estimate_enumerated(
                         index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, subtree, filter_selectivity,
                     ))
@@ -4260,17 +4266,28 @@ impl QueryPlanner {
                     let index = store.vector_index.get_index(&label, &property)?;
                     let index = index.read().ok()?;
                     let params = index.params();
+                    if let Some((nlist, nprobe)) = ivf_probe(&index, ef) {
+                        return Some(crate::vector::strategy::FilterPlan::estimate_ivf(
+                            index.len(), index.dimensions(), k, nlist, nprobe, selectivity,
+                        ));
+                    }
                     Some(crate::vector::strategy::FilterPlan::estimate(
                         index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, selectivity,
                     ))
                 })
             };
+            // The index's kind, for EXPLAIN (#1975).
+            let index_kind = store
+                .vector_index
+                .get_index(&label, &property)
+                .and_then(|index| index.read().ok().map(|i| i.kind()));
             Ok(Box::new(
                 VectorSearchOperator::new(label, property, query_vector, k, node_var, score_var)
                     .with_plan(plan)
                     .with_scope(scope)
                     .with_filter(vector_filter)
                     .with_ef(ef)
+                    .with_kind(index_kind)
                     .with_distance_var(distance_var),
             ))
         } else if call_clause.procedure_name == "db.checkIntegrity"
@@ -8710,7 +8727,7 @@ fn choose_anchor_index(
 /// `timestamp()` and the temporal constructors read the statement clock, which
 /// is fixed for the statement, so they are not volatile. `rand()`,
 /// `randomUUID()` and the `*.realtime` functions read a fresh value each call.
-fn is_volatile(expr: &Expression) -> bool {
+pub(crate) fn is_volatile(expr: &Expression) -> bool {
     match expr {
         Expression::Function { name, args, .. } => {
             let name = name.to_ascii_lowercase();
@@ -8761,9 +8778,12 @@ fn is_volatile(expr: &Expression) -> bool {
     }
 }
 
-/// The `ef` of `db.index.vector.queryNodes`'s options map (#1971). Any other
-/// key is refused: an option the search ignored would answer at a width the
-/// caller did not ask for, and say nothing.
+/// The `ef` of `db.index.vector.queryNodes`'s options map (#1971), or its
+/// `nprobe` (#1975): the search width, which for an IVF index is the number
+/// of lists it scores. Either name is accepted for either kind, since the
+/// options are read before the index is. Any other key is refused: an option
+/// the search ignored would answer at a width the caller did not ask for,
+/// and say nothing.
 fn vector_query_ef(options: &Expression) -> ExecutionResult<Option<usize>> {
     let bad = |msg: String| ExecutionError::PlanningError(format!("db.index.vector.queryNodes: {msg}"));
     let entries: Vec<(String, Option<i64>)> = match options {
@@ -8791,16 +8811,42 @@ fn vector_query_ef(options: &Expression) -> ExecutionResult<Option<usize>> {
     };
     let mut ef = None;
     for (key, value) in entries {
-        if key != "ef" {
-            return Err(bad(format!("unknown option `{key}`; the accepted option is `ef`")));
+        if key != "ef" && key != "nprobe" {
+            return Err(bad(format!(
+                "unknown option `{key}`; the accepted options are `ef` (HNSW) and `nprobe` (IVF)"
+            )));
+        }
+        if ef.is_some() {
+            return Err(bad("give one of `ef` and `nprobe`, not both".to_string()));
         }
         let value = value
             .filter(|v| *v > 0)
-            .ok_or_else(|| bad("`ef` must be a positive integer literal".to_string()))?;
-        crate::vector::index::check_ef(value as usize).map_err(bad)?;
+            .ok_or_else(|| bad(format!("`{key}` must be a positive integer literal")))?;
+        if key == "ef" {
+            crate::vector::index::check_ef(value as usize).map_err(bad)?;
+        } else {
+            crate::vector::IvfParams { nlist: None, nprobe: Some(value as usize) }
+                .validate()
+                .map_err(bad)?;
+        }
         ef = Some(value as usize);
     }
     Ok(ef)
+}
+
+/// The lists an IVF index has and the number a search of width `width`
+/// would probe, for pricing a filtered search (#1975). `None` for HNSW. An
+/// untrained index is one list, probed whole: it scans everything.
+fn ivf_probe(index: &crate::vector::VectorIndex, width: Option<usize>) -> Option<(usize, usize)> {
+    let crate::vector::IndexKind::Ivf(p) = index.kind() else {
+        return None;
+    };
+    let nlist = index.ivf_lists().max(1);
+    let nprobe = width
+        .or(p.nprobe)
+        .unwrap_or_else(|| crate::vector::index::ivf::auto_nprobe(nlist))
+        .clamp(1, nlist);
+    Some((nlist, nprobe))
 }
 
 /// Flatten an AND-chain expression into a list of individual predicates.
