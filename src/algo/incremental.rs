@@ -557,6 +557,23 @@ mod tests {
     }
 
     #[test]
+    fn a_node_the_log_missed_is_caught_by_the_count_check() {
+        // A node with no relationships changes no relationship count, so only
+        // the node count can notice it was missed.
+        let (mut s, _) = ring(10);
+        degree(&s, None, None, &NoProgress).unwrap();
+        s.create_node("P");
+        {
+            let slot = s.incremental_states().slot(&StateKey::new(Algorithm::Degree, None, None));
+            let mut guard = slot.lock().unwrap();
+            guard.as_mut().unwrap().at = s.structure_log().position();
+        }
+        let (rows, how) = degree(&s, None, None, &NoProgress).unwrap();
+        assert_eq!(how, Refresh::Rebuilt { reason: RebuildReason::CountMismatch });
+        assert_eq!(rows.len(), 11, "the missed node is not in the answer");
+    }
+
+    #[test]
     fn filters_and_damping_keep_separate_states() {
         let (mut s, ids) = ring(6);
         s.create_edge(ids[0], ids[3], "M").unwrap();
