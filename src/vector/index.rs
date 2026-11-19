@@ -48,6 +48,7 @@
 
 use crate::graph::NodeId;
 use crate::vector::distance;
+use crate::vector::exact::{self, ExactBackend};
 use half::f16;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -56,6 +57,8 @@ use thiserror::Error;
 
 /// Graph dump and reload for checkpoints (#1973).
 pub(crate) mod graph_io;
+/// The inverted-file index kind (#1975).
+pub mod ivf;
 
 /// Vector index errors
 #[derive(Error, Debug)]
@@ -329,6 +332,83 @@ impl std::fmt::Display for HnswParams {
     }
 }
 
+/// The parameters of an IVF index (#1975). `None` is chosen from the data:
+/// see [`ivf::auto_nlist`] and [`ivf::auto_nprobe`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IvfParams {
+    /// Lists the vectors are partitioned into. `None` is `sqrt(n)` at the
+    /// time the index is trained.
+    pub nlist: Option<usize>,
+    /// Lists a search scores by default. A query can pass its own.
+    pub nprobe: Option<usize>,
+}
+
+impl IvfParams {
+    /// Accepted `nlist` and `nprobe`.
+    pub const RANGE: std::ops::RangeInclusive<usize> = 1..=65_536;
+
+    /// Refuse a value outside [`Self::RANGE`], naming the option.
+    pub fn validate(&self) -> Result<(), String> {
+        for (name, value) in [("nlist", self.nlist), ("nprobe", self.nprobe)] {
+            if let Some(v) = value.filter(|v| !Self::RANGE.contains(v)) {
+                return Err(format!(
+                    "`{name}` must be between {} and {}, got {v}",
+                    Self::RANGE.start(),
+                    Self::RANGE.end()
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Which structure answers an index's searches (#1975). Declared with
+/// `OPTIONS {kind: 'hnsw' | 'ivf'}`; HNSW is the default.
+///
+/// Both kinds keep the same vector list -- the one persisted, scanned by the
+/// exact paths and filtered by the same rules -- and differ only in what
+/// narrows a search: a navigable graph, or a partition into lists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum IndexKind {
+    /// Hierarchical navigable small world graph.
+    #[default]
+    Hnsw,
+    /// Inverted file: k-means lists, the nearest `nprobe` of them scored
+    /// exactly.
+    Ivf(IvfParams),
+}
+
+impl IndexKind {
+    /// Parse the `kind` DDL option, with no IVF parameters yet.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "hnsw" => Some(Self::Hnsw),
+            "ivf" | "ivf_flat" | "ivfflat" => Some(Self::Ivf(IvfParams::default())),
+            _ => None,
+        }
+    }
+
+    /// The kind's name, as `SHOW INDEXES` and `EXPLAIN` print it.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Hnsw => "hnsw",
+            Self::Ivf(_) => "ivf",
+        }
+    }
+
+    pub fn is_ivf(&self) -> bool {
+        matches!(self, Self::Ivf(_))
+    }
+
+    /// Refuse parameters outside their ranges.
+    pub fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Hnsw => Ok(()),
+            Self::Ivf(p) => p.validate(),
+        }
+    }
+}
+
 /// Inner Product distance implementation for hnsw_rs
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InnerProductDistance;
@@ -402,6 +482,9 @@ impl MetricDistance {
 
 impl Distance<f32> for MetricDistance {
     fn eval(&self, va: &[f32], vb: &[f32]) -> f32 {
+        // Every distance the index computes, in the graph and in the exact
+        // scans, comes through here, so this is where PROFILE counts them.
+        super::work::distance();
         self.rank_f32(va, vb)
     }
 }
@@ -418,7 +501,7 @@ fn cosine_rank(dot: f32, norm_a: f32, norm_b: f32) -> f32 {
 
 /// Continuous at 0 (both sides give 1), positive, and larger for a smaller
 /// dot product: the order of `-dot`, without a negative value.
-fn inner_product_rank(dot: f32) -> f32 {
+pub(super) fn inner_product_rank(dot: f32) -> f32 {
     if dot >= 0.0 {
         1.0 / (1.0 + dot)
     } else {
@@ -429,6 +512,7 @@ fn inner_product_rank(dot: f32) -> f32 {
 /// Computed in f32, as `CosineDistanceF16` is, for its reason.
 impl Distance<f16> for MetricDistance {
     fn eval(&self, va: &[f16], vb: &[f16]) -> f32 {
+        super::work::distance();
         self.rank(va.iter().zip(vb).map(|(a, b)| (a.to_f32(), b.to_f32())))
     }
 }
@@ -446,9 +530,13 @@ pub struct StoredVector {
 /// element: an index that converted f16 to f32 at the boundary would keep the
 /// f32 copy inside the graph, and the memory saving -- the entire point of
 /// NDS-09's quantization -- would be a claim about the persistence copy only.
+///
+/// An IVF index (#1975) has no graph: its lists hold positions into the same
+/// stored vectors, at whichever precision the index keeps them.
 enum Backend {
     F32(Hnsw<'static, f32, MetricDistance>),
     F16(Hnsw<'static, f16, MetricDistance>),
+    Ivf(ivf::Ivf),
 }
 
 /// Wrapper around HNSW index
@@ -461,7 +549,9 @@ pub struct VectorIndex {
     quantization: Quantization,
     /// Graph shape and default search width (#1971).
     params: HnswParams,
-    /// The actual HNSW index
+    /// HNSW or IVF, and the IVF parameters (#1975).
+    kind: IndexKind,
+    /// The actual HNSW index, or the IVF lists
     backend: Backend,
     /// All inserted vectors (for persistence — HNSW doesn't expose iteration),
     /// held at the index's own precision so this copy is halved too.
@@ -501,6 +591,7 @@ impl std::fmt::Debug for VectorIndex {
             .field("metric", &self.metric)
             .field("quantization", &self.quantization)
             .field("params", &self.params)
+            .field("kind", &self.kind)
             .field("len", &self.len())
             .finish()
     }
@@ -532,6 +623,18 @@ impl VectorIndex {
         Self::build(dimensions, metric, quantization, params, 0)
     }
 
+    /// Create an index of the given kind (#1975). The caller validates the
+    /// parameters; see [`IndexKind::validate`].
+    pub fn with_kind(
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+        params: HnswParams,
+        kind: IndexKind,
+    ) -> Self {
+        Self::build_kind(dimensions, metric, quantization, params, kind, 0)
+    }
+
     /// `expected` sizes the graph's first allocation and nothing else: it is
     /// not a capacity, and the graph grows past it. It was a fixed 100,000,
     /// which reserved room for that many points in every index, the empty
@@ -543,15 +646,27 @@ impl VectorIndex {
         params: HnswParams,
         expected: usize,
     ) -> Self {
+        Self::build_kind(dimensions, metric, quantization, params, IndexKind::Hnsw, expected)
+    }
+
+    fn build_kind(
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+        params: HnswParams,
+        kind: IndexKind,
+        expected: usize,
+    ) -> Self {
         let HnswParams { m, ef_construction, .. } = params;
         // Built with the declared metric: before #1967 every index was
         // cosine, whatever `similarity` said.
         let distance = MetricDistance(metric);
-        let backend = match quantization {
-            Quantization::None => Backend::F32(Hnsw::new(
+        let backend = match (kind, quantization) {
+            (IndexKind::Ivf(_), _) => Backend::Ivf(ivf::Ivf::default()),
+            (IndexKind::Hnsw, Quantization::None) => Backend::F32(Hnsw::new(
                 m, expected, 16, ef_construction, distance,
             )),
-            Quantization::Fp16 => Backend::F16(Hnsw::new(
+            (IndexKind::Hnsw, Quantization::Fp16) => Backend::F16(Hnsw::new(
                 m, expected, 16, ef_construction, distance,
             )),
         };
@@ -560,6 +675,7 @@ impl VectorIndex {
             metric,
             quantization,
             params,
+            kind,
             backend,
             stored_f32: Vec::new(),
             stored_f16: Vec::new(),
@@ -581,12 +697,53 @@ impl VectorIndex {
 
     /// Change the parameters. A new `m` or `ef_construction` rebuilds the
     /// graph from the current entries; a new default `ef` does not, since it
-    /// changes only how the graph is searched.
+    /// changes only how the graph is searched. An IVF index has no graph,
+    /// and only records them.
     pub fn set_params(&mut self, params: HnswParams) {
-        if params.same_graph(&self.params) {
+        if params.same_graph(&self.params) || self.kind.is_ivf() {
             self.params = params;
         } else {
             self.rebuild_with(params);
+        }
+    }
+
+    /// The kind of index this is, with its IVF parameters (#1975).
+    pub fn kind(&self) -> IndexKind {
+        self.kind
+    }
+
+    /// Change the kind. Another kind, or another `nlist`, rebuilds the index
+    /// from its current entries; a new default `nprobe` only changes how the
+    /// lists are searched.
+    pub fn set_kind(&mut self, kind: IndexKind) {
+        match (self.kind, kind) {
+            (IndexKind::Ivf(a), IndexKind::Ivf(b)) if a.nlist == b.nlist => self.kind = kind,
+            (a, b) if a == b => {}
+            _ => {
+                let live: Vec<StoredVector> = self.iter_stored().collect();
+                let mut fresh = Self::build_kind(
+                    self.dimensions,
+                    self.metric,
+                    self.quantization,
+                    self.params,
+                    kind,
+                    live.len(),
+                );
+                for sv in &live {
+                    let _ = fresh.insert(NodeId::new(sv.node_id), &sv.vector, false);
+                }
+                fresh.train_if_due();
+                *self = fresh;
+            }
+        }
+    }
+
+    /// How SHOW INDEXES describes the index: the HNSW parameters as #1971
+    /// printed them, or the IVF ones with `kind=ivf` (#1975).
+    pub fn describe(&self) -> String {
+        match &self.backend {
+            Backend::Ivf(lists) => lists.describe(self.kind),
+            _ => self.params.to_string(),
         }
     }
 
@@ -596,7 +753,9 @@ impl VectorIndex {
     /// Reported rather than asserted. A quantization that claims to halve
     /// memory has to be able to show it.
     pub fn vector_bytes(&self) -> usize {
-        2 * self.entries() * self.dimensions * self.quantization.bytes_per_value()
+        // An IVF index keeps one copy: its lists point into the stored one.
+        let copies = if self.kind.is_ivf() { 1 } else { 2 };
+        copies * self.entries() * self.dimensions * self.quantization.bytes_per_value()
     }
 
     /// Bytes held by the HNSW navigable graph: each point's per-layer
@@ -631,6 +790,8 @@ impl VectorIndex {
         match &self.backend {
             Backend::F32(h) => walk(h.get_point_indexation()),
             Backend::F16(h) => walk(h.get_point_indexation()),
+            // The IVF's own structure: its centroids and its lists.
+            Backend::Ivf(lists) => lists.bytes(),
         }
     }
 
@@ -653,6 +814,17 @@ impl VectorIndex {
 
     /// Add a vector to the index
     pub fn add(&mut self, node_id: NodeId, vector: &Vec<f32>) -> VectorResult<()> {
+        self.insert(node_id, vector, true)
+    }
+
+    /// [`add`](Self::add) for a bulk load: an IVF index does not (re)train
+    /// on the way, and [`train_if_due`](Self::train_if_due) is called once
+    /// at the end instead. The same as `add` for HNSW.
+    pub fn add_untrained(&mut self, node_id: NodeId, vector: &[f32]) -> VectorResult<()> {
+        self.insert(node_id, vector, false)
+    }
+
+    fn insert(&mut self, node_id: NodeId, vector: &[f32], train: bool) -> VectorResult<()> {
         if vector.len() != self.dimensions {
             return Err(VectorError::DimensionMismatch {
                 expected: self.dimensions,
@@ -675,7 +847,7 @@ impl VectorIndex {
                 self.exact.entry(key).or_default().push(pos);
                 self.stored_f32.push(StoredVector {
                     node_id: node_id.0,
-                    vector: vector.clone(),
+                    vector: vector.to_vec(),
                 });
             }
             Backend::F16(h) => {
@@ -689,11 +861,36 @@ impl VectorIndex {
                 self.exact.entry(key).or_default().push(pos);
                 self.stored_f16.push((node_id.0, q));
             }
+            // An IVF list is a list of positions. The vector is placed by
+            // the value stored, so a quantized index partitions the values
+            // its searches compare.
+            Backend::Ivf(lists) => match self.quantization {
+                Quantization::None => {
+                    let key = bits_key(vector, |v: f32| v.to_bits() as u64);
+                    self.exact.entry(key).or_default().push(pos);
+                    lists.place(pos, vector, self.metric);
+                    self.stored_f32.push(StoredVector {
+                        node_id: node_id.0,
+                        vector: vector.to_vec(),
+                    });
+                }
+                Quantization::Fp16 => {
+                    let q: Vec<f16> = vector.iter().map(|v| f16::from_f32(*v)).collect();
+                    let key = bits_key(&q, |v: f16| v.to_bits() as u64);
+                    self.exact.entry(key).or_default().push(pos);
+                    let widened: Vec<f32> = q.iter().map(|v| v.to_f32()).collect();
+                    lists.place(pos, &widened, self.metric);
+                    self.stored_f16.push((node_id.0, q));
+                }
+            },
         }
         // A node given a new vector: the old entry stops answering for it.
         if self.current.insert(node_id.0, pos).is_some() {
             self.superseded += 1;
             self.compact_if_mostly_dead();
+        }
+        if train {
+            self.train_if_due();
         }
 
         Ok(())
@@ -747,14 +944,27 @@ impl VectorIndex {
         self.rebuild_with(self.params);
     }
 
-    /// Rebuild from the current entries with `params`.
+    /// Rebuild from the current entries with `params`. An IVF index keeps
+    /// its centroids and re-places the entries, so compacting it does not
+    /// re-run k-means (#1975).
     fn rebuild_with(&mut self, params: HnswParams) {
         let live: Vec<StoredVector> = self.iter_stored().collect();
-        let mut fresh = Self::build(self.dimensions, self.metric, self.quantization, params, live.len());
+        let mut fresh = Self::build_kind(
+            self.dimensions,
+            self.metric,
+            self.quantization,
+            params,
+            self.kind,
+            live.len(),
+        );
+        if let (Backend::Ivf(old), Backend::Ivf(new)) = (&self.backend, &mut fresh.backend) {
+            *new = old.emptied();
+        }
         for sv in &live {
             // Every entry here was accepted at this dimension already.
-            let _ = fresh.add(NodeId::new(sv.node_id), &sv.vector);
+            let _ = fresh.insert(NodeId::new(sv.node_id), &sv.vector, false);
         }
+        fresh.train_if_due();
         *self = fresh;
     }
 
@@ -778,6 +988,10 @@ impl VectorIndex {
                 expected: self.dimensions,
                 got: query.len(),
             });
+        }
+        // An IVF index's search width is its `nprobe` (#1975).
+        if self.kind.is_ivf() {
+            return Ok(self.report(self.ivf_search(query, k, ef, &|_| true)));
         }
         
         // ef_search drives recall (HNSW only returns from the ef candidate set), so
@@ -837,6 +1051,8 @@ impl VectorIndex {
                     let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
                     h.search_filter(&q, want, ef_search, filter)
                 }
+                // Answered above.
+                Backend::Ivf(_) => Vec::new(),
             }
         })) {
             Ok(r) => r,
@@ -1028,19 +1244,51 @@ impl VectorIndex {
         k: usize,
         keep: &dyn Fn(NodeId) -> bool,
     ) -> Vec<(NodeId, f32)> {
+        let (scored, backend) = self.brute_force_where_with(query, k, keep, exact::gpu_min_work());
+        exact::record(backend);
+        scored
+    }
+
+    /// [`brute_force_where`](Self::brute_force_where), sending an f32 scan of
+    /// at least `gpu_min_work` candidates x dimensions to the GPU when the
+    /// build and the host allow it (#1977; see [`exact`]), and saying which
+    /// device answered.
+    pub(super) fn brute_force_where_with(
+        &self,
+        query: &[f32],
+        k: usize,
+        keep: &dyn Fn(NodeId) -> bool,
+        gpu_min_work: usize,
+    ) -> (Vec<(NodeId, f32)>, ExactBackend) {
         let distance = MetricDistance(self.metric);
+        let mut backend = ExactBackend::Cpu;
         // The query is quantized to match what is stored, so the exact search
         // answers the same question the graph does. Comparing a full-precision
         // query against quantized vectors would make the fallback disagree with
         // the index it is standing in for, which is worse than either.
         let mut scored: Vec<(NodeId, f32)> = match self.quantization {
-            Quantization::None => self
-                .stored_f32
-                .iter()
-                .enumerate()
-                .filter(|(i, sv)| self.is_current(*i) && keep(NodeId::new(sv.node_id)))
-                .map(|(_, sv)| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
-                .collect(),
+            Quantization::None => {
+                let rows: Vec<&StoredVector> = self
+                    .stored_f32
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, sv)| self.is_current(*i) && keep(NodeId::new(sv.node_id)))
+                    .map(|(_, sv)| sv)
+                    .collect();
+                match exact::gpu_ranks(self.metric, query, &rows, self.dimensions, gpu_min_work) {
+                    Some(ranks) => {
+                        backend = ExactBackend::Gpu;
+                        rows.iter()
+                            .zip(ranks)
+                            .map(|(sv, d)| (NodeId::new(sv.node_id), d))
+                            .collect()
+                    }
+                    None => rows
+                        .iter()
+                        .map(|sv| (NodeId::new(sv.node_id), distance.eval(query, &sv.vector)))
+                        .collect(),
+                }
+            }
             Quantization::Fp16 => {
                 let q: Vec<f16> = query.iter().map(|v| f16::from_f32(*v)).collect();
                 self.stored_f16
@@ -1055,7 +1303,7 @@ impl VectorIndex {
             scored.drain(..).filter(|(_, d)| d.is_finite()).collect();
         scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
-        scored
+        (scored, backend)
     }
 
     /// Get dimensions
@@ -1124,23 +1372,51 @@ impl VectorIndex {
         quantization: Quantization,
         params: HnswParams,
     ) -> VectorResult<Self> {
+        Self::load_with_kind(path, dimensions, metric, quantization, params, IndexKind::Hnsw)
+    }
+
+    /// Load an index of the given kind (#1975). An IVF index is trained
+    /// once, on everything loaded, rather than as the vectors arrive.
+    pub fn load_with_kind(
+        path: &std::path::Path,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+        params: HnswParams,
+        kind: IndexKind,
+    ) -> VectorResult<Self> {
+        let mut index = Self::load_untrained(path, dimensions, metric, quantization, params, kind)?;
+        index.train_if_due();
+        Ok(index)
+    }
+
+    /// The vector list at `path`, inserted without training.
+    fn load_untrained(
+        path: &std::path::Path,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+        params: HnswParams,
+        kind: IndexKind,
+    ) -> VectorResult<Self> {
         if !path.exists() {
-            return Ok(Self::with_params(dimensions, metric, quantization, params));
+            return Ok(Self::with_kind(dimensions, metric, quantization, params, kind));
         }
         let file = std::fs::File::open(path)?;
         let reader = std::io::BufReader::new(file);
         let stored_vectors: Vec<StoredVector> = bincode::deserialize_from(reader)
             .map_err(|e| VectorError::IndexError(format!("deserialization error: {}", e)))?;
 
-        let mut index = Self::build(
+        let mut index = Self::build_kind(
             dimensions,
             metric,
             quantization,
             params,
+            kind,
             stored_vectors.len(),
         );
         for sv in &stored_vectors {
-            index.add(NodeId::new(sv.node_id), &sv.vector)?;
+            index.insert(NodeId::new(sv.node_id), &sv.vector, false)?;
         }
         Ok(index)
     }

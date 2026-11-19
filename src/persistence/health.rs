@@ -34,11 +34,41 @@
 //! command: nothing in this process knows what was lost, so a command to carry
 //! on would be a command to guess.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 static DEGRADED: AtomicBool = AtomicBool::new(false);
 static REASON: Mutex<Option<String>> = Mutex::new(None);
+static MUTATIONS_PERSISTED: AtomicU64 = AtomicU64::new(0);
+static PERSIST_ERRORS: AtomicU64 = AtomicU64::new(0);
+
+/// What `/metrics` reports about writes to disk (#2080).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Counters {
+    /// Mutations written to disk since start.
+    pub mutations_persisted: u64,
+    /// Attempts to write mutations that failed.
+    pub errors: u64,
+}
+
+/// Count the outcome of one attempt to write `mutations` mutations to disk.
+/// Called by `PersistenceManager::apply_mutations`, the one path auto-commit
+/// statements and transaction commits both take.
+pub fn record_persist(mutations: usize, ok: bool) {
+    if ok {
+        MUTATIONS_PERSISTED.fetch_add(mutations as u64, Ordering::Relaxed);
+    } else {
+        PERSIST_ERRORS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// The counters, for `/metrics`.
+pub fn counters() -> Counters {
+    Counters {
+        mutations_persisted: MUTATIONS_PERSISTED.load(Ordering::Relaxed),
+        errors: PERSIST_ERRORS.load(Ordering::Relaxed),
+    }
+}
 
 /// Record that a write did not reach disk.
 ///
