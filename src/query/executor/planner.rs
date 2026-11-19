@@ -4778,6 +4778,17 @@ impl QueryPlanner {
             }
             return self.plan_match_native(match_clause, where_clause, store, n - 1);
         }
+        if graph_native && Self::is_cyclic(match_clause) {
+            // A cyclic pattern closes on a TrieJoin in the default planner,
+            // which counts parallel relationships correctly. The enumerator's
+            // plan closes it with an ExpandInto behind relationship-uniqueness
+            // Filters, which its TrieJoin rewrite cannot merge across, so with
+            // the graph-native planner on (the default since #1729) cyclic
+            // patterns lost their worst-case-optimal join (#2249, PERF-07).
+            // Until the enumerator's TrieJoin binds relationships with their
+            // multiplicity, a cycle goes to the planner that plans it right.
+            return self.plan_match(match_clause, where_clause, store);
+        }
         if graph_native {
             match self.plan_match_native(match_clause, where_clause, store, 0) {
                 Ok(plan) => Ok(plan),
@@ -4790,6 +4801,45 @@ impl QueryPlanner {
         } else {
             self.plan_match(match_clause, where_clause, store)
         }
+    }
+
+    /// Whether this MATCH's pattern closes a cycle: some relationship joins two
+    /// node variables its other relationships already connect (#2249). Each
+    /// anonymous node is its own; a relationship from a node to itself is a
+    /// cycle of one.
+    fn is_cyclic(match_clause: &MatchClause) -> bool {
+        let mut parent: Vec<usize> = Vec::new();
+        let mut named: HashMap<String, usize> = HashMap::new();
+        fn find(parent: &mut Vec<usize>, mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        let mut id = |node: &crate::query::ast::NodePattern, parent: &mut Vec<usize>| -> usize {
+            let fresh = |parent: &mut Vec<usize>| {
+                parent.push(parent.len());
+                parent.len() - 1
+            };
+            match &node.variable {
+                Some(v) => *named.entry(v.clone()).or_insert_with(|| fresh(parent)),
+                None => fresh(parent),
+            }
+        };
+        for path in &match_clause.pattern.paths {
+            let mut prev = id(&path.start, &mut parent);
+            for segment in &path.segments {
+                let next = id(&segment.node, &mut parent);
+                let (a, b) = (find(&mut parent, prev), find(&mut parent, next));
+                if a == b {
+                    return true;
+                }
+                parent[a] = b;
+                prev = next;
+            }
+        }
+        false
     }
 
     /// Why the cost-based enumerator cannot plan this MATCH exactly, or `None`
