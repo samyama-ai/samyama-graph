@@ -311,3 +311,34 @@ fn a_streamed_result_is_the_collected_result() {
         assert_eq!(rows, expected, "{q}");
     }
 }
+
+#[tokio::test]
+async fn a_streamed_header_carries_the_snapshot_hash_only_when_asked() {
+    // TRUST-06 (#1706): opt-in on the streamed path as on the buffered one.
+    let (store, app) = setup();
+    store.write().await.create_node("S");
+    let ask = |with: bool| {
+        let mut body = json!({ "query": "MATCH (s:S) RETURN s" });
+        if with {
+            body["include_snapshot_hash"] = json!(true);
+        }
+        Request::builder()
+            .method("POST")
+            .uri("/api/query")
+            .header("content-type", "application/json")
+            .header("accept", "application/x-ndjson")
+            .body(Body::from(body.to_string()))
+            .expect("request")
+    };
+    for with in [false, true] {
+        let response = app.clone().oneshot(ask(with)).await.expect("response");
+        let bytes = response.into_body().collect().await.expect("body").to_bytes();
+        let head = &lines(&bytes)[0];
+        assert!(head["snapshot_version"].is_u64(), "{head}");
+        let expect = samyama::snapshot::content_hash::content_hash(&*store.read().await);
+        match with {
+            false => assert!(head.get("snapshot_hash").is_none(), "not asked for: {head}"),
+            true => assert_eq!(head["snapshot_hash"], json!(expect), "{head}"),
+        }
+    }
+}
