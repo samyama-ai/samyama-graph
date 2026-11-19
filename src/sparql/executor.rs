@@ -9,7 +9,8 @@
 
 use super::results::QuerySolution;
 use crate::rdf::{
-    Literal, NamedNode, RdfObject, RdfPredicate, RdfStore, RdfSubject, RdfTerm, TriplePattern,
+    Literal, NamedNode, RdfObject, RdfPredicate, RdfStore, RdfSubject, RdfTerm, TripleSource,
+    TriplePattern,
 };
 use spargebra::algebra::{Expression, GraphPattern, OrderExpression};
 use spargebra::term::{NamedNodePattern, TermPattern};
@@ -38,14 +39,15 @@ type Result<T> = std::result::Result<T, ExecutionError>;
 
 const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
-/// SPARQL query executor
-pub struct SparqlExecutor {
-    store: RdfStore,
+/// SPARQL query executor, over anything that answers triple patterns: an
+/// [`RdfStore`], or a property graph read in place ([`crate::rdf::GraphAsRdf`]).
+pub struct SparqlExecutor<S: TripleSource = RdfStore> {
+    store: S,
 }
 
-impl SparqlExecutor {
+impl<S: TripleSource> SparqlExecutor<S> {
     /// Create a new executor
-    pub fn new(store: RdfStore) -> Self {
+    pub fn new(store: S) -> Self {
         Self { store }
     }
 
@@ -203,7 +205,8 @@ impl SparqlExecutor {
             });
             for t in self
                 .store
-                .query(&TriplePattern::new(subject, predicate, object))
+                .matching(&TriplePattern::new(subject, predicate, object))
+                .map_err(ExecutionError::Query)?
             {
                 let mut m = s.clone();
                 let ok = bind(&mut m, &tp.subject, t.subject.into())

@@ -58,7 +58,7 @@ use crate::graph::{Edge, GraphStore, Node, NodeId, PropertyValue};
 /// generated `{base}node/{id}`, which is right for a graph that was never RDF.
 pub const IRI_PROPERTY: &str = "__rdf_iri";
 
-const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+pub(super) const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
 const RDF_STATEMENT: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#Statement";
 const RDF_SUBJECT: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#subject";
 const RDF_PREDICATE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#predicate";
@@ -633,7 +633,7 @@ fn restore_reified_edge_properties(
 }
 
 /// Undo [`escape_segment`].
-fn decode_segment(s: &str) -> String {
+pub(super) fn decode_segment(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut i = 0;

@@ -44,7 +44,7 @@ pub use executor::{SparqlExecutor, ExecutionError};
 pub use results::{SparqlResults, ResultFormat, QuerySolution};
 pub use http::{SparqlHttpEndpoint, HttpError};
 
-use crate::rdf::RdfStore;
+use crate::rdf::{GraphAsRdf, RdfStore, TripleSource};
 use thiserror::Error;
 
 /// SPARQL errors
@@ -69,19 +69,31 @@ pub enum SparqlError {
 
 pub type SparqlResult<T> = Result<T, SparqlError>;
 
-/// SPARQL query engine
-pub struct SparqlEngine {
-    store: RdfStore,
-    executor: SparqlExecutor,
+/// SPARQL query engine, over an [`RdfStore`] by default or over any other
+/// [`TripleSource`], such as the property graph read in place.
+pub struct SparqlEngine<S: TripleSource = RdfStore> {
+    executor: SparqlExecutor<S>,
 }
 
 impl SparqlEngine {
     /// Create a new SPARQL engine
     pub fn new(store: RdfStore) -> Self {
-        Self {
-            store: store.clone(),
-            executor: SparqlExecutor::new(store),
-        }
+        Self::over(store)
+    }
+}
+
+impl<'g> SparqlEngine<GraphAsRdf<'g>> {
+    /// SPARQL over `graph` as it is now, with no copy (#2100, part 2). The
+    /// triples are the ones `GraphToRdfMapper` would export under `config`.
+    pub fn over_graph(graph: &'g crate::graph::GraphStore, config: crate::rdf::MappingConfig) -> Self {
+        Self::over(GraphAsRdf::new(graph, config))
+    }
+}
+
+impl<S: TripleSource> SparqlEngine<S> {
+    /// SPARQL over any source of triples.
+    pub fn over(source: S) -> Self {
+        Self { executor: SparqlExecutor::new(source) }
     }
 
     /// Execute a SPARQL query. SELECT and ASK are evaluated; a form or
@@ -144,7 +156,12 @@ mod tests {
     fn update_is_refused_rather_than_reported_as_written() {
         let mut engine = SparqlEngine::new(RdfStore::new());
         assert!(engine.update("INSERT DATA { <a:s> <a:p> <a:o> }").is_err());
-        assert_eq!(engine.store.len(), 0);
+        // Nothing was written: asked through the engine, which no longer
+        // holds a second copy of its store to inspect.
+        assert!(matches!(
+            engine.query("ASK { ?s ?p ?o }"),
+            Ok(SparqlResults::Boolean(false))
+        ));
     }
 
     #[test]

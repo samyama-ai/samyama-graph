@@ -118,6 +118,16 @@ pub(super) fn explain(
     map(fields)
 }
 
+/// An operator's own work counters (#1970) as a map, or `null` for one that
+/// reports none -- which is not a report of no work.
+fn work(node: &ProfileNode) -> PropertyValue {
+    let counters = node.work();
+    if counters.is_empty() {
+        return PropertyValue::Null;
+    }
+    map(counters.into_iter().map(|(k, v)| (k, PropertyValue::Integer(v as i64))).collect())
+}
+
 /// What PROFILE measured, alongside the plan it measured.
 pub(super) struct Measured<'a> {
     pub nodes: &'a [ProfileNode],
@@ -166,6 +176,7 @@ pub(super) fn profile(
             ("time_ms", millis(node.inclusive())),
             ("self_time_ms", millis(node.inclusive().saturating_sub(below))),
             ("q_error", number(node.q_error())),
+            ("work", work(node)),
             (
                 "children",
                 PropertyValue::Array(children[i].iter().map(|&c| build(c, nodes, children, cost)).collect()),
