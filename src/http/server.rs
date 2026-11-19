@@ -720,9 +720,7 @@ impl AppState {
         use tracing::Instrument;
         // Stages of the request's trace (#2077): the wait for the writer's
         // lock is where contention shows.
-        let mut store = self
-            .store
-            .write()
+        let mut store = crate::store_lock::write(&self.store)
             .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write"))
             .await;
         if let Some(pm) = &self.persistence {

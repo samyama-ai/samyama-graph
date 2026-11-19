@@ -595,7 +595,7 @@ async fn run_query(
         let store_guard = {
             use tracing::Instrument;
             // A stage of the request's trace (#2077).
-            state.store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+            crate::store_lock::read(&state.store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
         };
         // The result cache is keyed on the statement text, which does not say which
         // dialect it was read under, so a GQL request must not be served from it until

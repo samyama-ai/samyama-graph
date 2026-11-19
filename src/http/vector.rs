@@ -845,9 +845,7 @@ mod tests {
     async fn a_label_with_indexes_on_two_properties_needs_a_property_key() {
         let state = test_state();
         for p in ["emb_a", "emb_b"] {
-            state
-                .store
-                .read()
+            crate::store_lock::read(&state.store)
                 .await
                 .create_vector_index("Doc", p, 2, DistanceMetric::L2)
                 .unwrap();
@@ -936,9 +934,7 @@ mod tests {
     #[tokio::test]
     async fn a_query_of_the_wrong_dimension_is_a_400_naming_the_index() {
         let state = test_state();
-        state
-            .store
-            .read()
+        crate::store_lock::read(&state.store)
             .await
             .create_vector_index("Doc", "vec", 2, DistanceMetric::L2)
             .unwrap();

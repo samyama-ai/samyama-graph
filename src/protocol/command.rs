@@ -387,7 +387,7 @@ impl CommandHandler {
         // Stages of the command's trace (#2077), as on HTTP.
         let mut store_guard = {
             use tracing::Instrument;
-            store.write().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write")).await
+            crate::store_lock::write(&store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write")).await
         };
 
             // Record what the statement changes, so persistence does not depend on
@@ -451,7 +451,7 @@ impl CommandHandler {
         } else {
             let store_guard = {
                 use tracing::Instrument;
-                store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+                crate::store_lock::read(&store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
             };
             let res = self
                 .query_engine
@@ -681,7 +681,7 @@ impl CommandHandler {
 
     /// Handle INFO command
     async fn handle_info(&self, store: &Arc<RwLock<GraphStore>>) -> RespValue {
-        match tokio::time::timeout(INFO_STORE_WAIT, store.read()).await {
+        match tokio::time::timeout(INFO_STORE_WAIT, crate::store_lock::read(&store)).await {
             Ok(guard) => self.info_on(Some(&guard)),
             Err(_) => self.info_on(None),
         }
