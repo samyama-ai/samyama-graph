@@ -638,7 +638,18 @@ async fn gemini_sends_both_the_mime_type_and_the_schema() {
         .unwrap();
     assert!(out.schema_enforced);
 
-    let gc = &srv.requests()[0].json()["generationConfig"];
+    let err = client
+        .complete_structured("q", Some(&schema()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, NLQError::ConfigError(ref message) if message.contains("additionalProperties") && message.contains("not supported by Gemini")),
+        "{err:?}"
+    );
+    let requests = srv.requests();
+    assert_eq!(requests.len(), 1, "unsupported schema must not be sent");
+
+    let gc = &requests[0].json()["generationConfig"];
     // Gemini constrains the decode only when BOTH are set: the schema alone
     // is ignored without the MIME type, which is the easy half to get wrong.
     assert_eq!(gc["responseMimeType"], "application/json");
@@ -649,16 +660,6 @@ async fn gemini_sends_both_the_mime_type_and_the_schema() {
     );
     assert!(gc["responseSchema"].get("additionalProperties").is_none());
     assert_eq!(gc["temperature"], 0.0);
-
-    let err = client
-        .complete_structured("q", Some(&schema()))
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(err, NLQError::ConfigError(ref message) if message.contains("additionalProperties") && message.contains("not supported by Gemini")),
-        "{err:?}"
-    );
-    assert_eq!(srv.requests().len(), 1, "unsupported schema must not be sent");
 }
 
 #[tokio::test]
