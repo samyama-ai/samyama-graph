@@ -346,3 +346,39 @@ fn bad_calls_are_refused_with_the_reason() {
     }
     assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }
+
+/// The fewest-hops route can use one long relationship. Guided by distance
+/// over the *longest* relationship it is still found; guided by raw distance
+/// the long hop looks expensive and a four-hop route of short steps wins.
+#[test]
+fn the_hop_guide_allows_for_long_relationships() {
+    let mut s = GraphStore::new();
+    let place = |s: &mut GraphStore, x: f64, y: f64| {
+        let id = s.create_node("Site");
+        for (k, v) in [("x", x), ("y", y), ("z", 0.0)] {
+            s.set_node_property("default", id, k, v).unwrap();
+        }
+        id
+    };
+    // source -> b1 -> b2 -> b3 -> target along x, one unit apart; and
+    // source -> far -> target, two hops of about 20 units each.
+    let source = place(&mut s, 0.0, 0.0);
+    let steps: Vec<NodeId> = (1..=3).map(|i| place(&mut s, i as f64, 0.0)).collect();
+    let target = place(&mut s, 4.0, 0.0);
+    let far = place(&mut s, 2.0, 20.0);
+    let mut chain = vec![source];
+    chain.extend(&steps);
+    chain.push(target);
+    for w in chain.windows(2) {
+        s.create_edge(w[0], w[1], "LINK").unwrap();
+    }
+    s.create_edge(source, far, "LINK").unwrap();
+    s.create_edge(far, target, "LINK").unwrap();
+    run(&mut s, "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean");
+    let got = &astar(&s, source, target, "{cost: 'hops'}").unwrap()[0];
+    assert_eq!(float(&got["hops"]), 2.0, "{got:?}");
+    assert_eq!(ids_of(&got["path"]), vec![source, far, target]);
+    // By length the short steps win.
+    let by_length = &astar(&s, source, target, "{cost: 'length'}").unwrap()[0];
+    assert_eq!(float(&by_length["hops"]), 4.0);
+}
