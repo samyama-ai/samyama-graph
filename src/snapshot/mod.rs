@@ -250,6 +250,44 @@ pub fn export_tenant_with_compression(
     writer: impl Write,
     compression_level: u32,
 ) -> Result<ExportStats, Box<dyn std::error::Error>> {
+    // `snapshot__io` (#2219): every export passes here, encrypted ones too.
+    let started = std::time::Instant::now();
+    let mut counted = Counted { inner: writer, bytes: 0 };
+    let out = export_tenant_counted(store, &mut counted, compression_level);
+    crate::usdt::snapshot_io(crate::usdt::SnapshotOp::Export, counted.bytes, started);
+    out
+}
+
+/// A reader or writer that counts the bytes through it, for `snapshot__io`.
+struct Counted<T> {
+    inner: T,
+    bytes: u64,
+}
+
+impl<W: Write> Write for Counted<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.bytes += n as u64;
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.bytes += n as u64;
+        Ok(n)
+    }
+}
+
+fn export_tenant_counted(
+    store: &GraphStore,
+    writer: impl Write,
+    compression_level: u32,
+) -> Result<ExportStats, Box<dyn std::error::Error>> {
     let nodes = store.all_nodes();
     let full_edges = store.all_edges(); // Full Edge objects (may be empty for stub-loaded)
 
@@ -1024,6 +1062,21 @@ pub fn import_tenant_with_dedup_options(
 
 /// Import with explicit node-conflict and parallel-edge policies.
 pub fn import_tenant_with_merge_policy(
+    store: &mut GraphStore,
+    reader: impl Read,
+    dedup_keys: &[&str],
+    allow_conflicts: bool,
+    merge_edges: MergeEdges,
+) -> Result<ImportStats, Box<dyn std::error::Error>> {
+    // `snapshot__io` (#2219): every import reaches here.
+    let started = std::time::Instant::now();
+    let mut counted = Counted { inner: reader, bytes: 0 };
+    let out = import_tenant_counted(store, &mut counted, dedup_keys, allow_conflicts, merge_edges);
+    crate::usdt::snapshot_io(crate::usdt::SnapshotOp::Import, counted.bytes, started);
+    out
+}
+
+fn import_tenant_counted(
     store: &mut GraphStore,
     reader: impl Read,
     dedup_keys: &[&str],

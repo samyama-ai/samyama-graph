@@ -773,6 +773,22 @@ impl VectorIndex {
         k: usize,
         ef: Option<usize>,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
+        // `vector__hnsw_search` (#2219): the width the search used (0 for an
+        // exact scan) and the distances it computed, when that is known.
+        let started = std::time::Instant::now();
+        let mut walked = (0usize, None);
+        let out = self.search_ef_walked(query, k, ef, &mut walked);
+        crate::usdt::vector_search(k, walked.0, walked.1, started);
+        out
+    }
+
+    fn search_ef_walked(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        walked: &mut (usize, Option<usize>),
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
         if query.len() != self.dimensions {
             return Err(VectorError::DimensionMismatch {
                 expected: self.dimensions,
@@ -787,6 +803,7 @@ impl VectorIndex {
         // searching a malformed graph.
         let n = self.len();
         if n == 0 {
+            *walked = (0, Some(0));
             return Ok(Vec::new());
         }
         // Below this size, search exactly. HNSW is an approximation that earns its keep at
@@ -796,6 +813,7 @@ impl VectorIndex {
         // vectors costs microseconds and is always right, so there is nothing to trade.
         const EXACT_SEARCH_MAX: usize = 128;
         if n <= EXACT_SEARCH_MAX {
+            *walked = (0, Some(n));
             return Ok(self.report(self.brute_force_search(query, k.min(n))));
         }
 
@@ -818,8 +836,10 @@ impl VectorIndex {
         if self.superseded > 0
             && ef_search.saturating_mul(self.params.m).saturating_mul(2) >= n
         {
+            *walked = (0, Some(n));
             return Ok(self.report(self.brute_force_search(query, want)));
         }
+        *walked = (ef_search, None);
         let live = |id: &usize| self.is_current(*id);
         let filter: Option<&dyn FilterT> = if self.superseded > 0 { Some(&live) } else { None };
         // hnsw_rs 0.2.1 can panic deep in search_layer (hnsw.rs:938,
@@ -848,6 +868,7 @@ impl VectorIndex {
                     "[vector] HNSW search panicked on {}-vector index; using exact brute-force fallback",
                     n
                 );
+                *walked = (0, Some(n));
                 return Ok(self.report(self.brute_force_search(query, k.min(n))));
             }
         };
