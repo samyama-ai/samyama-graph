@@ -1739,6 +1739,13 @@ components:
             `POST /api/tx/begin`. Its writes are visible only inside the
             transaction until `POST /api/tx/{id}/commit`, and
             `POST /api/tx/{id}/rollback` undoes them.
+        include_snapshot_hash:
+          type: boolean
+          default: false
+          description: >-
+            Return `snapshot_hash`, the content hash of the graph the statement
+            saw (TRUST-06). Opt-in, because it is one pass over the graph the
+            first time after a write.
 
     QueryResponse:
       type: object
@@ -1773,6 +1780,16 @@ components:
           description: >-
             The MVCC version the read saw, tying the result to the data that
             produced it. Identifies the snapshot; it is not a content hash.
+        snapshot_hash:
+          type: string
+          description: >-
+            Present only when the request set `include_snapshot_hash`.
+            `sha256:<64 hex>` over the graph's content (nodes, labels,
+            properties, relationships), the value `snapshot export` reports for
+            the same data. Derived from the data, so it is the same after a
+            restart and on another server holding the same graph.
+          examples:
+            - "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
         cached:
           type: boolean
           description: >-
