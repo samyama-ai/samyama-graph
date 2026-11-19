@@ -5300,7 +5300,7 @@ mod tests {
         let offenders: Vec<(usize, &str)> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains("store_lock::write(&"))
+            .filter(|(_, l)| l.contains("store_lock::write("))
             // The waiver is a `persistence:` note in the comment block above the
             // line, so it has room to say *how* the path is durable instead.
             .filter(|(i, _)| {

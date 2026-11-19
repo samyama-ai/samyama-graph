@@ -387,7 +387,7 @@ impl CommandHandler {
         // Stages of the command's trace (#2077), as on HTTP.
         let mut store_guard = {
             use tracing::Instrument;
-            crate::store_lock::write(&store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write")).await
+            crate::store_lock::write(store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write")).await
         };
 
             // Record what the statement changes, so persistence does not depend on
@@ -451,7 +451,7 @@ impl CommandHandler {
         } else {
             let store_guard = {
                 use tracing::Instrument;
-                crate::store_lock::read(&store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+                crate::store_lock::read(store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
             };
             let res = self
                 .query_engine
@@ -562,7 +562,7 @@ impl CommandHandler {
                 Err(e) => return RespValue::Error(format!("ERR {e}")),
             };
         // Snapshot the schema and drop the read guard before the LLM call.
-        let schema = crate::store_lock::read(&store).await.schema_summary();
+        let schema = crate::store_lock::read(store).await.schema_summary();
         // `text_to_cypher` refuses a generated write, as it does for /api/nlq.
         match pipeline.text_to_cypher(question, &schema).await {
             Ok(cypher) => RespValue::BulkString(Some(cypher.into_bytes())),
@@ -623,7 +623,7 @@ impl CommandHandler {
         // persistence: the durable half is `drop_graph` above, which removes the
         // rows outright. `clear()` journals nothing and does not need to -- one
         // journal entry per node of a dropped graph is the wrong shape for it.
-        let mut store_guard = crate::store_lock::write(&store).await;
+        let mut store_guard = crate::store_lock::write(store).await;
         store_guard.clear();
         let _ = store_guard.take_write_log();
         drop(store_guard);
@@ -681,7 +681,7 @@ impl CommandHandler {
 
     /// Handle INFO command
     async fn handle_info(&self, store: &Arc<RwLock<GraphStore>>) -> RespValue {
-        match tokio::time::timeout(INFO_STORE_WAIT, crate::store_lock::read(&store)).await {
+        match tokio::time::timeout(INFO_STORE_WAIT, crate::store_lock::read(store)).await {
             Ok(guard) => self.info_on(Some(&guard)),
             Err(_) => self.info_on(None),
         }
@@ -897,7 +897,7 @@ mod tests {
         let offenders: Vec<(usize, &str)> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains("store_lock::write(&"))
+            .filter(|(_, l)| l.contains("store_lock::write("))
             .filter(|(i, _)| {
                 let above = &lines[i.saturating_sub(8)..*i];
                 let waived = above

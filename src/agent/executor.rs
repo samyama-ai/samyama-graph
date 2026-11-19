@@ -151,7 +151,7 @@ async fn write_telemetry(
     prompt: &str,
     records: &[ToolCallRecord],
 ) -> AgentResult<()> {
-    let mut guard = crate::store_lock::write(&store).await;
+    let mut guard = crate::store_lock::write(store).await;
 
     // Find-or-create Question node by qid.
     let q_node = find_node_by_property(&guard, "Question", "qid", qid)
