@@ -523,6 +523,7 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        let _in_flight = crate::query::metrics::in_flight();
         let parse_started = std::time::Instant::now();
         let mut query = self.parse_to_run(query_str)?;
         // Only a non-Cypher dialect rewrites the AST, so only that pays for a
@@ -612,6 +613,7 @@ impl QueryEngine {
         sink: &mut dyn FnMut(&[String], Vec<executor::Record>) -> Result<(), String>,
         time_limit: Option<std::time::Duration>,
     ) -> Result<StreamedResult, Box<dyn std::error::Error>> {
+        let _in_flight = crate::query::metrics::in_flight();
         let query = self.parse_to_run(query_str)?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
@@ -870,6 +872,7 @@ impl QueryEngine {
         params: &BoundParams,
         time_limit: Option<std::time::Duration>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        let _in_flight = crate::query::metrics::in_flight();
         let query = self.parse_to_run(query_str)?;
         let deadline = self.deadline(time_limit);
 

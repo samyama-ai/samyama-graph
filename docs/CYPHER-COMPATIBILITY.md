@@ -153,9 +153,9 @@ One thing, verified:
 | | `vector.distance(a, b, metric)` / `vector_distance(...)` | ✅ | Neo4j's metrics `'EUCLIDEAN'`, `'EUCLIDEAN_SQUARED'`, `'MANHATTAN'`, `'COSINE'`, `'DOT'` (`-(a·b)`), `'HAMMING'`. The metric is a string, not Cypher 25's bare word |
 | | `vector.similarity.maxSim(query, doc[, metric])` | ✅ | Not in Neo4j. ColBERT-style late interaction over multi-vectors: `query` and `doc` are lists of vectors (one per token, e.g. `[[0.1, 0.2], [0.3, 0.4]]`, stored as a list-of-lists property), all of one dimension. For each query token its best match among the document's tokens, summed over the query tokens — so not symmetric. `metric` is `'DOT'` (default; ColBERT's, for normalised tokens) or `'COSINE'`, both raw, not rescaled to [0, 1]. Null in, null out; a zero token under `'COSINE'` gives null; an empty list, a flat vector or mixed dimensions are errors. Exact, per row: there is no multi-vector index (#1978) |
 | | `vector.similarity.sparseDot(a, b)` | ✅ | Not in Neo4j. Inner product of two sparse vectors (SPLADE-style). A sparse vector is a map, in either of two spellings: `{indices: [3, 17], values: [0.5, 1.2]}` (Qdrant's parallel lists) or ``{`3`: 0.5, `17`: 1.2}`` (dimension → weight; Cypher map keys are strings, so each must read as a non-negative integer). Dimensions are non-negative integers, each at most once; weights are finite numbers; `{}` is the empty vector and scores 0. Both spellings store as map properties. Null in, null out. Exact, per row: there is no sparse index (#1978) |
-| **Extensions** | `CREATE VECTOR INDEX` | ✅ | Both spellings: Neo4j 5's `FOR (n:L) ON (n.prop)` and the `ON :L(prop)` form every other index DDL here uses. `OPTIONS {dimensions, similarity, quantization, m, ef_construction, ef}`; any other option is an error, not a default. HNSW defaults: `m: 16` (2–128), `ef_construction: 200`, and `ef` unset, which searches at `max(2k, 64)`; `SHOW INDEXES` shows them as `VECTOR[m=…, ef_construction=…, ef=…]` (#1971). `quantization: "fp16"` halves the bytes the index holds, in the HNSW graph and in the copy kept for persistence — measured, not asserted: `tests/vector_quantization.rs` |
+| **Extensions** | `CREATE VECTOR INDEX` | ✅ | Both spellings: Neo4j 5's `FOR (n:L) ON (n.prop)` and the `ON :L(prop)` form every other index DDL here uses. `OPTIONS {dimensions, similarity, quantization, kind, m, ef_construction, ef, nlist, nprobe}`; any other option is an error, not a default. `kind` is `'hnsw'` (the default) or `'ivf'` (#1975); `m`, `ef_construction` and `ef` are HNSW's and `nlist`, `nprobe` IVF's, and either pair on the other kind is an error. See [Vector index kinds](#vector-index-kinds) below. HNSW defaults: `m: 16` (2–128), `ef_construction: 200`, and `ef` unset, which searches at `max(2k, 64)`; `SHOW INDEXES` shows them as `VECTOR[m=…, ef_construction=…, ef=…]` (#1971). `quantization: "fp16"` halves the bytes the index holds, in the HNSW graph and in the copy kept for persistence — measured, not asserted: `tests/vector_quantization.rs` |
 | | `SHOW INDEXES` | ✅ | Lists property (`BTREE`) and `VECTOR` indexes. Hierarchy indexes have their own `SHOW HIERARCHY INDEXES` |
-| | `CALL db.index.vector.queryNodes` | ✅ | `(label, property, vector, k)` or Neo4j's `(indexName, k, vector)`, each with an optional last `{ef: N}` that sets this query's search width (#1971) |
+| | `CALL db.index.vector.queryNodes` | ✅ | `(label, property, vector, k)` or Neo4j's `(indexName, k, vector)`, each with an optional last `{ef: N}` that sets this query's search width (#1971); `{nprobe: N}` is the same option under IVF's name (#1975), and EXPLAIN names the index kind as `index=hnsw` or `index=ivf` |
 | | `CALL vector.knnGraph(label, property, {config})` / `CALL vector.similarityJoin(labelA, propA, labelB, propB, {config})` | ✅ | Not in Neo4j. Each node's `k` nearest (default 10) from the index on the target label, as `node1, node2, similarity` rows; `similarity` is the same score as `queryNodes`' `score`. `{threshold, ef}` filter and widen. Streams by default; `write: true` stores each row as a `relType` (default `SIMILAR_TO`) relationship with `scoreProperty` (default `score`), refreshing rather than duplicating on a rerun. The directed k-NN graph, as approximate as the index; a join is capped at `k` matches per node (#1979) |
 | | `CALL feature.define(name, {config})` / `feature.materialize(name, {asOf})` / `feature.get(name)` / `feature.list()` / `feature.drop(name)` | ✅ | Not in Neo4j. A named feature over a one-hop pattern: `{label, edgeType, direction, targetLabel}` and `count`, `sum`, `avg`, `min` or `max` of the neighbour's `property`, one value per `label` node (`count`/`sum` of no match is 0, the rest null, as Cypher's). `materialize` computes it in one batch and keeps the values for `get` (`node, value, asOf`). With `timeProperty` (on the relationship, or `timeOn: 'node'`), `asOf` counts only matches at or before it; a match with no time is left out, and a time of another type is refused. `asOf` filters matches by time; it does not rewind property values. Recomputed in full, not incrementally; in memory only, so a restart or snapshot does not keep them (ML-07, #1742) |
 | | `approx.countDistinct(x)` | ✅ | HyperLogLog, p=14 (16 KB). ~0.81% standard error. Not a bound: the figure describes the spread of estimates, not any one of them. Nulls are not counted, and `1` and `1.0` are one value, so it agrees with `count(DISTINCT x)` |
@@ -173,6 +173,35 @@ One thing, verified:
 | **Introspection** | `db.labels` / `db.relationshipTypes` / `db.propertyKeys` | ✅ | Names only, no counts |
 | | `db.schema.visualization` | ✅ | Distinct `(:Src)-[:T]->(:Tgt)` triples. Walked only the first 1000 edges of each type until #1348 — the answer was a sample presented as the schema |
 | | `db.schema.forLLM(token_budget)` | ✅ | Not openCypher. One call: label counts, property types with null fraction, distinct count and sample values, relationship triples with counts, one example query. Budget defaults to 2000 tokens (estimated at 4 bytes each); a truncated answer says so in the text and in the `complete` column |
+
+### Vector index kinds
+
+`CREATE VECTOR INDEX ... OPTIONS {kind: 'ivf', nlist: 256, nprobe: 16}` builds
+an in-memory IVF index instead of HNSW (#1975). The vectors are partitioned
+into `nlist` lists by k-means, seeded so the same data gives the same lists; a
+search ranks the list centroids against the query and scores, exactly, every
+vector in the `nprobe` nearest lists. Probing every list is the exact scan.
+
+- `nlist` defaults to about `sqrt(n)` at training time, `nprobe` to
+  `max(nlist / 16, 8)`; both are 1–65,536. `{nprobe: N}` (or `{ef: N}`) on
+  `db.index.vector.queryNodes` sets it for one query.
+- Training waits for 256 vectors (or 8 per declared list), and repeats each
+  time the index doubles; until then a search is an exact scan. Inserts after
+  training go to their nearest list. Removed and replaced vectors are skipped
+  and dropped at the next compaction or training.
+- Cosine trains spherical k-means on unit vectors; L2 and inner product
+  partition by L2, and inner product probes the lists by dot product.
+- A filtered search applies the filter while scanning the lists and probes
+  more of them until `k` pass, so it does not come back short.
+- A checkpoint generation stores the centroids (`<index>.hnsw.partition.ivf`,
+  in the manifest); recovery reassigns each vector to them rather than
+  retraining, so it answers as before. The kind is a catalog record of its own.
+- `SHOW INDEXES` shows `VECTOR[kind=ivf, nlist=…, nprobe=…, lists=N]`, where
+  `lists` is how many it was trained into, 0 while untrained.
+
+Not implemented: a disk-resident (Vamana/DiskANN) index and compressed
+IVF-PQ/IVF-SQ codes. IVF keeps full-precision (or fp16) vectors in memory, and
+saves the HNSW graph's memory, not the vectors'.
 
 ## Known inconsistency
 

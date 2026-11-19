@@ -310,6 +310,9 @@ pub struct CreateVectorIndexClause {
     /// `m`, `ef_construction` and the default `ef` (#1971). The defaults
     /// unless the DDL gave them.
     pub params: crate::vector::HnswParams,
+    /// HNSW unless the DDL said `kind: 'ivf'`, with its IVF parameters
+    /// (#1975).
+    pub kind: crate::vector::IndexKind,
 }
 
 /// CREATE INDEX clause
