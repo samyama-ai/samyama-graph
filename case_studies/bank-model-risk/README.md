@@ -67,6 +67,39 @@ curl -X POST http://127.0.0.1:8080/api/vector-search -H 'Content-Type: applicati
 The natural-language front end (embed query → retrieve → graph-ground → cite) lives in the
 generator repo: [`etl/graphrag.py`](https://github.com/samyama-ai/bank-model-risk-kg/blob/main/etl/graphrag.py).
 
+## Question catalog
+
+[`bank-model-risk.sgqueries`](./bank-model-risk.sgqueries) holds 51 questions (15 easy,
+24 medium, 12 hard; four unanswerable), built with `catalog-build --release` against the
+pinned snapshot. [`questions.json`](questions.json) is its source, and the NLQ accuracy
+benchmark
+([competitor-benchmarks#260](https://git.samyama.ai/Samyama.ai/samyama-graph-competitor-benchmarks/issues/260))
+reads it as its question set. Every entry is checked weekly against the published
+snapshot by [`kg-catalogs.yml`](../../.github/workflows/kg-catalogs.yml).
+
+```bash
+samyama queries list case_studies/bank-model-risk/bank-model-risk.sgqueries
+samyama queries run  case_studies/bank-model-risk/bank-model-risk.sgqueries --snapshot bank-model-risk.sgsnap \
+    --entry <id> [--param name=value]...
+samyama verify bank-model-risk.sgsnap --queries case_studies/bank-model-risk/bank-model-risk.sgqueries
+```
+
+Model-to-model `FEEDS` edges are one hop deep (a PD/LGD/EAD/VaR/scorecard model feeds a
+loss or ECL model, which feeds a submission), so "directly or through another model" is
+`FEEDS*1..2`. Each template's `enum_values` list only the values that give a non-empty
+answer: no control satisfies RBI, CCAR/DFAST or FRTB, no model is governed by BCBS 239,
+nobody is a member of Cards & Unsecured or Capital Management, and no feature is derived
+from the Adverse Media Corpus.
+
+**Data caveats the catalog surfaces.** `Model.last_validated` never matches the model's
+validation records: for all 75 validated models it differs from the date of the latest
+`Validation`, and the five never-validated models still carry a `last_validated` date.
+`bm_last_validated_mismatch` counts the mismatch so a corrected snapshot shows up as a
+changed answer; the validation questions read `Validation.date`. Eight validations (on
+seven models) were performed by the model's own owner (`bm_owner_self_validations`), and
+the generator's feature-to-source mapping is random (`bureau_score` is derived from the
+Payments Switch Log), so lineage answers are structural, not domain-realistic.
+
 ## License
 
 Apache 2.0. All data is synthetic and generated; it represents no real institution.
