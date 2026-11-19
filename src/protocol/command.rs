@@ -897,7 +897,7 @@ mod tests {
         let offenders: Vec<(usize, &str)> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains("crate::store_lock::write(&store).await"))
+            .filter(|(_, l)| l.contains("store_lock::write(&"))
             .filter(|(i, _)| {
                 let above = &lines[i.saturating_sub(8)..*i];
                 let waived = above
