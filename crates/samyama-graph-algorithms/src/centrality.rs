@@ -43,72 +43,40 @@
 //! either value changes nothing, so a caller tuning the flag to fix a degree
 //! result is tuning something that is not read.
 
-use std::collections::VecDeque;
-
 use crate::common::{GraphView, NodeId};
+use crate::frontier::{self, Bfs, Direction, Visit};
 
 /// A centrality score per node, in the view's dense index order.
 pub type Scores = Vec<f64>;
 
-/// Single-source shortest paths on an unweighted graph.
+/// Single-source shortest paths on an unweighted graph, for Brandes.
 ///
-/// Returns `(dist, sigma, preds)`: hop distance (`-1` when unreachable), the
-/// number of shortest paths from the source, and each node's predecessors on
-/// those paths. `order` is the BFS discovery order, which betweenness walks
-/// backwards.
-///
-/// **Only `bfs_sssp` fills all four.** `bfs_sssp_reversed` fills `dist` and
-/// `order` and leaves `sigma` all zero — including `sigma[source]` — and
-/// `preds` empty, because its callers (closeness and harmonic) read distances
-/// only. A future caller that believed this doc and divided by `sigma` would
-/// divide by zero, which is why the difference is written here rather than
-/// left to be discovered.
+/// `sigma` is the number of shortest paths from the source to each node and
+/// `preds` each node's predecessors on them; `bfs.reached()` is the discovery
+/// order betweenness walks backwards. Every edge the walk examines is seen, so
+/// a second route of the same length -- a parallel edge included -- adds to
+/// `sigma` rather than being skipped as a duplicate.
 struct Sssp {
-    dist: Vec<i64>,
     sigma: Vec<f64>,
     preds: Vec<Vec<usize>>,
-    order: Vec<usize>,
 }
 
-fn bfs_sssp(view: &GraphView, source: usize, bidirectional: bool) -> Sssp {
+fn bfs_sssp(view: &GraphView, bfs: &mut Bfs, source: usize, bidirectional: bool) -> Sssp {
     let n = view.node_count;
-    let mut s = Sssp {
-        dist: vec![-1; n],
-        sigma: vec![0.0; n],
-        preds: vec![Vec::new(); n],
-        order: Vec::with_capacity(n),
-    };
-    s.dist[source] = 0;
+    let mut s = Sssp { sigma: vec![0.0; n], preds: vec![Vec::new(); n] };
     s.sigma[source] = 1.0;
-    let mut q = VecDeque::new();
-    q.push_back(source);
-
-    while let Some(v) = q.pop_front() {
-        s.order.push(v);
-        // An undirected reading walks both directions. The CSR stores each
-        // undirected edge once, in whichever direction it was created, so
-        // ignoring `in_sources` would silently make the graph directed and
-        // every score would be of a different graph.
-        let succ = view.successors(v).iter().copied();
-        let pred = view.predecessors(v).iter().copied();
-        let neighbours: Vec<usize> = if bidirectional {
-            succ.chain(pred).collect()
-        } else {
-            succ.collect()
-        };
-        for w in neighbours {
-            if s.dist[w] < 0 {
-                s.dist[w] = s.dist[v] + 1;
-                q.push_back(w);
-            }
-            // A second route of the same length is another shortest path, not
-            // a duplicate to skip.
-            if s.dist[w] == s.dist[v] + 1 {
-                s.sigma[w] += s.sigma[v];
-                s.preds[w].push(v);
-            }
+    // An undirected reading walks both directions. The CSR stores each
+    // undirected edge once, in whichever direction it was created, so
+    // ignoring `in_sources` would silently make the graph directed and every
+    // score would be of a different graph.
+    let dir = Direction::undirected_if(bidirectional);
+    bfs.walk(&[source], |v, _| frontier::neighbours(view, v, dir), |e| {
+        if e.is_shortest() {
+            s.sigma[e.to] += s.sigma[e.from];
+            s.preds[e.to].push(e.from);
         }
-    }
+        Visit::Continue
+    });
     s
 }
 
@@ -165,12 +133,14 @@ pub fn closeness_centrality(view: &GraphView, bidirectional: bool) -> Scores {
     if n <= 1 {
         return out;
     }
+    // Distances *into* v: the reversed traversal on a directed view.
+    let dir = Direction::into_node_unless(bidirectional);
+    let mut bfs = frontier::Bfs::new(n);
     for v in 0..n {
-        // Reverse the traversal for the directed case: distances *into* v.
-        let s = bfs_sssp_reversed(view, v, bidirectional);
-        let (mut total, mut reachable) = (0i64, 0usize);
-        for (u, &d) in s.dist.iter().enumerate() {
-            if u != v && d >= 0 {
+        bfs.distances(view, v, dir);
+        let (mut total, mut reachable) = (0usize, 0usize);
+        for u in (0..n).filter(|&u| u != v) {
+            if let Some(d) = bfs.depth(u) {
                 total += d;
                 reachable += 1;
             }
@@ -181,33 +151,6 @@ pub fn closeness_centrality(view: &GraphView, bidirectional: bool) -> Scores {
         }
     }
     out
-}
-
-/// `bfs_sssp` over the reversed graph, for closeness on a directed view.
-fn bfs_sssp_reversed(view: &GraphView, source: usize, bidirectional: bool) -> Sssp {
-    if bidirectional {
-        return bfs_sssp(view, source, true);
-    }
-    let n = view.node_count;
-    let mut s = Sssp {
-        dist: vec![-1; n],
-        sigma: vec![0.0; n],
-        preds: vec![Vec::new(); n],
-        order: Vec::with_capacity(n),
-    };
-    s.dist[source] = 0;
-    let mut q = VecDeque::new();
-    q.push_back(source);
-    while let Some(v) = q.pop_front() {
-        s.order.push(v);
-        for &w in view.predecessors(v) {
-            if s.dist[w] < 0 {
-                s.dist[w] = s.dist[v] + 1;
-                q.push_back(w);
-            }
-        }
-    }
-    s
 }
 
 /// Betweenness centrality by Brandes' algorithm, normalised as NetworkX does.
@@ -242,12 +185,13 @@ pub fn betweenness_centrality(view: &GraphView, bidirectional: bool) -> Scores {
         return bc;
     }
 
+    let mut bfs = frontier::Bfs::new(n);
     for s in 0..n {
-        let sssp = bfs_sssp(view, s, bidirectional);
+        let sssp = bfs_sssp(view, &mut bfs, s, bidirectional);
         let mut delta = vec![0.0; n];
         // Backwards through the BFS order: a node's dependency is complete
         // only once every node further from the source has been settled.
-        for &w in sssp.order.iter().rev() {
+        for &w in bfs.reached().iter().rev() {
             let coeff = (1.0 + delta[w]) / sssp.sigma[w];
             for &v in &sssp.preds[w] {
                 delta[v] += sssp.sigma[v] * coeff;
@@ -294,14 +238,17 @@ pub fn ranked(view: &GraphView, scores: &Scores) -> Vec<(NodeId, f64)> {
 pub fn harmonic_centrality(view: &GraphView, bidirectional: bool) -> Scores {
     let n = view.node_count;
     let mut out = vec![0.0; n];
-    for v in 0..n {
-        let s = bfs_sssp_reversed(view, v, bidirectional);
-        out[v] = s
-            .dist
-            .iter()
-            .enumerate()
-            .filter(|(u, &d)| *u != v && d > 0)
-            .map(|(_, &d)| 1.0 / d as f64)
+    let dir = Direction::into_node_unless(bidirectional);
+    let mut bfs = frontier::Bfs::new(n);
+    for (v, score) in out.iter_mut().enumerate() {
+        bfs.distances(view, v, dir);
+        // In index order, as before: the order of a float sum is part of
+        // the answer.
+        *score = (0..n)
+            .filter(|&u| u != v)
+            .filter_map(|u| bfs.depth(u))
+            .filter(|&d| d > 0)
+            .map(|d| 1.0 / d as f64)
             .sum();
     }
     out
