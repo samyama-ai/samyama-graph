@@ -118,7 +118,13 @@ pub(crate) fn reject_foreign_graph(graph: &str) -> Option<axum::response::Respon
 }
 
 /// Request for exporting a query result as Arrow or Parquet (#1097).
+///
+/// `deny_unknown_fields` because a field this struct did not declare was
+/// dropped with HTTP 200: `seed` was, and the bytes came back identical to the
+/// call without it, so a caller believed a sample was seeded when it was not
+/// (ML-08, #1747).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportRequest {
     pub query: String,
     #[serde(default = "default_graph")]
@@ -127,6 +133,48 @@ pub struct ExportRequest {
     /// one that needs no intermediate file at either end.
     #[serde(default = "default_export_format")]
     pub format: String,
+    /// Seeds `rand()` and `randomUUID()` for this statement, so the same query
+    /// over the same graph with the same seed returns the same bytes.
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// The graph this export must run against, as an earlier export's
+    /// manifest reported it. When the graph's content hash differs, the export
+    /// is refused with 409 instead of quietly building a different dataset.
+    #[serde(default)]
+    pub snapshot_hash: Option<String>,
+}
+
+/// The manifest an export carries (ML-08, #1747): what the bytes are, and
+/// everything needed to rebuild them -- `(snapshot_hash, query, seed)` plus
+/// the format and the engine whose random stream the seed drove.
+#[derive(Serialize)]
+pub struct DatasetManifest {
+    pub snapshot_hash: String,
+    pub query: String,
+    pub seed: Option<u64>,
+    pub format: String,
+    pub graph: String,
+    pub engine_version: String,
+    pub rows: usize,
+    pub content_hash: String,
+}
+
+/// JSON with every non-ASCII character escaped, so it can travel as an HTTP
+/// header value: a query can hold any text, and a header holds ASCII.
+fn ascii_json(value: &impl Serialize) -> String {
+    let json = serde_json::to_string(value).unwrap_or_default();
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut units = [0u16; 2];
+            for u in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{:04x}", u));
+            }
+        }
+    }
+    out
 }
 
 fn default_export_format() -> String {
@@ -146,8 +194,20 @@ fn default_export_format() -> String {
 pub async fn export_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
-    Json(payload): Json<ExportRequest>,
+    body: Result<Json<ExportRequest>, axum::extract::rejection::JsonRejection>,
 ) -> impl IntoResponse {
+    // 400 naming the field, rather than axum's bare 422: an unknown field is
+    // now refused, and the caller who typed `sed` needs to be told which one.
+    let payload = match body {
+        Ok(Json(p)) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid export request: {}", e.body_text()) })),
+            )
+                .into_response()
+        }
+    };
     // Export runs its statement, writes included, so it is checked the same
     // way as `/api/query`.
     if let Some(Extension(Subject(user))) = &subject {
@@ -186,15 +246,38 @@ pub async fn export_handler(
     // Nodes are resolved to the store's merged view *inside* the read guard, so
     // export renders their real properties without holding the lock through
     // Parquet encoding (#545).
-    let batch = {
+    //
+    // The content hash is taken under the same guard as the query, so it names
+    // the graph the rows were read from and not one a write produced between.
+    let (batch, snapshot_hash) = {
         let store_guard = state.store.read().await;
-        state
+        let snapshot_hash = crate::snapshot::content_hash::cached_content_hash(&store_guard);
+        if let Some(pinned) = &payload.snapshot_hash {
+            if *pinned != snapshot_hash {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": format!(
+                            "the graph is not the one this export was pinned to: its content \
+                             hash is {snapshot_hash}, not {pinned}. Load that snapshot to \
+                             rebuild the dataset, or drop `snapshot_hash` to export from the \
+                             graph as it is now."
+                        ),
+                        "snapshot_hash": snapshot_hash,
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        let _seeded = payload.seed.map(crate::query::executor::operator::statement_rng::seed);
+        let batch = state
             .engine
             .execute(&payload.query, &*store_guard)
             .map(|mut b| {
                 crate::export::resolve_nodes(&mut b, &*store_guard);
                 b
-            })
+            });
+        (batch, snapshot_hash)
     };
     let batch = match batch {
         Ok(b) => b,
@@ -251,6 +334,32 @@ pub async fn export_handler(
             );
             if let Ok(v) = format!("attachment; filename=\"{filename}\"").parse() {
                 headers.insert(axum::http::header::CONTENT_DISPOSITION, v);
+            }
+            // The dataset manifest (ML-08, #1747), in headers for the same
+            // reason as the CSV report: the body is the file. The three
+            // headers anyone needs most are also given on their own.
+            let manifest = DatasetManifest {
+                snapshot_hash: snapshot_hash.clone(),
+                query: payload.query.clone(),
+                seed: payload.seed,
+                format: format.clone(),
+                graph: payload.graph.clone(),
+                engine_version: crate::VERSION.to_string(),
+                rows: batch.records.len(),
+                content_hash: crate::snapshot::content_hash::bytes_hash(&bytes),
+            };
+            for (name, value) in [
+                ("x-samyama-dataset-manifest", ascii_json(&manifest)),
+                ("x-samyama-snapshot-hash", manifest.snapshot_hash.clone()),
+                ("x-samyama-content-hash", manifest.content_hash.clone()),
+                (
+                    "x-samyama-seed",
+                    manifest.seed.map(|s| s.to_string()).unwrap_or_else(|| "none".to_string()),
+                ),
+            ] {
+                if let Ok(v) = value.parse() {
+                    headers.insert(axum::http::HeaderName::from_static(name), v);
+                }
             }
             if let Some(r) = &csv_report {
                 // Header values are ASCII-only; the report is counts and field
@@ -395,6 +504,33 @@ pub struct QueryResponse {
     /// CALL subquery).
     #[serde(skip_serializing_if = "Option::is_none")]
     plan_hash: Option<String>,
+    /// What this statement cost (#2079, COST-06).
+    stats: QueryStats,
+}
+
+/// What one statement cost, on every query response (#2079, COST-06).
+///
+/// Only what is measured for free: two clock readings around work the handler
+/// does anyway, and counts it already holds. Rows examined and peak memory
+/// are not here: either needs a counter in every operator on every query, and
+/// `PROFILE` already reports rows per operator for a query worth looking at.
+#[derive(Serialize, Debug, Clone, Copy, Default)]
+pub struct QueryStats {
+    /// Parsing, planning and running the statement, in milliseconds. A result
+    /// served from the result cache reports the lookup, not the original run.
+    pub elapsed_ms: f64,
+    /// Waiting for the store's read or write lock before the statement could
+    /// start. Contention shows here and not in `elapsed_ms`. `0` inside a
+    /// transaction, which already holds the lock.
+    pub lock_wait_ms: f64,
+    /// Rows in the result.
+    pub rows: usize,
+    /// Whether the statement was run as a write.
+    pub is_write: bool,
+}
+
+fn ms(d: std::time::Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
 }
 
 /// Handler for Cypher queries
@@ -570,11 +706,15 @@ async fn run_query(
     }
 
     let snapshot_version: u64;
+    let mut stats = QueryStats { is_write, ..QueryStats::default() };
+    let asked = std::time::Instant::now();
     let (result, full_props) = if is_write {
         // `mutate` records the changes and persists them: a write here used to reach
         // memory only, and returned 200 all the same (#1094).
         let (result, version, props) = state
             .mutate(&payload.graph, |store| {
+                stats.lock_wait_ms = ms(asked.elapsed());
+                let started = std::time::Instant::now();
                 let result = state.engine.execute_mut_with_params_within(
                     &payload.query,
                     store,
@@ -582,6 +722,7 @@ async fn run_query(
                     &params,
                     time_limit,
                 );
+                stats.elapsed_ms = ms(started.elapsed());
                 let props = result
                     .as_ref()
                     .map(|b| merged_node_properties(&b.records, store))
@@ -597,6 +738,10 @@ async fn run_query(
             // A stage of the request's trace (#2077).
             state.store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
         };
+        // Measured after the span closes, so the wait in `stats` is the wait
+        // the trace shows (#2079).
+        stats.lock_wait_ms = ms(asked.elapsed());
+        let started = std::time::Instant::now();
         // The result cache is keyed on the statement text, which does not say which
         // dialect it was read under, so a GQL request must not be served from it until
         // the key carries the dialect. Bypassing is the conservative half of that:
@@ -624,6 +769,7 @@ async fn run_query(
                 requested_dialect(&payload),
             )
         };
+        stats.elapsed_ms = ms(started.elapsed());
         // Read while the guard is still held: taken afterwards it could name a
         // version this result was not computed against, which is worse than
         // no provenance at all.
@@ -635,7 +781,7 @@ async fn run_query(
         (result, props)
     };
 
-    render_query_result(result, &full_props, served_from_cache, snapshot_version)
+    render_query_result(result, &full_props, served_from_cache, snapshot_version, stats)
 }
 
 /// The media type a client sends in `Accept` to ask for a streamed result.
@@ -916,6 +1062,7 @@ async fn query_in_transaction(
         .statement_is_write(&payload.query)
         .unwrap_or(false);
     let time_limit = state.query_time_limit(&payload.graph);
+    let started = std::time::Instant::now();
     let result = if is_write {
         state.engine.execute_mut_with_params_within(
             &payload.query,
@@ -929,12 +1076,13 @@ async fn query_in_transaction(
             .engine
             .execute_with_params_within(&payload.query, store, params, time_limit)
     };
+    let stats = QueryStats { elapsed_ms: ms(started.elapsed()), is_write, ..QueryStats::default() };
     let props = result
         .as_ref()
         .map(|b| merged_node_properties(&b.records, store))
         .unwrap_or_default();
     let version = store.current_version;
-    render_query_result(result, &props, false, version)
+    render_query_result(result, &props, false, version, stats)
 }
 
 /// One result row as JSON, in column order.
@@ -1075,9 +1223,11 @@ fn render_query_result(
     full_props: &HashMap<u64, HashMap<String, PropertyValue>>,
     served_from_cache: bool,
     snapshot_version: u64,
+    stats: QueryStats,
 ) -> axum::response::Response {
     match result {
         Ok(batch) => {
+            let stats = QueryStats { rows: batch.records.len(), ..stats };
             let mut nodes = HashMap::new();
             let mut edges = HashMap::new();
             let mut records = Vec::new();
@@ -1113,6 +1263,7 @@ fn render_query_result(
                 notifications: crate::query::executor::operator::notifications::take(),
                 snapshot_version,
                 plan_hash: batch.plan_hash.map(|h| format!("{h:016x}")),
+                stats,
             })
             .into_response()
         }
@@ -1243,9 +1394,19 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
     );
     gauge(
         "samyama_memory_attributed_bytes",
-        "Resident bytes attributed to the graph. An estimate from a walk of the          structures, and a floor: allocator slack and the Arc-held indexes are not          counted.",
+        "Resident bytes attributed to the graph. An estimate from a walk of the structures, and a floor: allocator slack is not counted, and the indexes are reported separately in samyama_index_memory_bytes.",
         r.attributed().to_string(),
     );
+    // What the OS says the process holds, so the estimates above have something
+    // to be compared against (#2080). Absent, not zero, where there is no
+    // procfs to read it from: a zero would plot as a process using no memory.
+    if let Some(rss) = process_resident_bytes() {
+        gauge(
+            "samyama_process_resident_memory_bytes",
+            "Resident set size of the server process, from /proc/self/status (VmRSS). Not an estimate. Its gap to attributed + index + result cache bytes is allocator slack and memory no walk reaches.",
+            rss.to_string(),
+        );
+    }
     gauge(
         "samyama_index_memory_bytes",
         "Resident bytes held by every index: property, unique constraint, full-text, vector (including its HNSW graph) and hierarchy.",
@@ -1326,6 +1487,21 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
         }
     }
 
+    // Clients being served now: RESP connections and HTTP requests in flight,
+    // the same count `max_connections` admits against (#1594, #2080). Absent
+    // where the server runs without a tenant manager, which counts nothing.
+    if let Some(usage) = state
+        .tenant_manager
+        .as_ref()
+        .and_then(|tm| tm.get_usage("default").ok())
+    {
+        out.push_str(&format!(
+            "# HELP samyama_active_connections Clients being served now: open RESP connections and HTTP requests in progress, as max_connections counts them. This scrape is one of them.\n\
+             # TYPE samyama_active_connections gauge\n\
+             samyama_active_connections {}\n",
+            usage.active_connections
+        ));
+    }
     // Query latency last, because it is the part an operator opens this page
     // for. Everything above describes the graph; this describes what asking it
     // questions costs (REL-10).
@@ -1352,11 +1528,15 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
 ///
 /// **Every figure is an estimate and the response says so.** It is a walk of
 /// the structures, not a reading of the allocator: `HashMap` load factor,
-/// `BTreeMap` node overhead and allocator slack are not visible from here, and
-/// the `Arc`-held hierarchy and vector indexes are still not walked at all.
-/// `attributed_bytes` is a floor on the graph's footprint, not the process's
-/// RSS, and calling it `total` would invite exactly the comparison it cannot
-/// survive.
+/// `BTreeMap` node overhead and allocator slack are not visible from here.
+/// Every index, vector and hierarchy included, is in `indexes`, outside
+/// `attributed_bytes`. `attributed_bytes` is a floor on the graph's footprint,
+/// not the process's RSS, and calling it `total` would invite exactly the
+/// comparison it cannot survive.
+///
+/// The RSS is in `process`, beside what the walks account for, so the gap
+/// between them is a number on the page and not a subtraction somebody has to
+/// know to do (#2080).
 pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse {
     let store_guard = state.store.read().await;
     let r = store_guard.memory_report();
@@ -1364,12 +1544,16 @@ pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse 
     let index_bytes: usize = indexes.iter().map(|i| i.bytes).sum();
     let nodes = store_guard.node_count();
     let edges = store_guard.edge_count();
+    let result_cache_bytes = state.engine.result_cache_bytes();
+    let accounted = (r.attributed() + index_bytes + result_cache_bytes) as u64;
+    let rss = process_resident_bytes();
     Json(json!({
         "estimate": true,
         "note": concat!(
             "A walk of the graph's structures, not a reading of the allocator. ",
-            "Allocator slack, hash-map load factor and the Arc-held vector and ",
-            "hierarchy indexes are not included, so these are floors."),
+            "Allocator slack and hash-map load factor are not included, so these ",
+            "are floors. Indexes, vector and hierarchy included, are under ",
+            "indexes, outside attributed_bytes."),
         "graph": {
             "nodes": nodes,
             "edges": edges,
@@ -1401,11 +1585,42 @@ pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse 
         // Outside the graph and the indexes, so outside `attributed_bytes` too.
         "result_cache": {
             "entries": state.engine.result_cache_len(),
-            "bytes": state.engine.result_cache_bytes(),
+            "bytes": result_cache_bytes,
             "budget_bytes": state.engine.result_cache_budget(),
+        },
+        // The one figure here that is a reading and not an estimate. Null where
+        // the platform has no procfs. The gap is signed: the walks count
+        // capacity, so on a small graph they can exceed what is resident, and
+        // clamping that to 0 would hide an over-count.
+        "process": {
+            "resident_bytes": rss,
+            "accounted_bytes": accounted,
+            "rss_minus_accounted_bytes": rss.map(|r| r as i64 - accounted as i64),
         },
         "tenants": state.tenant_manager.as_ref().map(|tm| tm.list_tenants().len()),
     }))
+}
+
+/// The server process's resident set size in bytes, from `/proc/self/status`.
+///
+/// `None` where there is no procfs (macOS, Windows), so callers report the
+/// figure as absent rather than as a process holding no memory. `VmRSS` and not
+/// `/proc/self/statm`: statm counts pages, and the page size differs between
+/// the x86 and ARM machines this runs on.
+pub fn process_resident_bytes() -> Option<u64> {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .as_deref()
+        .and_then(parse_vm_rss)
+}
+
+/// `VmRSS:     1234 kB` from a `/proc/<pid>/status` body, in bytes. The kernel
+/// always writes kB; any other unit is refused rather than guessed at.
+pub fn parse_vm_rss(status: &str) -> Option<u64> {
+    let rest = status.lines().find_map(|l| l.strip_prefix("VmRSS:"))?;
+    let mut parts = rest.split_whitespace();
+    let kib: u64 = parts.next()?.parse().ok()?;
+    (parts.next()? == "kB").then(|| kib * 1024)
 }
 
 /// `?limit=N` on `GET /api/slowlog`.
