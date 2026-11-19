@@ -28,6 +28,7 @@ cargo bench --bench vector_benchmark           # HNSW vector search
 cargo bench --bench ann_benchmark -- --synthetic 100000x128  # recall@k vs QPS sweep over ef
 cargo bench --bench ann_benchmark -- --dataset data/ann/sift-128-euclidean  # after scripts/download_ann_datasets.py
 cargo bench --bench vector_cost_profile -- --synthetic 1000000x768 --dollars-per-hour 0.252  # bytes/vector, build/restart, $ per 1M queries per quantization
+cargo bench --bench biomedical_vectors       # concept/article level, type-filtered recall, memory, checkpoint size, recall delta per quantization (#1281)
 cargo bench --bench graphalytics_benchmark     # LDBC Graphalytics algorithms
 cargo bench --bench mvcc_benchmark             # MVCC & arena allocation
 cargo bench --bench late_materialization_bench  # Late materialization traversal
