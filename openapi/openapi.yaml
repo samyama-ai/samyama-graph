@@ -207,7 +207,8 @@ paths:
       summary: Algorithms `CALL algo.*` can run
       description: |
         Every graph algorithm the engine dispatches, with its aliases, category,
-        parameters, the columns its rows carry, whether it writes to the graph
+        a one-sentence description, parameters (with the minimum the engine
+        enforces, where it enforces one), the columns its rows carry, whether it writes to the graph
         (and so needs write access), whether it can run on a named projection
         (`graph`), and the column `writeProperty` stores when it can write its
         result back. Names resolve case-insensitively, with or without the
@@ -229,7 +230,7 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [name, aliases, category, parameters, yields, writes, runs_on_projection, write_back_column]
+                      required: [name, aliases, category, description, parameters, yields, writes, runs_on_projection, write_back_column]
                       properties:
                         name:
                           type: string
@@ -243,6 +244,10 @@ paths:
                           type: string
                           enum: [centrality, community, path, link_prediction, similarity,
                                  structure, graph_metric, temporal, embedding, optimization]
+                        description:
+                          type: string
+                          description: What the algorithm computes, in one sentence.
+                          example: "Katz centrality: influence counted over all walks, decaying with their length."
                         parameters:
                           type: array
                           items:
@@ -266,6 +271,26 @@ paths:
                               also:
                                 type: string
                                 description: A second spelling the engine also accepts for this key.
+                              bound:
+                                type: object
+                                description: >-
+                                  The smallest value the engine accepts as given, present only
+                                  where the engine enforces one. Every enforced bound is a
+                                  minimum; absent means none is enforced.
+                                required: [min, inclusive, below]
+                                properties:
+                                  min:
+                                    type: number
+                                    example: 1
+                                  inclusive:
+                                    type: boolean
+                                    description: false when `min` itself is out of range.
+                                  below:
+                                    type: string
+                                    enum: [refused, clamped, replaced]
+                                    description: >-
+                                      What happens to a smaller value: an error naming the
+                                      parameter, raised to `min`, or replaced by the default.
                         yields:
                           type: array
                           items:
