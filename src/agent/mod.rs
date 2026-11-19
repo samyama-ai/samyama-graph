@@ -4,6 +4,7 @@
 
 pub mod enrich;
 pub mod executor;
+pub mod memory;
 pub mod planner;
 pub mod signature;
 pub mod tools;
