@@ -1,0 +1,874 @@
+{
+  "format": "samyama.queries/1",
+  "generated_by": "samyama 1.14.0",
+  "provenance": "authored",
+  "tenant": "default",
+  "publishable": true,
+  "entries": [
+    {
+      "id": "fb_tournament_count",
+      "question": "How many World Cup tournaments does the graph cover?",
+      "paraphrases": [
+        "How many World Cups are in the graph, men's and women's together?"
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (t:Tournament) RETURN count(t) AS tournaments",
+      "rows": 1,
+      "hash": "fnv1a64:b0b1853337eeccad",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "fb_womens_tournament_count",
+      "question": "How many of the tournaments are Women's World Cups?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (t:Tournament) WHERE t.name CONTAINS \"Women's\" RETURN count(t) AS womens_world_cups",
+      "rows": 1,
+      "hash": "fnv1a64:84b488facda7793a",
+      "unanswerable": false,
+      "params": [],
+      "work": 40
+    },
+    {
+      "id": "fb_team_count",
+      "question": "How many national teams are in the graph?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (t:Team) RETURN count(t) AS teams",
+      "rows": 1,
+      "hash": "fnv1a64:0b71e23402c0c2e6",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "fb_match_count",
+      "question": "How many World Cup matches does the graph hold?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Match) RETURN count(m) AS matches",
+      "rows": 1,
+      "hash": "fnv1a64:b59f526ee17624ec",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "fb_own_goal_count",
+      "question": "How many own goals have been scored at the World Cup?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (g:Goal) WHERE g.own_goal = true RETURN count(g) AS own_goals",
+      "rows": 1,
+      "hash": "fnv1a64:ddbde2b24b8cf7f3",
+      "unanswerable": false,
+      "params": [],
+      "work": 3718
+    },
+    {
+      "id": "fb_stadium_count",
+      "question": "How many stadiums have hosted World Cup matches?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (s:Stadium) RETURN count(s) AS stadiums",
+      "rows": 1,
+      "hash": "fnv1a64:cce25e1b9c57a1c6",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "fb_manager_count",
+      "question": "How many managers are in the graph?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Manager) RETURN count(m) AS managers",
+      "rows": 1,
+      "hash": "fnv1a64:a141691e9ff93fc0",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "fb_players_by_position",
+      "question": "How many players are there in each playing position?",
+      "paraphrases": [
+        "Break the players down by position."
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Player) RETURN p.position AS position, count(p) AS players",
+      "rows": 4,
+      "hash": "fnv1a64:0781cd8685571ee0",
+      "unanswerable": false,
+      "params": [],
+      "work": 10409
+    },
+    {
+      "id": "fb_largest_stadium",
+      "question": "Which World Cup stadium has the largest capacity, and how big is it?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (s:Stadium) RETURN s.name AS stadium, s.city AS city, s.capacity AS capacity ORDER BY capacity DESC, stadium LIMIT 1",
+      "rows": 1,
+      "hash": "fnv1a64:ade0525a9b357dc5",
+      "unanswerable": false,
+      "params": [],
+      "work": 243
+    },
+    {
+      "id": "fb_tournament_winner",
+      "question": "Who won the {year} World Cup?",
+      "paraphrases": [
+        "Which team were champions in {year}?"
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (t:Tournament {year: $year}) RETURN t.winner AS winner",
+      "rows": 1,
+      "hash": "fnv1a64:63e9af69f379f4fd",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 1986,
+          "enum_values": null
+        }
+      ],
+      "work": 32
+    },
+    {
+      "id": "fb_tournament_host",
+      "question": "Which country hosted the {year} World Cup?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (t:Tournament {year: $year}) RETURN t.host_country AS host",
+      "rows": 1,
+      "hash": "fnv1a64:e592acf953ccdff6",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 1970,
+          "enum_values": null
+        }
+      ],
+      "work": 32
+    },
+    {
+      "id": "fb_tournament_team_count",
+      "question": "How many teams took part in the {year} World Cup?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (t:Tournament {year: $year}) RETURN t.count_teams AS teams",
+      "rows": 1,
+      "hash": "fnv1a64:c94b2e8ea44ae3e0",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2015,
+          "enum_values": null
+        }
+      ],
+      "work": 32
+    },
+    {
+      "id": "fb_confederation_team_count",
+      "question": "How many of the teams belong to the {confederation}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (t:Team {confederation: $confederation}) RETURN count(t) AS teams",
+      "rows": 1,
+      "hash": "fnv1a64:5480d21ae91716c1",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "confederation",
+          "type": "string",
+          "sample": "Asian Football Confederation",
+          "enum_values": [
+            "Union of European Football Associations",
+            "Confederation of African Football",
+            "Asian Football Confederation",
+            "Confederation of North, Central American and Caribbean Association Football",
+            "South American Football Confederation",
+            "Oceania Football Confederation"
+          ]
+        }
+      ],
+      "work": 104
+    },
+    {
+      "id": "fb_team_code",
+      "question": "What is the three-letter country code of {team}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (t:Team {name: $team}) RETURN t.code AS code",
+      "rows": 1,
+      "hash": "fnv1a64:86c7b8401bfa6f18",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "team",
+          "type": "string",
+          "sample": "Netherlands",
+          "enum_values": null
+        }
+      ],
+      "work": 90
+    },
+    {
+      "id": "fb_unanswerable_attendance",
+      "question": "Which World Cup match drew the biggest crowd?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Match) WHERE m.attendance IS NOT NULL RETURN m.name AS match, m.date AS date, m.attendance AS crowd ORDER BY crowd DESC LIMIT 1",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [],
+      "work": 1248
+    },
+    {
+      "id": "fb_titles_by_team",
+      "question": "How many World Cups has each nation won, counting men's and women's titles together, most titles first (ties alphabetically)?",
+      "paraphrases": [
+        "Which countries have won the World Cup, and how many times?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (t:Tournament) RETURN t.winner AS team, count(t) AS titles ORDER BY titles DESC, team",
+      "rows": 12,
+      "hash": "fnv1a64:209edef30031f0ba",
+      "unanswerable": false,
+      "params": [],
+      "work": 66
+    },
+    {
+      "id": "fb_womens_champions",
+      "question": "Which teams have won the Women's World Cup, and how many times each (most first, ties alphabetically)?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (t:Tournament) WHERE t.name CONTAINS \"Women's\" RETURN t.winner AS team, count(t) AS titles ORDER BY titles DESC, team",
+      "rows": 4,
+      "hash": "fnv1a64:657f3510d3f2fa79",
+      "unanswerable": false,
+      "params": [],
+      "work": 50
+    },
+    {
+      "id": "fb_scorers_12_plus",
+      "question": "Which players have scored at least 12 World Cup goals, not counting own goals? List them by goals, then by name.",
+      "paraphrases": [
+        "Who are the all-time World Cup top scorers with 12 or more goals?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player) WHERE g.own_goal = false WITH p, count(g) AS goals WHERE goals >= 12 RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, goals ORDER BY goals DESC, player",
+      "rows": 11,
+      "hash": "fnv1a64:c944980521a1468a",
+      "unanswerable": false,
+      "params": [],
+      "work": 10786
+    },
+    {
+      "id": "fb_player_goals",
+      "question": "How many World Cup goals did {player} score?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player) WHERE g.own_goal = false AND CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END = $player RETURN count(g) AS goals",
+      "rows": 1,
+      "hash": "fnv1a64:189b40e7a8d63c71",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "player",
+          "type": "string",
+          "sample": "Miroslav Klose",
+          "enum_values": null
+        }
+      ],
+      "work": 10771
+    },
+    {
+      "id": "fb_penalty_scorers",
+      "question": "Which players have scored four or more penalties at the World Cup? List them by penalties, then by name.",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player) WHERE g.penalty = true WITH p, count(g) AS penalties WHERE penalties >= 4 RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, penalties ORDER BY penalties DESC, player",
+      "rows": 9,
+      "hash": "fnv1a64:5dbb23267eceae34",
+      "unanswerable": false,
+      "params": [],
+      "work": 4248
+    },
+    {
+      "id": "fb_highest_scoring_match",
+      "question": "Which World Cup match had the most goals in total?",
+      "paraphrases": [
+        "What is the highest-scoring World Cup game ever?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match) RETURN m.name AS match, m.date AS date, m.home_score AS home_goals, m.away_score AS away_goals, m.home_score + m.away_score AS total_goals ORDER BY total_goals DESC, date LIMIT 1",
+      "rows": 1,
+      "hash": "fnv1a64:bb935d740849137c",
+      "unanswerable": false,
+      "params": [],
+      "work": 1251
+    },
+    {
+      "id": "fb_biggest_wins",
+      "question": "Which matches were won by a margin of nine goals or more? Biggest margin first, then by date.",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match) WITH m, abs(m.home_score - m.away_score) AS margin WHERE margin >= 9 RETURN m.name AS match, m.date AS date, m.home_score AS home_goals, m.away_score AS away_goals, margin ORDER BY margin DESC, date",
+      "rows": 7,
+      "hash": "fnv1a64:82b4003f0bd3ac44",
+      "unanswerable": false,
+      "params": [],
+      "work": 1269
+    },
+    {
+      "id": "fb_team_match_count",
+      "question": "How many World Cup matches has {team} played, men's and women's combined?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match)-[:HOME_TEAM|AWAY_TEAM]->(t:Team {name: $team}) RETURN count(m) AS matches",
+      "rows": 1,
+      "hash": "fnv1a64:156aea9b1390cbca",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "team",
+          "type": "string",
+          "sample": "Mexico",
+          "enum_values": null
+        }
+      ],
+      "work": 160
+    },
+    {
+      "id": "fb_team_wins",
+      "question": "How many World Cup matches has {team} won, counting penalty-shootout wins as wins?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match)-[r:HOME_TEAM|AWAY_TEAM]->(t:Team {name: $team}) WHERE ((type(r) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(r) = 'AWAY_TEAM' AND m.result = 'away team win')) RETURN count(m) AS wins",
+      "rows": 1,
+      "hash": "fnv1a64:0df03bd682cd64ec",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "team",
+          "type": "string",
+          "sample": "Italy",
+          "enum_values": null
+        }
+      ],
+      "work": 238
+    },
+    {
+      "id": "fb_team_tournament_count",
+      "question": "In how many different World Cups has {team} played a match?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (t:Team {name: $team})<-[:HOME_TEAM|AWAY_TEAM]-(m:Match)-[:IN_TOURNAMENT]->(tr:Tournament) RETURN count(DISTINCT tr) AS tournaments",
+      "rows": 1,
+      "hash": "fnv1a64:23b2993d08fbdfb6",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "team",
+          "type": "string",
+          "sample": "Mexico",
+          "enum_values": null
+        }
+      ],
+      "work": 229
+    },
+    {
+      "id": "fb_stadiums_in_country",
+      "question": "How many World Cup stadiums are in {country}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (s:Stadium {country: $country}) RETURN count(s) AS stadiums",
+      "rows": 1,
+      "hash": "fnv1a64:bdf8a68c001cb22a",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "country",
+          "type": "string",
+          "sample": "Germany",
+          "enum_values": null
+        }
+      ],
+      "work": 264
+    },
+    {
+      "id": "fb_matches_at_stadium",
+      "question": "How many World Cup matches have been played at {stadium}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match)-[:PLAYED_AT]->(s:Stadium {name: $stadium}) RETURN count(m) AS matches",
+      "rows": 1,
+      "hash": "fnv1a64:83001679701c53cb",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "stadium",
+          "type": "string",
+          "sample": "Estadio Azteca",
+          "enum_values": null
+        }
+      ],
+      "work": 262
+    },
+    {
+      "id": "fb_shared_stadium_names",
+      "question": "Which stadium names appear on more than one stadium record, and how many records each? List alphabetically by stadium.",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (s:Stadium) WITH s.name AS stadium, count(s) AS records WHERE records > 1 RETURN stadium, records ORDER BY stadium",
+      "rows": 5,
+      "hash": "fnv1a64:ee521030ebb17af3",
+      "unanswerable": false,
+      "params": [],
+      "work": 255
+    },
+    {
+      "id": "fb_busiest_stadiums",
+      "question": "Which stadiums have hosted at least 14 World Cup matches? Most matches first, then by name.",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match)-[:PLAYED_AT]->(s:Stadium) WITH s, count(m) AS matches WHERE matches >= 14 RETURN s.name AS stadium, s.city AS city, matches ORDER BY matches DESC, stadium",
+      "rows": 5,
+      "hash": "fnv1a64:9e5dd48b4fdd2271",
+      "unanswerable": false,
+      "params": [],
+      "work": 1503
+    },
+    {
+      "id": "fb_six_tournament_players",
+      "question": "Which players have appeared at six or more World Cups?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Player) WHERE p.count_tournaments >= 6 RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, p.count_tournaments AS tournaments",
+      "rows": 2,
+      "hash": "fnv1a64:00643cf12cdac679",
+      "unanswerable": false,
+      "params": [],
+      "work": 10405
+    },
+    {
+      "id": "fb_managers_from_country",
+      "question": "How many managers in the graph come from {country}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Manager {country: $country}) RETURN count(m) AS managers",
+      "rows": 1,
+      "hash": "fnv1a64:295c471d2fc43900",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "country",
+          "type": "string",
+          "sample": "Italy",
+          "enum_values": null
+        }
+      ],
+      "work": 501
+    },
+    {
+      "id": "fb_extra_time_goals",
+      "question": "How many goals were scored in extra time?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (g:Goal) WHERE g.period STARTS WITH 'extra time' RETURN count(g) AS goals",
+      "rows": 1,
+      "hash": "fnv1a64:eba0515dbb24745b",
+      "unanswerable": false,
+      "params": [],
+      "work": 3722
+    },
+    {
+      "id": "fb_semi_final_count",
+      "question": "How many semi-final matches have been played in total?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match) WHERE m.stage IN ['semi-final', 'semi-finals'] RETURN count(m) AS semi_finals",
+      "rows": 1,
+      "hash": "fnv1a64:aa7ffa88130f5d45",
+      "unanswerable": false,
+      "params": [],
+      "work": 1304
+    },
+    {
+      "id": "fb_host_won",
+      "question": "In which World Cups did the host country also win the tournament? List them by year.",
+      "paraphrases": [
+        "When did a host nation win its own World Cup?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (t:Tournament) WHERE t.winner = t.host_country RETURN t.year AS year, t.winner AS team ORDER BY year",
+      "rows": 7,
+      "hash": "fnv1a64:5e60bae58f31050d",
+      "unanswerable": false,
+      "params": [],
+      "work": 51
+    },
+    {
+      "id": "fb_first_minute_scorers",
+      "question": "Which players scored a goal in the first minute of a World Cup match, excluding own goals?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (g:Goal {minute: 1})-[:SCORED_BY]->(p:Player) WHERE g.own_goal = false RETURN DISTINCT CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player",
+      "rows": 18,
+      "hash": "fnv1a64:3c565bb771d1961f",
+      "unanswerable": false,
+      "params": [],
+      "work": 3709
+    },
+    {
+      "id": "fb_avg_goals_per_match",
+      "question": "What is the average number of goals per World Cup match, to two decimal places?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match) RETURN round(100.0 * avg(m.home_score + m.away_score)) / 100.0 AS avg_goals",
+      "rows": 1,
+      "hash": "fnv1a64:4161182ff8052079",
+      "unanswerable": false,
+      "params": [],
+      "work": 1250
+    },
+    {
+      "id": "fb_oldest_player",
+      "question": "Who is the earliest-born player in the graph, among players with a known birth date?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Player) WHERE p.birth_date <> 'not available' RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, p.birth_date AS born ORDER BY born LIMIT 1",
+      "rows": 1,
+      "hash": "fnv1a64:fb613b4a9b83a2b7",
+      "unanswerable": false,
+      "params": [],
+      "work": 20727
+    },
+    {
+      "id": "fb_teams_per_region",
+      "question": "How many teams come from each region of the world? Most teams first, ties alphabetically.",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (t:Team)-[:FROM]->(c:Country) RETURN c.name AS region, count(t) AS teams ORDER BY teams DESC, region",
+      "rows": 11,
+      "hash": "fnv1a64:5eddaf1bba222bea",
+      "unanswerable": false,
+      "params": [],
+      "work": 33
+    },
+    {
+      "id": "fb_final_score",
+      "question": "What was the score of the {year} World Cup final?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match {stage: 'final'})-[:IN_TOURNAMENT]->(t:Tournament {year: $year}) RETURN m.name AS final, m.home_score AS home_goals, m.away_score AS away_goals",
+      "rows": 1,
+      "hash": "fnv1a64:e7b7d6e79dfd6685",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 1986,
+          "enum_values": null
+        }
+      ],
+      "work": 34
+    },
+    {
+      "id": "fb_penalty_shootouts",
+      "question": "How many World Cup matches were level on goals but still had a winner, meaning they were decided by a penalty shootout?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match) WHERE m.home_score = m.away_score AND m.result <> 'draw' RETURN count(m) AS shootouts",
+      "rows": 1,
+      "hash": "fnv1a64:bfce5d3155a487d1",
+      "unanswerable": false,
+      "params": [],
+      "work": 1293
+    },
+    {
+      "id": "fb_unanswerable_manager",
+      "question": "Who managed {team} at the {year} World Cup?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (mg:Manager)-[:MANAGED]->(t:Team {name: $team}) MATCH (t)<-[:HOME_TEAM|AWAY_TEAM]-(:Match)-[:IN_TOURNAMENT]->(:Tournament {year: $year}) RETURN DISTINCT mg.given_name AS given_name, mg.family_name AS family_name",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "team",
+          "type": "string",
+          "sample": "France",
+          "enum_values": null
+        },
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2018,
+          "enum_values": null
+        }
+      ],
+      "work": 89
+    },
+    {
+      "id": "fb_unanswerable_referee",
+      "question": "Who refereed the {year} World Cup final?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Match {stage: 'final'})-[:IN_TOURNAMENT]->(t:Tournament {year: $year}) WHERE m.referee IS NOT NULL RETURN m.referee AS referee",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2014,
+          "enum_values": null
+        }
+      ],
+      "work": 33
+    },
+    {
+      "id": "fb_tournament_top_scorer",
+      "question": "Who was the top scorer at the {year} World Cup, and how many goals did they score? Include everyone tied for the lead.",
+      "paraphrases": [
+        "Who won the golden boot in {year}?"
+      ],
+      "difficulty": "hard",
+      "cypher": "MATCH (g:Goal)-[:SCORED_IN]->(m:Match)-[:IN_TOURNAMENT]->(t:Tournament {year: $year}), (g)-[:SCORED_BY]->(p:Player) WHERE g.own_goal = false WITH p, count(g) AS goals WITH collect({player: CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END, goals: goals}) AS rows, max(goals) AS top UNWIND rows AS r WITH r, top WHERE r.goals = top RETURN r.player AS player, r.goals AS goals",
+      "rows": 1,
+      "hash": "fnv1a64:0ce1378d3695510e",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2014,
+          "enum_values": null
+        }
+      ],
+      "work": 828
+    },
+    {
+      "id": "fb_head_to_head",
+      "question": "How many times have {team_a} and {team_b} met at the World Cup, and how many of those matches did each side win (shootouts included) or draw?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (a:Team {name: $team_a})<-[ra:HOME_TEAM|AWAY_TEAM]-(m:Match)-[rb:HOME_TEAM|AWAY_TEAM]->(b:Team {name: $team_b}) RETURN count(m) AS played, sum(CASE WHEN (type(ra) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(ra) = 'AWAY_TEAM' AND m.result = 'away team win') THEN 1 ELSE 0 END) AS a_won, sum(CASE WHEN (type(rb) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(rb) = 'AWAY_TEAM' AND m.result = 'away team win') THEN 1 ELSE 0 END) AS b_won, sum(CASE WHEN m.result = 'draw' THEN 1 ELSE 0 END) AS drawn",
+      "rows": 1,
+      "hash": "fnv1a64:b1be1d44a4678d51",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "team_a",
+          "type": "string",
+          "sample": "Brazil",
+          "enum_values": null
+        },
+        {
+          "name": "team_b",
+          "type": "string",
+          "sample": "Sweden",
+          "enum_values": null
+        }
+      ],
+      "work": 259
+    },
+    {
+      "id": "fb_team_goals_for_against",
+      "question": "How many World Cup goals has {team} scored and how many has it conceded?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (m:Match)-[r:HOME_TEAM|AWAY_TEAM]->(t:Team {name: $team}) RETURN sum(CASE WHEN type(r) = 'HOME_TEAM' THEN m.home_score ELSE m.away_score END) AS scored, sum(CASE WHEN type(r) = 'HOME_TEAM' THEN m.away_score ELSE m.home_score END) AS conceded",
+      "rows": 1,
+      "hash": "fnv1a64:d98bb0d2688e7144",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "team",
+          "type": "string",
+          "sample": "Brazil",
+          "enum_values": null
+        }
+      ],
+      "work": 239
+    },
+    {
+      "id": "fb_player_goals_by_tournament",
+      "question": "In which World Cups did {player} score, and how many goals at each? List by year.",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player), (g)-[:SCORED_IN]->(:Match)-[:IN_TOURNAMENT]->(t:Tournament) WHERE g.own_goal = false AND CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END = $player RETURN t.year AS year, count(g) AS goals ORDER BY year",
+      "rows": 4,
+      "hash": "fnv1a64:a9155e59108b145b",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "player",
+          "type": "string",
+          "sample": "Miroslav Klose",
+          "enum_values": null
+        }
+      ],
+      "work": 11980
+    },
+    {
+      "id": "fb_player_scoring_cities",
+      "question": "In which cities did {player} score World Cup goals, and how many in each? Most goals first, ties alphabetically.",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player), (g)-[:SCORED_IN]->(:Match)-[:PLAYED_AT]->(s:Stadium) WHERE g.own_goal = false AND CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END = $player RETURN s.city AS city, count(g) AS goals ORDER BY goals DESC, city",
+      "rows": 6,
+      "hash": "fnv1a64:c29572bb435309bb",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "player",
+          "type": "string",
+          "sample": "Pelé",
+          "enum_values": null
+        }
+      ],
+      "work": 12192
+    },
+    {
+      "id": "fb_highest_avg_goals_tournaments",
+      "question": "Which three World Cups had the highest average number of goals per match, to two decimal places?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (m:Match)-[:IN_TOURNAMENT]->(t:Tournament) WITH t, avg(m.home_score + m.away_score) AS avg_goals RETURN t.name AS tournament, round(100.0 * avg_goals) / 100.0 AS goals_per_match ORDER BY goals_per_match DESC, tournament LIMIT 3",
+      "rows": 3,
+      "hash": "fnv1a64:0a087ef033192caf",
+      "unanswerable": false,
+      "params": [],
+      "work": 1317
+    },
+    {
+      "id": "fb_stadiums_most_goals",
+      "question": "At which five stadiums have the most World Cup goals been scored? Ties broken by stadium name.",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (g:Goal)-[:SCORED_IN]->(:Match)-[:PLAYED_AT]->(s:Stadium) RETURN s.name AS stadium, s.city AS city, count(g) AS goals ORDER BY goals DESC, stadium LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:a3903827233ea728",
+      "unanswerable": false,
+      "params": [],
+      "work": 5615
+    },
+    {
+      "id": "fb_final_appearances",
+      "question": "Which teams have played in a World Cup final (men's or women's), and how many finals each? Most finals first, ties alphabetically.",
+      "paraphrases": [
+        "Which nations have reached the most World Cup finals?"
+      ],
+      "difficulty": "hard",
+      "cypher": "MATCH (m:Match {stage: 'final'})-[:HOME_TEAM|AWAY_TEAM]->(t:Team) RETURN t.name AS team, count(m) AS finals ORDER BY finals DESC, team",
+      "rows": 18,
+      "hash": "fnv1a64:212f0499818911d2",
+      "unanswerable": false,
+      "params": [],
+      "work": 258
+    },
+    {
+      "id": "fb_multiple_hat_tricks",
+      "question": "Which players have scored three or more goals in a single World Cup match more than once?",
+      "paraphrases": [
+        "Who has more than one World Cup hat-trick?"
+      ],
+      "difficulty": "hard",
+      "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player), (g)-[:SCORED_IN]->(m:Match) WHERE g.own_goal = false WITH p, m, count(g) AS goals WHERE goals >= 3 WITH p, count(m) AS hat_tricks WHERE hat_tricks >= 2 RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, hat_tricks",
+      "rows": 4,
+      "hash": "fnv1a64:ae2446d130ce35fb",
+      "unanswerable": false,
+      "params": [],
+      "work": 12008
+    },
+    {
+      "id": "fb_confederation_wins",
+      "question": "How many World Cup matches have teams from each confederation won, shootouts included, listing a confederation with no wins as zero? Most wins first.",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (t:Team) OPTIONAL MATCH (m:Match)-[r:HOME_TEAM|AWAY_TEAM]->(t) WHERE ((type(r) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(r) = 'AWAY_TEAM' AND m.result = 'away team win')) RETURN t.confederation AS confederation, count(m) AS wins ORDER BY wins DESC, confederation",
+      "rows": 6,
+      "hash": "fnv1a64:75dbe4f7e199ce08",
+      "unanswerable": false,
+      "params": [],
+      "work": 4786
+    },
+    {
+      "id": "fb_shootout_winners",
+      "question": "Which teams have won at least two World Cup penalty shootouts (matches level on goals that still had a winner)? Most shootout wins first, ties alphabetically.",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (m:Match)-[r:HOME_TEAM|AWAY_TEAM]->(t:Team) WHERE m.home_score = m.away_score AND ((type(r) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(r) = 'AWAY_TEAM' AND m.result = 'away team win')) WITH t, count(m) AS shootout_wins WHERE shootout_wins >= 2 RETURN t.name AS team, shootout_wins ORDER BY shootout_wins DESC, team",
+      "rows": 7,
+      "hash": "fnv1a64:eea774441c7c61ac",
+      "unanswerable": false,
+      "params": [],
+      "work": 2648
+    },
+    {
+      "id": "fb_host_nation_wins",
+      "question": "How many matches did the host nation win at the {year} World Cup, shootouts included?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (t:Tournament {year: $year})<-[:IN_TOURNAMENT]-(m:Match)-[r:HOME_TEAM|AWAY_TEAM]->(team:Team) WHERE team.name = t.host_country AND ((type(r) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(r) = 'AWAY_TEAM' AND m.result = 'away team win')) RETURN team.name AS host, count(m) AS wins",
+      "rows": 1,
+      "hash": "fnv1a64:770d301fadab1c07",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2006,
+          "enum_values": null
+        }
+      ],
+      "work": 110
+    },
+    {
+      "id": "fb_womens_top_scorers",
+      "question": "Who has scored at least ten goals at Women's World Cups, not counting own goals? List by goals, then by name.",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player), (g)-[:SCORED_IN]->(:Match)-[:IN_TOURNAMENT]->(t:Tournament) WHERE g.own_goal = false AND t.name CONTAINS \"Women's\" WITH p, count(g) AS goals WHERE goals >= 10 RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, goals ORDER BY goals DESC, player",
+      "rows": 11,
+      "hash": "fnv1a64:5455ba04a2399cc1",
+      "unanswerable": false,
+      "params": [],
+      "work": 3031
+    },
+    {
+      "id": "fb_unanswerable_sent_off",
+      "question": "Which players were sent off at the {year} World Cup?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (p:Player)-[:SENT_OFF_IN]->(:Match)-[:IN_TOURNAMENT]->(:Tournament {year: $year}) RETURN DISTINCT CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 2006,
+          "enum_values": null
+        }
+      ],
+      "work": 95
+    }
+  ]
+}
