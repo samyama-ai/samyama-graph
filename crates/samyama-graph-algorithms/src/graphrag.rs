@@ -108,7 +108,11 @@ pub fn retrieve(
 ) -> Vec<Hit> {
     let partition = if config.strategy.needs_communities() {
         let p = partition.expect("this strategy needs a partition");
-        assert_eq!(p.len(), view.node_count, "the partition does not cover the view");
+        assert_eq!(
+            p.len(),
+            view.node_count,
+            "the partition does not cover the view"
+        );
         Some(p)
     } else {
         None
@@ -127,7 +131,11 @@ pub fn retrieve(
     hits.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
-            .then(a.hops.unwrap_or(usize::MAX).cmp(&b.hops.unwrap_or(usize::MAX)))
+            .then(
+                a.hops
+                    .unwrap_or(usize::MAX)
+                    .cmp(&b.hops.unwrap_or(usize::MAX)),
+            )
             .then(a.index.cmp(&b.index))
     });
     hits.truncate(config.limit);
@@ -146,7 +154,12 @@ fn better(candidate: &Hit, current: &Hit) -> bool {
     }
 }
 
-fn local(view: &GraphView, seeds: &[Seed], admit: &dyn Fn(usize) -> bool, config: &RetrievalConfig) -> Vec<Hit> {
+fn local(
+    view: &GraphView,
+    seeds: &[Seed],
+    admit: &dyn Fn(usize) -> bool,
+    config: &RetrievalConfig,
+) -> Vec<Hit> {
     let n = view.node_count;
     let mut best: HashMap<usize, Hit> = HashMap::new();
     let mut bfs = Bfs::new(n);
@@ -214,13 +227,28 @@ fn ranked_communities(seeds: &[Seed], partition: &[usize]) -> Vec<(usize, f64)> 
     total.into_iter().map(|(c, sum, _)| (c, sum)).collect()
 }
 
-fn global(seeds: &[Seed], partition: &[usize], admit: &dyn Fn(usize) -> bool, config: &RetrievalConfig) -> Vec<Hit> {
-    let chosen: Vec<(usize, f64)> = ranked_communities(seeds, partition).into_iter().take(config.communities).collect();
+fn global(
+    seeds: &[Seed],
+    partition: &[usize],
+    admit: &dyn Fn(usize) -> bool,
+    config: &RetrievalConfig,
+) -> Vec<Hit> {
+    let chosen: Vec<(usize, f64)> = ranked_communities(seeds, partition)
+        .into_iter()
+        .take(config.communities)
+        .collect();
     (0..partition.len())
         .filter(|&v| admit(v))
         .filter_map(|v| {
             let &(_, score) = chosen.iter().find(|(c, _)| *c == partition[v])?;
-            Some(Hit { index: v, score, hops: None, seed: None, community: None, path: Vec::new() })
+            Some(Hit {
+                index: v,
+                score,
+                hops: None,
+                seed: None,
+                community: None,
+                path: Vec::new(),
+            })
         })
         .collect()
 }
@@ -289,7 +317,13 @@ mod tests {
     }
 
     fn config(strategy: Strategy) -> RetrievalConfig {
-        RetrievalConfig { strategy, hops: 2, decay: 0.5, communities: 1, limit: 50 }
+        RetrievalConfig {
+            strategy,
+            hops: 2,
+            decay: 0.5,
+            communities: 1,
+            limit: 50,
+        }
     }
 
     fn all(_: usize) -> bool {
@@ -303,7 +337,16 @@ mod tests {
     #[test]
     fn local_walks_both_ways_to_the_hop_limit_with_decaying_scores_and_paths() {
         let (v, _) = graph();
-        let hits = retrieve(&v, &[Seed { index: 2, similarity: 0.8 }], None, &all, &config(Strategy::Local));
+        let hits = retrieve(
+            &v,
+            &[Seed {
+                index: 2,
+                similarity: 0.8,
+            }],
+            None,
+            &all,
+            &config(Strategy::Local),
+        );
         let h = by_index(&hits);
         // 2 hops either way along the chain, and across 3 -> 4 into the triangle.
         let mut got: Vec<usize> = h.keys().copied().collect();
@@ -314,7 +357,9 @@ mod tests {
         assert_eq!((h[&4].score, h[&4].hops), (0.2, Some(2)));
         assert_eq!(h[&4].path, vec![2, 3, 4]);
         assert_eq!(h[&0].path, vec![2, 1, 0], "a predecessor was not walked");
-        assert!(hits.iter().all(|x| x.seed == Some(2) && x.community.is_none()));
+        assert!(hits
+            .iter()
+            .all(|x| x.seed == Some(2) && x.community.is_none()));
         // Highest score first.
         assert!(hits.windows(2).all(|w| w[0].score >= w[1].score));
     }
@@ -322,7 +367,16 @@ mod tests {
     #[test]
     fn a_node_near_two_seeds_keeps_its_best_reason() {
         let (v, _) = graph();
-        let seeds = [Seed { index: 0, similarity: 0.9 }, Seed { index: 5, similarity: 0.6 }];
+        let seeds = [
+            Seed {
+                index: 0,
+                similarity: 0.9,
+            },
+            Seed {
+                index: 5,
+                similarity: 0.6,
+            },
+        ];
         let hits = retrieve(&v, &seeds, None, &all, &config(Strategy::Local));
         let h = by_index(&hits);
         // 4 is 1 hop from seed 5 (0.3) and 4 hops from seed 0 (out of range).
@@ -336,9 +390,22 @@ mod tests {
         // 0 - 1 - 2 with equal seeds at both ends: 1 scores 0.25 from each,
         // one hop away, and the seed given first keeps it.
         let v = view(3, &[(0, 1), (1, 2)]);
-        let seeds = [Seed { index: 0, similarity: 0.5 }, Seed { index: 2, similarity: 0.5 }];
+        let seeds = [
+            Seed {
+                index: 0,
+                similarity: 0.5,
+            },
+            Seed {
+                index: 2,
+                similarity: 0.5,
+            },
+        ];
         let hits = retrieve(&v, &seeds, None, &all, &config(Strategy::Local));
-        assert_eq!(by_index(&hits)[&1].seed, Some(0), "the tie went to the later seed");
+        assert_eq!(
+            by_index(&hits)[&1].seed,
+            Some(0),
+            "the tie went to the later seed"
+        );
         let swapped = [seeds[1], seeds[0]];
         let hits = retrieve(&v, &swapped, None, &all, &config(Strategy::Local));
         assert_eq!(by_index(&hits)[&1].seed, Some(2));
@@ -347,8 +414,26 @@ mod tests {
     #[test]
     fn hops_zero_returns_only_the_seeds() {
         let (v, _) = graph();
-        let c = RetrievalConfig { hops: 0, ..config(Strategy::Local) };
-        let hits = retrieve(&v, &[Seed { index: 2, similarity: 0.8 }, Seed { index: 6, similarity: 0.7 }], None, &all, &c);
+        let c = RetrievalConfig {
+            hops: 0,
+            ..config(Strategy::Local)
+        };
+        let hits = retrieve(
+            &v,
+            &[
+                Seed {
+                    index: 2,
+                    similarity: 0.8,
+                },
+                Seed {
+                    index: 6,
+                    similarity: 0.7,
+                },
+            ],
+            None,
+            &all,
+            &c,
+        );
         assert_eq!(hits.iter().map(|h| h.index).collect::<Vec<_>>(), vec![2, 6]);
     }
 
@@ -356,13 +441,34 @@ mod tests {
     fn a_refused_node_is_neither_returned_nor_walked_through() {
         let (v, _) = graph();
         let not_3 = |i: usize| i != 3;
-        let c = RetrievalConfig { hops: 5, ..config(Strategy::Local) };
-        let hits = retrieve(&v, &[Seed { index: 2, similarity: 1.0 }], None, &not_3, &c);
+        let c = RetrievalConfig {
+            hops: 5,
+            ..config(Strategy::Local)
+        };
+        let hits = retrieve(
+            &v,
+            &[Seed {
+                index: 2,
+                similarity: 1.0,
+            }],
+            None,
+            &not_3,
+            &c,
+        );
         let got: Vec<usize> = by_index(&hits).keys().copied().collect();
         assert!(!got.contains(&3));
         assert!(!got.contains(&4), "the walk passed through a refused node");
         // A refused seed is not a seed.
-        let none = retrieve(&v, &[Seed { index: 3, similarity: 1.0 }], None, &not_3, &c);
+        let none = retrieve(
+            &v,
+            &[Seed {
+                index: 3,
+                similarity: 1.0,
+            }],
+            None,
+            &not_3,
+            &c,
+        );
         assert!(none.is_empty());
     }
 
@@ -371,24 +477,57 @@ mod tests {
         let (v, p) = graph();
         // Community 1 has two seeds (0.5 + 0.4 = 0.9); community 0 one (0.8).
         let seeds = [
-            Seed { index: 1, similarity: 0.8 },
-            Seed { index: 5, similarity: 0.5 },
-            Seed { index: 6, similarity: 0.4 },
+            Seed {
+                index: 1,
+                similarity: 0.8,
+            },
+            Seed {
+                index: 5,
+                similarity: 0.5,
+            },
+            Seed {
+                index: 6,
+                similarity: 0.4,
+            },
         ];
         let hits = retrieve(&v, &seeds, Some(&p), &all, &config(Strategy::Global));
-        assert_eq!(hits.iter().map(|h| h.index).collect::<Vec<_>>(), vec![4, 5, 6]);
-        assert!(hits.iter().all(|h| (h.score - 0.9).abs() < 1e-12 && h.community == Some(1) && h.hops.is_none()));
-        let two = RetrievalConfig { communities: 2, ..config(Strategy::Global) };
+        assert_eq!(
+            hits.iter().map(|h| h.index).collect::<Vec<_>>(),
+            vec![4, 5, 6]
+        );
+        assert!(hits
+            .iter()
+            .all(|h| (h.score - 0.9).abs() < 1e-12 && h.community == Some(1) && h.hops.is_none()));
+        let two = RetrievalConfig {
+            communities: 2,
+            ..config(Strategy::Global)
+        };
         let hits = retrieve(&v, &seeds, Some(&p), &all, &two);
-        assert_eq!(hits.len(), 7, "community 2 has no seed and must not be returned");
+        assert_eq!(
+            hits.len(),
+            7,
+            "community 2 has no seed and must not be returned"
+        );
         assert_eq!(hits.last().unwrap().score, 0.8);
     }
 
     #[test]
     fn drift_adds_the_rest_of_each_seeds_community_below_the_walk() {
         let (v, p) = graph();
-        let c = RetrievalConfig { hops: 1, ..config(Strategy::Drift) };
-        let hits = retrieve(&v, &[Seed { index: 0, similarity: 0.8 }], Some(&p), &all, &c);
+        let c = RetrievalConfig {
+            hops: 1,
+            ..config(Strategy::Drift)
+        };
+        let hits = retrieve(
+            &v,
+            &[Seed {
+                index: 0,
+                similarity: 0.8,
+            }],
+            Some(&p),
+            &all,
+            &c,
+        );
         let h = by_index(&hits);
         // Walked: 0, 1. Community 0 adds 2 and 3 at 0.8 * 0.5^2.
         assert_eq!((h[&1].hops, h[&1].score), (Some(1), 0.4));
@@ -401,8 +540,20 @@ mod tests {
     #[test]
     fn the_limit_keeps_the_highest_scores() {
         let (v, _) = graph();
-        let c = RetrievalConfig { limit: 2, ..config(Strategy::Local) };
-        let hits = retrieve(&v, &[Seed { index: 2, similarity: 0.8 }], None, &all, &c);
+        let c = RetrievalConfig {
+            limit: 2,
+            ..config(Strategy::Local)
+        };
+        let hits = retrieve(
+            &v,
+            &[Seed {
+                index: 2,
+                similarity: 0.8,
+            }],
+            None,
+            &all,
+            &c,
+        );
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].index, 2);
         assert_eq!(hits[1].score, 0.4);
@@ -413,7 +564,10 @@ mod tests {
     fn no_seeds_retrieve_nothing() {
         let (v, p) = graph();
         for s in [Strategy::Local, Strategy::Global, Strategy::Drift] {
-            assert!(retrieve(&v, &[], Some(&p), &all, &config(s)).is_empty(), "{s:?}");
+            assert!(
+                retrieve(&v, &[], Some(&p), &all, &config(s)).is_empty(),
+                "{s:?}"
+            );
         }
     }
 
@@ -431,6 +585,15 @@ mod tests {
     #[should_panic(expected = "needs a partition")]
     fn global_without_a_partition_is_a_caller_bug() {
         let (v, _) = graph();
-        retrieve(&v, &[Seed { index: 0, similarity: 1.0 }], None, &all, &config(Strategy::Global));
+        retrieve(
+            &v,
+            &[Seed {
+                index: 0,
+                similarity: 1.0,
+            }],
+            None,
+            &all,
+            &config(Strategy::Global),
+        );
     }
 }
