@@ -491,3 +491,149 @@ fn the_hop_guide_allows_for_long_relationships() {
     let by_length = &astar(&s, source, target, "{cost: 'length'}").unwrap()[0];
     assert_eq!(float(&by_length["hops"]), 4.0);
 }
+
+/// Normalised mutual information between two labellings of the same nodes.
+fn nmi(a: &[i64], b: &[i64]) -> f64 {
+    let n = a.len() as f64;
+    let mut joint: HashMap<(i64, i64), f64> = HashMap::new();
+    let (mut pa, mut pb): (HashMap<i64, f64>, HashMap<i64, f64>) = (HashMap::new(), HashMap::new());
+    for (&x, &y) in a.iter().zip(b) {
+        *joint.entry((x, y)).or_default() += 1.0;
+        *pa.entry(x).or_default() += 1.0;
+        *pb.entry(y).or_default() += 1.0;
+    }
+    let h = |p: &HashMap<i64, f64>| -p.values().map(|c| c / n * (c / n).ln()).sum::<f64>();
+    let i: f64 = joint.iter().map(|(&(x, y), &c)| c / n * ((c / n) / (pa[&x] / n * pb[&y] / n)).ln()).sum();
+    let (ha, hb) = (h(&pa), h(&pb));
+    if ha + hb == 0.0 {
+        1.0
+    } else {
+        2.0 * i / (ha + hb)
+    }
+}
+
+/// Two groups mixed at random in a unit square; links likelier near and
+/// within a group (Expert et al.'s benchmark, about 23 links per node).
+fn mixed_groups(n: usize, seed: u64) -> (GraphStore, Vec<NodeId>, Vec<i64>) {
+    let mut s = GraphStore::new();
+    let mut x = seed | 1;
+    let mut unit = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        (x % 1_000_000) as f64 / 1_000_000.0
+    };
+    let pos: Vec<[f64; 2]> = (0..n).map(|_| [unit(), unit()]).collect();
+    let group: Vec<i64> = (0..n).map(|_| (unit() < 0.5) as i64).collect();
+    let ids: Vec<NodeId> = pos
+        .iter()
+        .map(|p| {
+            let id = s.create_node("Site");
+            for (k, v) in [("x", p[0]), ("y", p[1]), ("z", 0.0)] {
+                s.set_node_property("default", id, k, v).unwrap();
+            }
+            id
+        })
+        .collect();
+    for i in 0..n {
+        for j in i + 1..n {
+            let d = ((pos[i][0] - pos[j][0]).powi(2) + (pos[i][1] - pos[j][1]).powi(2)).sqrt();
+            let affinity = if group[i] == group[j] { 1.0 } else { 0.1 };
+            if unit() < affinity / (1.0 + (d / 0.15).powi(2)) {
+                s.create_edge(ids[i], ids[j], "LINK").unwrap();
+            }
+        }
+    }
+    run(&mut s, "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean");
+    (s, ids, group)
+}
+
+fn communities(s: &GraphStore, q: &str, ids: &[NodeId]) -> Vec<i64> {
+    let got: HashMap<i64, i64> = rows(s, q)
+        .unwrap()
+        .into_iter()
+        .map(|r| (float(&r["id"]) as i64, float(&r["c"]) as i64))
+        .collect();
+    ids.iter().map(|id| got[&(id.as_u64() as i64)]).collect()
+}
+
+#[test]
+fn spatial_louvain_recovers_groups_mixed_in_space_that_louvain_splits_by_place() {
+    let (mut spatial_sum, mut plain_sum) = (0.0, 0.0);
+    for seed in [3, 7, 11] {
+        let (s, ids, group) = mixed_groups(300, seed);
+        let spatial = communities(
+            &s,
+            "CALL algo.structural.spatialLouvain() YIELD node, communityId RETURN id(node) AS id, communityId AS c",
+            &ids,
+        );
+        let plain = communities(&s, "CALL algo.louvain() YIELD node, communityId RETURN id(node) AS id, communityId AS c", &ids);
+        spatial_sum += nmi(&spatial, &group) / 3.0;
+        plain_sum += nmi(&plain, &group) / 3.0;
+    }
+    assert!(spatial_sum > 0.95, "spatial NMI {spatial_sum:.3}");
+    assert!(spatial_sum > plain_sum + 0.2, "spatial {spatial_sum:.3} vs louvain {plain_sum:.3}");
+}
+
+#[test]
+fn spatial_louvain_reports_one_modularity_and_leaves_unpositioned_nodes_out() {
+    let (mut s, ids, _) = mixed_groups(80, 5);
+    let stray = s.create_node("Site");
+    s.create_edge(ids[0], stray, "LINK").unwrap();
+    let got = rows(
+        &s,
+        "CALL algo.structural.spatialLouvain({structure: 'sites', bins: 8}) YIELD node, communityId, modularity \
+         RETURN id(node) AS id, communityId, modularity",
+    )
+    .unwrap();
+    assert_eq!(got.len(), ids.len(), "an unpositioned node was grouped");
+    assert!(got.iter().all(|r| float(&r["id"]) as u64 != stray.as_u64()));
+    let q = float(&got[0]["modularity"]);
+    assert!(q > 0.0 && got.iter().all(|r| float(&r["modularity"]) == q));
+    // Same call, same answer.
+    let again = rows(
+        &s,
+        "CALL algo.structural.spatialLouvain({structure: 'sites', bins: 8}) YIELD node, communityId, modularity \
+         RETURN id(node) AS id, communityId, modularity",
+    )
+    .unwrap();
+    assert_eq!(got, again);
+    // No relationships: everyone alone, modularity null.
+    let mut lonely = GraphStore::new();
+    for i in 0..3 {
+        let id = lonely.create_node("Site");
+        for (k, v) in [("x", i as f64), ("y", 0.0), ("z", 0.0)] {
+            lonely.set_node_property("default", id, k, v).unwrap();
+        }
+    }
+    run(&mut lonely, "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean");
+    let alone = rows(&lonely, "CALL algo.structural.spatialLouvain() YIELD communityId, modularity RETURN communityId, modularity").unwrap();
+    assert_eq!(alone.len(), 3);
+    assert!(alone.iter().all(|r| r["modularity"] == PropertyValue::Null));
+}
+
+#[test]
+fn spatial_louvain_refuses_bad_bins_and_too_many_nodes() {
+    let (s, _, _) = mixed_groups(20, 9);
+    for (q, expected) in [
+        ("CALL algo.structural.spatialLouvain({bins: 0}) YIELD node RETURN node", "`bins` must be an integer from 1 to 1000"),
+        ("CALL algo.structural.spatialLouvain({bins: 'many'}) YIELD node RETURN node", "`bins` must be an integer"),
+        ("CALL algo.structural.spatialLouvain({colour: 1}) YIELD node RETURN node", "unknown config key `colour`"),
+    ] {
+        let e = QueryEngine::new().execute(q, &s).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(e.contains(expected), "{q}: {e}");
+    }
+    let mut big = GraphStore::new();
+    for i in 0..2001 {
+        let id = big.create_node("Site");
+        for (k, v) in [("x", i as f64), ("y", 0.0), ("z", 0.0)] {
+            big.set_node_property("default", id, k, v).unwrap();
+        }
+    }
+    run(&mut big, "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean");
+    let e = QueryEngine::new()
+        .execute("CALL algo.structural.spatialLouvain() YIELD node RETURN node", &big)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("2001 nodes is more than the 2000"), "{e}");
+}

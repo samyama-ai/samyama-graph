@@ -6814,7 +6814,7 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
         }
         // The path with positions (x, x^2, x) under a 3D structure, so
         // every node can be routed and 0 - 2 is a close, unjoined pair.
-        "structural.astar" | "structural.stress" => {
+        "structural.astar" | "structural.stress" | "structural.spatiallouvain" => {
             use crate::index::structure::{ManifoldSpec, StructuralConvention};
             path.structure_registry.upsert(StructuralConvention {
                 name: "pos".to_string(),

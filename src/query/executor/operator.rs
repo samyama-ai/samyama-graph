@@ -20033,6 +20033,49 @@ impl AlgorithmOperator {
         Ok(())
     }
 
+    /// `algo.structural.spatialLouvain({structure, bins, edgeType})` -- Louvain
+    /// against a null model that expects near nodes to link more (#2037).
+    ///
+    /// One row per positioned node: `node, communityId, modularity`, as
+    /// `algo.louvain` yields them; `modularity` is the partition's spatial
+    /// modularity, the same on every row, null with no relationships. `bins`
+    /// (default 20) is how many distance bands the deterrence is measured in.
+    fn execute_structural_spatial_louvain(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        use crate::algo::structural::{spatial_communities, Structure};
+        /// Bands the deterrence is measured in, by default: enough to follow
+        /// the fall-off, few enough that each holds pairs to measure.
+        const DEFAULT_BINS: i64 = 20;
+        /// More bands than this leaves most of them empty on any graph the
+        /// node limit allows.
+        const MAX_BINS: i64 = 1000;
+        let (config, structure) = self.structural_config(&["bins", "edgeType", "structure"])?;
+        let bins = match config.get("bins") {
+            None => DEFAULT_BINS,
+            Some(PropertyValue::Integer(b)) if (1..=MAX_BINS).contains(b) => *b,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{}: `bins` must be an integer from 1 to {MAX_BINS}, got {other:?}",
+                    self.name
+                )))
+            }
+        } as usize;
+        let edge_type = self.config_string(&config, "edgeType")?;
+        let structure = Structure::resolve(store, structure.as_deref())
+            .map_err(|e| ExecutionError::bad_argument(format!("{}: {e}", self.name)))?;
+        let view = self.view(store, structure.convention.label.as_deref(), edge_type.as_deref(), None)?;
+        let (rows, modularity) = spatial_communities(&structure, &view, bins)
+            .map_err(|e| ExecutionError::bad_argument(format!("{}: {e}", self.name)))?;
+        let q = Value::Property(modularity.map_or(PropertyValue::Null, PropertyValue::Float));
+        for (id, community) in rows {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id.as_u64());
+            rec.bind("communityId".to_string(), Value::Property(PropertyValue::Integer(community as i64)));
+            rec.bind("modularity".to_string(), q.clone());
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
     /// `algo.structural.stress({structure, radius, edgeType, limit})` -- pairs
     /// close in space but far apart in the graph (#2037).
     ///
@@ -22107,6 +22150,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "structural.astar" => self.execute_structural_astar(store)?,
                 "structural.stress" => self.execute_structural_stress(store)?,
+                "structural.spatiallouvain" => self.execute_structural_spatial_louvain(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,
@@ -22219,6 +22263,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "structural.astar" => self.execute_structural_astar(store)?,
                 "structural.stress" => self.execute_structural_stress(store)?,
+                "structural.spatiallouvain" => self.execute_structural_spatial_louvain(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,

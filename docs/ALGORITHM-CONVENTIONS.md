@@ -387,7 +387,18 @@ CALL algo.structural.stress({structure: 'pdb', radius: 8.0}) YIELD source, targe
   `stretch` null -- a close pair the graph cannot connect at all is the
   strongest sign of a missing link.
 
-Both walk **only nodes with a position** under the structure, over relationships
+- **`algo.structural.spatialLouvain({...})`** is Louvain against a null
+  model that expects near nodes to link more: `P_ij = k_i k_j f(d_ij)`, with
+  the deterrence `f` measured from the graph in `bins` distance bands (default
+  20), so the model expects exactly as many edges at each distance as there
+  are (Expert et al., PNAS 2011). Communities are groups more connected than
+  their distances explain, rather than the spatial blobs ordinary Louvain
+  tends to find. On Expert's benchmark with about 23 links per node it found
+  two groups mixed in space exactly (NMI 1.00) where `algo.louvain` scored
+  0.69; on a sparse graph (5 per node) neither does, and on a dense one both
+  do. It gives every pair a value, so it is limited to 2,000 positioned nodes.
+
+All three walk or group **only nodes with a position** under the structure, over relationships
 between two such nodes (`edgeType` narrows them further). A node without a
 position could be a shortcut the guide cannot measure, which would make a path
 that is not shortest look shortest. Distances are the structure's own:
@@ -399,6 +410,7 @@ exactly one 3D or geographic structure.
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
 |---|---|---|---|---|---|---|---|
 | Structure-guided shortest path | structural.astar | Undirected by default; `undirected: false` follows relationships as stored | The straight-line length between a relationship's ends (`cost: 'length'`), or 1 per relationship (`cost: 'hops'`); property weights are not read | Walked at length 0; never on a shortest path | No row when no path joins source and target | Equal routes: the one reached by the lower-priority, longer-so-far entry, then the lower node index, the same on every run | `stretch` = path length / straight-line distance, null when source and target coincide |
+| Spatial Louvain | structural.spatialLouvain | Undirected: a relationship either way joins a pair once | Ignored: the null model counts pairs, so property weights are not read | Ignored | Each component is grouped on its own; an isolated node is its own community | Nodes are moved in id order and ties go to the lower community id, so the same graph gives the same communities; ids are numbered from 0 in order of first appearance | `modularity` is spatial modularity: (edges inside communities - their expected number under the measured deterrence) / 2m; null with no relationships |
 | Structural stress | structural.stress | Undirected: closeness in space is symmetric | Straight-line lengths, as above | Ignored: a node is never paired with itself; coincident nodes are skipped | Pairs no path joins are returned first, with null `pathLength`, `hops`, `stretch` | Unreachable first, then highest stretch, then node ids | `stretch` = shortest path length / straight-line distance, at least 1 |
 
 ## Not a graph algorithm

@@ -24,7 +24,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use samyama_graph_algorithms::{guided_shortest_path, GraphView};
+use samyama_graph_algorithms::{guided_shortest_path, spatial_louvain, GraphView, SpatialCommunities};
 
 use crate::graph::{GraphStore, NodeId};
 use crate::index::point::EARTH_RADIUS_M;
@@ -394,4 +394,47 @@ pub fn stress(
             .then(x.b.cmp(&y.b))
     });
     Ok(out)
+}
+
+/// `view` cut down to its positioned nodes, in the same order, with the node
+/// id of each new index. Relationships to an unpositioned node are dropped
+/// with it.
+fn positioned_subview(structure: &Structure, view: &GraphView) -> (GraphView, Vec<NodeId>) {
+    let keep: Vec<usize> = (0..view.node_count)
+        .filter(|&i| structure.distance(id_at(view, i), id_at(view, i)).is_some())
+        .collect();
+    let mut new_index = vec![usize::MAX; view.node_count];
+    for (k, &i) in keep.iter().enumerate() {
+        new_index[i] = k;
+    }
+    let n = keep.len();
+    let (mut out, mut inc) = (vec![Vec::new(); n], vec![Vec::new(); n]);
+    for (k, &i) in keep.iter().enumerate() {
+        for &j in view.successors(i) {
+            if new_index[j] != usize::MAX {
+                out[k].push(new_index[j]);
+                inc[new_index[j]].push(k);
+            }
+        }
+    }
+    let ids: Vec<NodeId> = keep.iter().map(|&i| id_at(view, i)).collect();
+    let raw: Vec<u64> = ids.iter().map(|id| id.as_u64()).collect();
+    let index = raw.iter().enumerate().map(|(k, &id)| (id, k)).collect();
+    (GraphView::from_adjacency_list(n, raw, index, out, inc, None), ids)
+}
+
+/// Communities of the positioned nodes of `view` against the spatial null
+/// model (`samyama_graph_algorithms::spatial_louvain`): groups more
+/// connected than their distances explain. Returns each node with its
+/// community, and the partition's spatial modularity.
+pub fn spatial_communities(
+    structure: &Structure,
+    view: &GraphView,
+    bins: usize,
+) -> Result<(Vec<(NodeId, usize)>, Option<f64>), String> {
+    let (sub, ids) = positioned_subview(structure, view);
+    let distance = |i: usize, j: usize| structure.distance(ids[i], ids[j]).unwrap_or(0.0);
+    let SpatialCommunities { community, modularity, .. } =
+        spatial_louvain(&sub, distance, bins).map_err(|e| e.to_string())?;
+    Ok((ids.into_iter().zip(community).collect(), modularity))
 }
