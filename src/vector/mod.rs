@@ -57,3 +57,4 @@ pub use manager::{VectorIndexManager, IndexKey};
 
 mod checkpoint;
 pub mod strategy;
+pub mod work;
