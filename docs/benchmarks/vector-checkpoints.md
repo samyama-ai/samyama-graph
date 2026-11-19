@@ -48,6 +48,16 @@ Disk per generation is now about twice the vector bytes: the f32 vector list
 (current entries) and the graph's data file (all entries, superseded ones
 included, at the index's precision).
 
+## IVF centroids
+
+An IVF index (#1975) has no graph. Its generation carries the k-means
+centroids instead, as `<index>.hnsw.partition.ivf` (format, dimension, metric,
+`nlist`, the count trained on, centroids), in the manifest like a graph file.
+Recovery reads the vector list, checks the centroids describe the index, and
+assigns each vector to its nearest centroid: no k-means runs, and the lists
+are the ones the index had. Centroids that fail their checksum or describe
+another index cost a retrain, counted as a rebuild in the report.
+
 ## What remains
 
 Still not zero-rebuild startup. Ordinary server startup does not read these
