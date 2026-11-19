@@ -7,19 +7,15 @@
 //! Detecting it is not possible — a balanced directed graph looks identical —
 //! so the caller states it.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::common::GraphView;
+use crate::frontier::{self, Direction, Visit};
 
+/// Each neighbour once, without `u`: the undirected collapse these
+/// decompositions read (`frontier::distinct_neighbours`).
 fn neighbours(view: &GraphView, u: usize, bidirectional: bool) -> Vec<usize> {
-    let mut v: Vec<usize> = view.successors(u).to_vec();
-    if bidirectional {
-        v.extend_from_slice(view.predecessors(u));
-    }
-    v.sort_unstable();
-    v.dedup();
-    v.retain(|&x| x != u);
-    v
+    frontier::distinct_neighbours(view, u, Direction::undirected_if(bidirectional))
 }
 
 /// Is the graph two-colourable, and if so, which side is each node on?
@@ -30,26 +26,29 @@ fn neighbours(view: &GraphView, u: usize, bidirectional: bool) -> Vec<usize> {
 /// doing the same traversal twice.
 pub fn bipartite_sets(view: &GraphView, bidirectional: bool) -> Option<(Vec<usize>, Vec<usize>)> {
     let n = view.node_count;
-    let mut colour: Vec<i8> = vec![-1; n];
+    // One walk, extended from each node not yet reached, so every component
+    // is coloured from its own root: a node's side is the parity of its depth
+    // in its component's tree.
+    let mut bfs = frontier::Bfs::new(n);
+    let side = |bfs: &frontier::Bfs, v: usize| bfs.depth(v).map(|d| d % 2);
     for s in 0..n {
-        if colour[s] != -1 {
+        if bfs.depth(s).is_some() {
             continue;
         }
-        colour[s] = 0;
-        let mut q = VecDeque::from([s]);
-        while let Some(u) = q.pop_front() {
-            for v in neighbours(view, u, bidirectional) {
-                if colour[v] == -1 {
-                    colour[v] = 1 - colour[u];
-                    q.push_back(v);
-                } else if colour[v] == colour[u] {
-                    return None; // odd cycle
-                }
+        let odd_cycle = bfs.extend(&[s], |u, _| neighbours(view, u, bidirectional), |e| {
+            // An edge between two nodes on the same side closes an odd cycle.
+            if !e.discovered && e.from_depth % 2 == e.to_depth % 2 {
+                Visit::Stop
+            } else {
+                Visit::Continue
             }
+        });
+        if odd_cycle {
+            return None;
         }
     }
-    let left = (0..n).filter(|&i| colour[i] == 0).collect();
-    let right = (0..n).filter(|&i| colour[i] == 1).collect();
+    let left = (0..n).filter(|&i| side(&bfs, i) == Some(0)).collect();
+    let right = (0..n).filter(|&i| side(&bfs, i) == Some(1)).collect();
     Some((left, right))
 }
 
@@ -229,21 +228,13 @@ pub fn global_efficiency(view: &GraphView, bidirectional: bool) -> Option<f64> {
         return None;
     }
     let mut total = 0.0;
-    let mut dist = vec![usize::MAX; n];
+    let mut bfs = frontier::Bfs::new(n);
     for s in 0..n {
-        dist.iter_mut().for_each(|d| *d = usize::MAX);
-        dist[s] = 0;
-        let mut q = VecDeque::from([s]);
-        while let Some(u) = q.pop_front() {
-            for v in neighbours(view, u, bidirectional) {
-                if dist[v] == usize::MAX {
-                    dist[v] = dist[u] + 1;
-                    q.push_back(v);
-                }
-            }
-        }
-        for (t, &d) in dist.iter().enumerate() {
-            if t != s && d != usize::MAX {
+        bfs.walk(&[s], |u, _| neighbours(view, u, bidirectional), |_| Visit::Continue);
+        // In index order, as before: the order of a float sum is part of the
+        // answer.
+        for t in (0..n).filter(|&t| t != s) {
+            if let Some(d) = bfs.depth(t) {
                 total += 1.0 / d as f64;
             }
         }
