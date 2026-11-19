@@ -748,7 +748,7 @@ impl VectorIndex {
             (IndexKind::Hnsw, Quantization::Fp16) => Backend::F16(Hnsw::new(
                 m, expected, 16, ef_construction, distance,
             )),
-            Quantization::Int8 => Backend::I8(Hnsw::new(
+            (IndexKind::Hnsw, Quantization::Int8) => Backend::I8(Hnsw::new(
                 m, expected, 16, ef_construction, distance,
             )),
         };
@@ -1348,6 +1348,15 @@ impl VectorIndex {
                 positions
                     .into_iter()
                     .filter_map(|i| self.stored_f16.get(i))
+                    .filter(|(id, _)| keep(NodeId::new(*id)))
+                    .map(|(id, v)| (NodeId::new(*id), distance.eval(&q, v)))
+                    .collect()
+            }
+            Quantization::Int8 => {
+                let q = quantize_i8(query);
+                positions
+                    .into_iter()
+                    .filter_map(|i| self.stored_i8.get(i))
                     .filter(|(id, _)| keep(NodeId::new(*id)))
                     .map(|(id, v)| (NodeId::new(*id), distance.eval(&q, v)))
                     .collect()

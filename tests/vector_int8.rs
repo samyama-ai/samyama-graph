@@ -12,7 +12,9 @@ use std::collections::HashSet;
 
 use samyama::graph::types::NodeId;
 use samyama::graph::{GraphStore, Label, PropertyMap, PropertyValue};
-use samyama::vector::index::{DistanceMetric, Quantization, VectorIndex};
+use samyama::vector::index::{
+    DistanceMetric, HnswParams, IndexKind, IvfParams, Quantization, VectorIndex,
+};
 
 const DIM: usize = 64;
 const N: usize = 2_000;
@@ -182,4 +184,35 @@ fn a_zero_vector_is_held_without_dividing_by_zero() {
     let got = index.search(&[0.0; 4], 1).expect("search");
     assert_eq!(got[0].0, NodeId(1));
     assert_eq!(got[0].1, 0.0);
+}
+
+#[test]
+fn an_int8_ivf_index_finds_a_vector_it_holds_and_keeps_one_copy() {
+    // IVF (#1975) over int8 codes: lists are placed by the dequantized value
+    // and probed with a quantized query. Probing every list makes the search
+    // exhaustive, so each vector must find itself.
+    let vectors = corpus(400, 11);
+    let kind = IndexKind::Ivf(IvfParams {
+        nlist: Some(8),
+        nprobe: Some(8),
+    });
+    let mut index = VectorIndex::with_kind(
+        DIM,
+        DistanceMetric::Cosine,
+        Quantization::Int8,
+        HnswParams::default(),
+        kind,
+    );
+    for (i, v) in vectors.iter().enumerate() {
+        index.add(NodeId(i as u64), v).expect("add");
+    }
+    index.train();
+    for (i, v) in vectors.iter().enumerate().step_by(20) {
+        let got = index.search(v, 1).expect("search");
+        assert_eq!(got[0].0, NodeId(i as u64), "vector {i} did not find itself");
+    }
+    // One copy of int8 codes plus a per-vector scale, not two.
+    let per_vector =
+        DIM * Quantization::Int8.bytes_per_value() + Quantization::Int8.bytes_per_vector_overhead();
+    assert_eq!(index.vector_bytes(), vectors.len() * per_vector);
 }
