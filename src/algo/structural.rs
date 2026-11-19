@@ -428,6 +428,10 @@ fn positioned_subview(structure: &Structure, view: &GraphView) -> (GraphView, Ve
     )
 }
 
+/// Each positioned node with its community, and the partition's spatial
+/// modularity (`None` with no relationships).
+pub type SpatialGrouping = (Vec<(NodeId, usize)>, Option<f64>);
+
 /// Communities of the positioned nodes of `view` against the spatial null
 /// model (`samyama_graph_algorithms::spatial_louvain`): groups more
 /// connected than their distances explain. Returns each node with its
@@ -436,7 +440,7 @@ pub fn spatial_communities(
     structure: &Structure,
     view: &GraphView,
     bins: usize,
-) -> Result<(Vec<(NodeId, usize)>, Option<f64>), String> {
+) -> Result<SpatialGrouping, String> {
     let (sub, ids) = positioned_subview(structure, view);
     let distance = |i: usize, j: usize| structure.distance(ids[i], ids[j]).unwrap_or(0.0);
     let SpatialCommunities {
