@@ -686,3 +686,34 @@ fn only_the_http_providers_can_be_asked_for_a_schema() {
     assert!(!supports_response_schema(&LLMProvider::ClaudeCode));
     assert!(!supports_response_schema(&LLMProvider::Mock));
 }
+
+// ------------------------------------------------------------ Claude Code JSON (#1732)
+
+#[test]
+fn claude_code_json_carries_the_answer_and_its_tokens() {
+    let out = r#"{"type":"result","subtype":"success","is_error":false,"result":"  MATCH (n) RETURN n  ",
+        "usage":{"input_tokens":12,"cache_creation_input_tokens":300,"cache_read_input_tokens":1000,"output_tokens":40}}"#;
+    let (answer, usage) = parse_claude_code_output(out).unwrap();
+    assert_eq!(answer, "MATCH (n) RETURN n");
+    assert_eq!(usage.prompt_tokens, Some(1312), "every input token, cached or not");
+    assert_eq!(usage.completion_tokens, Some(40));
+    assert_eq!(usage.total_tokens, Some(1352));
+}
+
+#[test]
+fn claude_code_plain_text_is_the_answer_with_no_counts() {
+    let (answer, usage) = parse_claude_code_output("  MATCH (n) RETURN n \n").unwrap();
+    assert_eq!(answer, "MATCH (n) RETURN n");
+    assert!(!usage.is_reported());
+    // JSON that is not the CLI's object is an answer too, not an error.
+    let (answer, _) = parse_claude_code_output(r#"{"cypher":"MATCH (n) RETURN n"}"#).unwrap();
+    assert_eq!(answer, r#"{"cypher":"MATCH (n) RETURN n"}"#);
+}
+
+#[test]
+fn claude_code_error_result_is_an_error() {
+    let out = r#"{"type":"result","is_error":true,"result":"Credit balance is too low"}"#;
+    let e = parse_claude_code_output(out).unwrap_err().to_string();
+    assert!(e.contains("Credit balance is too low"), "{e}");
+}
+

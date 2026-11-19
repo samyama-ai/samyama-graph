@@ -417,10 +417,7 @@ impl NLQClient {
             LLMProvider::OpenAI => self.openai_chat(prompt, sent).await,
             LLMProvider::Ollama => self.ollama_chat(prompt, sent).await,
             LLMProvider::Gemini => self.gemini_chat(prompt, sent).await,
-            LLMProvider::ClaudeCode => self
-                .claude_code_generate(prompt)
-                .await
-                .map(|text| (text, TokenUsage::default())),
+            LLMProvider::ClaudeCode => self.claude_code_generate(prompt).await,
             LLMProvider::Mock => Ok((
                 schema.map_or_else(
                     || "MATCH (n) RETURN n LIMIT 10".to_string(),
@@ -654,12 +651,16 @@ impl NLQClient {
         Ok((result.response, usage))
     }
 
-    async fn claude_code_generate(&self, prompt: &str) -> NLQResult<String> {
+    async fn claude_code_generate(&self, prompt: &str) -> NLQResult<(String, TokenUsage)> {
         let output = tokio::process::Command::new("claude")
             .arg("-p")
             .arg(prompt)
             .arg("--max-turns")
             .arg("2")
+            // JSON, so the answer comes with its token counts (#1732); the
+            // plain-text form carried none and every call read as unknown.
+            .arg("--output-format")
+            .arg("json")
             .env_remove("CLAUDECODE")
             .output()
             .await
@@ -673,7 +674,7 @@ impl NLQClient {
             )));
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+        parse_claude_code_output(&String::from_utf8_lossy(&output.stdout))
     }
 
     async fn gemini_chat(
@@ -799,6 +800,33 @@ impl NLQClient {
 
         Ok((String::new(), usage))
     }
+}
+
+/// The answer and token counts from `claude -p --output-format json` (#1732).
+///
+/// The CLI prints one JSON object: `result` is the answer, and `usage` has
+/// `input_tokens`, `output_tokens` and the cache counts. Every input token is a
+/// prompt token whether it was read from the cache, written to it or neither,
+/// so the three are summed. Output that is not that object -- an older CLI
+/// that ignored the flag -- is taken as the answer itself, with no counts,
+/// as before.
+fn parse_claude_code_output(stdout: &str) -> NLQResult<(String, TokenUsage)> {
+    let text = stdout.trim();
+    let Ok(serde_json::Value::Object(v)) = serde_json::from_str::<serde_json::Value>(text) else {
+        return Ok((text.to_string(), TokenUsage::default()));
+    };
+    let Some(answer) = v.get("result").and_then(|r| r.as_str()) else {
+        return Ok((text.to_string(), TokenUsage::default()));
+    };
+    if v.get("is_error").and_then(|e| e.as_bool()) == Some(true) {
+        return Err(NLQError::ApiError(format!("Claude Code CLI reported an error: {answer}")));
+    }
+    let usage = v.get("usage");
+    let count = |k: &str| usage.and_then(|u| u.get(k)).and_then(|n| n.as_u64());
+    let prompt = count("input_tokens").map(|n| {
+        n + count("cache_creation_input_tokens").unwrap_or(0) + count("cache_read_input_tokens").unwrap_or(0)
+    });
+    Ok((answer.trim().to_string(), TokenUsage::from_counts(prompt, count("output_tokens"), None)))
 }
 
 #[cfg(test)]
