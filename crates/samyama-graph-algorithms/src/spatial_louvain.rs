@@ -182,7 +182,9 @@ fn local_moving(n: usize, w: &[f64], neighbours: &[Vec<usize>]) -> (Vec<usize>, 
     for _ in 0..MAX_SWEEPS_PER_LEVEL {
         let mut moved = false;
         for i in 0..n {
-            // What node i adds to each community, itself excluded.
+            // What node i adds to each community, itself excluded. At a
+            // merged level the diagonal holds a node's own internal pairs,
+            // which move with it and so never change a gain: it is never read.
             sum.iter_mut().for_each(|s| *s = 0.0);
             for j in (0..n).filter(|&j| j != i) {
                 sum[comm[j]] += w[i * n + j];
@@ -286,11 +288,6 @@ pub fn spatial_louvain(
         }
         for m in &mut membership {
             *m = comm[*m];
-        }
-        // A merged node's own pairs move with it: zero the diagonal so a
-        // level's sums count only pairs across nodes.
-        for g in 0..groups {
-            merged[g * groups + g] = 0.0;
         }
         (size, w, neighbours) = (groups, merged, joined);
         if groups == 1 {
