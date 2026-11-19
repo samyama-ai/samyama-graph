@@ -37,7 +37,7 @@
 //! returns all of them exactly; the other two give up after a bounded number
 //! of draws per sample.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
@@ -206,36 +206,31 @@ fn khop_pairs(
 
 /// The nodes at undirected distance `2..=k` from `source`, in BFS order.
 fn within_hops(neighbours: &[HashSet<usize>], source: usize, k: usize) -> Vec<usize> {
-    let mut distance = vec![usize::MAX; neighbours.len()];
-    distance[source] = 0;
-    let mut queue = VecDeque::from([source]);
+    let mut bfs = crate::frontier::Bfs::new(neighbours.len());
     let mut found = Vec::new();
-    while let Some(node) = queue.pop_front() {
-        let d = distance[node];
-        if d == k {
-            continue;
-        }
-        // Sorted, so the BFS order, and with it the draw, does not depend on
-        // the order a `HashSet` happens to iterate in.
-        let mut next: Vec<usize> = neighbours[node].iter().copied().collect();
-        next.sort_unstable();
-        for m in next {
-            if distance[m] == usize::MAX {
-                distance[m] = d + 1;
-                if d + 1 >= 2 {
-                    found.push(m);
-                }
-                queue.push_back(m);
+    bfs.walk(
+        &[source],
+        |node, depth| {
+            // Not past `k`. Sorted, so the BFS order, and with it the draw,
+            // does not depend on the order a `HashSet` happens to iterate in.
+            let mut next: Vec<usize> = if depth == k { Vec::new() } else { neighbours[node].iter().copied().collect() };
+            next.sort_unstable();
+            next
+        },
+        |e| {
+            if e.discovered && e.to_depth >= 2 {
+                found.push(e.to);
             }
-        }
-    }
+            crate::frontier::Visit::Continue
+        },
+    );
     found
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
 
     const SEED: u64 = 11;
 
