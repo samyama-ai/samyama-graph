@@ -143,6 +143,44 @@ Queries 1–2 match the reference demo's **published numbers exactly**: top judg
 104; IPC §302 cited in 57 judgments; Constitution Article 32 in 36. (Per-query timings are in
 the Benchmark table above.)
 
+## Question catalog
+
+[`legal-judgments.sgqueries`](./legal-judgments.sgqueries) holds 58 questions (16 easy,
+29 medium, 13 hard; four unanswerable), built with `catalog-build --release` against
+the pinned snapshot. [`questions.json`](questions.json) is its source, and the NLQ
+accuracy benchmark
+([competitor-benchmarks#260](https://git.samyama.ai/Samyama.ai/samyama-graph-competitor-benchmarks/issues/260))
+reads it as its question set. Every entry is checked
+weekly against the published snapshot by
+[`kg-catalogs.yml`](../../.github/workflows/kg-catalogs.yml).
+
+```bash
+samyama queries list case_studies/legal-judgments/legal-judgments.sgqueries
+samyama queries run  case_studies/legal-judgments/legal-judgments.sgqueries --snapshot legal-judgments.sgsnap \
+    --entry <id> [--param name=value]...
+samyama verify legal-judgments.sgsnap --queries case_studies/legal-judgments/legal-judgments.sgqueries
+```
+
+A judgment can cite several sections of one law, so it has one `CITES` edge per
+section: the catalog counts judgments with `count(DISTINCT c)`, never edges. "Top N"
+questions break ties by name, and where several rows tie at the cut-off the question
+asks for a threshold instead ("at least 8 judgments").
+
+**Data caveats the catalog surfaces.** The source names are not normalised, and the
+catalog takes them as they are rather than guessing which ones belong together:
+
+- **Judges.** 34 judge names, but two judges are recorded twice (`R. K. Agrawal` /
+  `R.K. Agrawal`, `C. Nagappan` / `Nagappan`), so `lj_judge_record_count` counts names.
+- **Laws.** One statute can appear under several names (`Code of Criminal Procedure`,
+  `Code of Criminal Procedure, 1973`, `Criminal Procedure Code`), so a count per law
+  splits it.
+- **Sections.** Constitution articles are mostly `Article 226` but sometimes plain `226`.
+- **Party roles.** Roles vary in case (`respondent` / `Respondent`), so role questions
+  compare `toLower(role)`.
+- **Other gaps.** 5 judgments have no title, 7 have no judge, 39 cite no law, and one
+  is dated 2017 (`lj_judgment_from_2017`). Topic texts can differ only in case
+  (`Circumstantial Evidence` / `Circumstantial evidence`).
+
 ## Data & license
 
 Source: [`Shreyasrao/Indian-law-supreme-court-judgements-2016`](https://huggingface.co/datasets/Shreyasrao/Indian-law-supreme-court-judgements-2016)
