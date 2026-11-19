@@ -1,4 +1,4 @@
-# ADR-041: Incremental PageRank, WCC and Degree on a Live Graph
+# ADR-042: Incremental PageRank, WCC and Degree on a Live Graph
 
 ## Status
 **Accepted** -- implemented for ALGO-14 (#1697).

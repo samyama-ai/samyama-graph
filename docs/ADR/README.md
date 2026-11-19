@@ -70,7 +70,7 @@ Links to related ADRs
 | [038](./ADR-038-memory-allocator.md) | Memory Allocator for the Server Binary | Accepted | 2026-09-17 |
 | [039](./ADR-039-streaming-query-results.md) | Streaming query results | Proposed | 2026-09-22 |
 | [040](./ADR-040-multi-hop-query-optimization.md) | Multi-Hop Query Optimization † | Proposed | 2026-07-31 |
-| [041](./ADR-041-incremental-algorithms.md) | Incremental PageRank, WCC and Degree on a Live Graph | Accepted | 2026-11-18 |
+| [042](./ADR-042-incremental-algorithms.md) | Incremental PageRank, WCC and Degree on a Live Graph | Accepted | 2026-11-18 |
 
 > **† Renumbered from ADR-035.** `ADR-040-multi-hop-query-optimization.md` was filed
 > as ADR-035, the same number as `ADR-035-oeh-hierarchy-index.md`. The OEH record
@@ -78,7 +78,7 @@ Links to related ADRs
 > the multi-hop record took the next free number (#1515). Its content is unchanged
 > apart from a one-line renumbering note.
 
-> **Number gaps.** 018, 019, 031, 032 and 033 were never used. 36 records are on
+> **Number gaps.** 018, 019, 031, 032 and 033 were never used. 041 is held for the structure index (SGI), which `structure_ops.rs` and the grammar already cite. 36 records are on
 > disk, all 36 are indexed above, and no two share a number.
 
 ## Decision Process
