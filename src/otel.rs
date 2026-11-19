@@ -87,22 +87,36 @@ where
 
 static PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
-/// The provider for the configured endpoint, kept for `shutdown`, or `None`
-/// when export is not asked for. A provider that cannot be built is reported
-/// and the server runs without export: tracing is a diagnostic, not a reason
-/// to refuse to serve.
-pub fn from_env() -> Option<SdkTracerProvider> {
-    let endpoint = endpoint_from(|v| std::env::var(v).ok())?;
+/// What start-up made of the export settings, for the caller to log once
+/// its subscriber exists.
+///
+/// Returned rather than printed. This used to `eprintln!` from here, which
+/// runs before the subscriber is installed, so under `--log-format json` the
+/// one line about export was plain text in a stream promised to be JSON, and
+/// a collector parsing stderr met it on every start (found by CH-OBS's live
+/// probe, benchmarks#254).
+pub enum Startup {
+    /// No endpoint configured; nothing is exported.
+    Off,
+    /// Exporting to `endpoint`. The provider is kept for `shutdown`.
+    On { provider: SdkTracerProvider, endpoint: String },
+    /// An endpoint was configured and the exporter could not be built. The
+    /// server runs without export: tracing is a diagnostic, not a reason to
+    /// refuse to serve.
+    Failed { endpoint: String, error: String },
+}
+
+/// The exporter for the configured endpoint, if one is configured.
+pub fn from_env() -> Startup {
+    let Some(endpoint) = endpoint_from(|v| std::env::var(v).ok()) else {
+        return Startup::Off;
+    };
     match otlp_provider(&endpoint) {
-        Ok(p) => {
-            let _ = PROVIDER.set(p.clone());
-            eprintln!("OpenTelemetry traces export to {endpoint}");
-            Some(p)
+        Ok(provider) => {
+            let _ = PROVIDER.set(provider.clone());
+            Startup::On { provider, endpoint }
         }
-        Err(e) => {
-            eprintln!("OpenTelemetry export not started ({endpoint}): {e}");
-            None
-        }
+        Err(error) => Startup::Failed { endpoint, error },
     }
 }
 
