@@ -354,6 +354,53 @@ drop-in replacement for a from-scratch SGNS-trained node2vec.
 | FastRP | fastRP | Both, symmetrised: successors and predecessors are merged into one neighbour list before propagating | Ignored | Counted twice: a self-loop's target appears in both the out- and in-neighbour list that gets merged | An isolated node's row is the zero vector: nothing propagates into it at any depth | Not applicable: one row per node, no ranking | L2-normalised per row by default (`normalize: true`); deterministic given `seed`, no RNG |
 | node2vec | node2vec | Both, symmetrised, the same way as FastRP, for both the walk and the co-occurrence projection | Ignored | A self-loop is a neighbour like any other and can be walked to and from | An isolated node's walk never leaves it, so it records no co-occurrence pair and its row is the zero vector | Not applicable: one row per node, no ranking | L2-normalised per row; deterministic given `seed`, no RNG. **Not skip-gram-trained (differs)** -- see above |
 
+## Structure-aware (positions in space)
+
+For graphs whose nodes have 3D or geographic positions, declared with
+`CREATE STRUCTURE INDEX` or detected (#2037):
+
+```cypher
+CREATE STRUCTURE INDEX pdb ON :Residue(x, y, z) CONTACT_RADIUS 8.0
+```
+
+```cypher
+CALL algo.structural.astar(1, 42, {structure: 'pdb', cost: 'length'}) YIELD path, hops, length, direct, stretch, expanded, expandedUnguided
+```
+
+```cypher
+CALL algo.structural.stress({structure: 'pdb', radius: 8.0}) YIELD source, target, distance, pathLength, hops, stretch
+```
+
+- **`algo.structural.astar(source, target, {...})`** is the shortest path, guided
+  by the straight line to the target. `cost: 'length'` (the default) minimises
+  total distance, each relationship as long as the straight line between its
+  ends; `cost: 'hops'` minimises relationships, guided by the straight-line
+  distance over the longest relationship. Either way the path is a shortest
+  one: the guide only decides the order nodes are looked at. `expanded` is the
+  number of nodes the guided search looked at, and `expandedUnguided` the
+  number the same search looked at without a guide, on the same call.
+- **`algo.structural.stress({...})`** returns every pair of nodes within
+  `radius` of each other that no relationship joins, with the shortest path
+  between them through the graph. `stretch` is that path's length over the
+  straight line: 1 means the graph goes straight there, 10 means a ten-times
+  detour. Pairs no path joins come first, with `pathLength`, `hops` and
+  `stretch` null -- a close pair the graph cannot connect at all is the
+  strongest sign of a missing link.
+
+Both walk **only nodes with a position** under the structure, over relationships
+between two such nodes (`edgeType` narrows them further). A node without a
+position could be a shortcut the guide cannot measure, which would make a path
+that is not shortest look shortest. Distances are the structure's own:
+Euclidean in its units for 3D, great-circle metres plus elevation for
+geographic positions. Hierarchy and space-time structures have no such
+distance and are refused. `structure` may be left out when the graph has
+exactly one 3D or geographic structure.
+
+| Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
+|---|---|---|---|---|---|---|---|
+| Structure-guided shortest path | structural.astar | Undirected by default; `undirected: false` follows relationships as stored | The straight-line length between a relationship's ends (`cost: 'length'`), or 1 per relationship (`cost: 'hops'`); property weights are not read | Walked at length 0; never on a shortest path | No row when no path joins source and target | Equal routes: the one reached by the lower-priority, longer-so-far entry, then the lower node index, the same on every run | `stretch` = path length / straight-line distance, null when source and target coincide |
+| Structural stress | structural.stress | Undirected: closeness in space is symmetric | Straight-line lengths, as above | Ignored: a node is never paired with itself; coincident nodes are skipped | Pairs no path joins are returned first, with null `pathLength`, `hops`, `stretch` | Unreachable first, then highest stretch, then node ids | `stretch` = shortest path length / straight-line distance, at least 1 |
+
 ## Not a graph algorithm
 
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |

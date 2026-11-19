@@ -184,6 +184,9 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
         Optimization,
         &["path", "cost", "resource"],
     ),
+    // Structure-aware (#2037): graphs whose nodes have 3D or geographic positions.
+    read("algo.structural.astar", &[], Path, &["path", "hops", "length", "direct", "stretch", "expanded", "expandedUnguided"]),
+    read("algo.structural.stress", &[], Structure, &["source", "target", "distance", "pathLength", "hops", "stretch"]),
 ];
 
 /// How an argument is passed: by position, or as a key of the config map.
@@ -430,6 +433,20 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         opt("costProperty", T::String),
         LABEL,
         EDGE_TYPE,
+    ]),
+    ("algo.structural.astar", &[
+        SOURCE,
+        TARGET,
+        opt("structure", T::String),
+        key("cost", T::String, D::String("length")),
+        EDGE_TYPE,
+        key("undirected", T::Boolean, D::Boolean(true)),
+    ]),
+    ("algo.structural.stress", &[
+        opt("structure", T::String),
+        opt("radius", T::Float),
+        EDGE_TYPE,
+        key("limit", T::Integer, D::Integer(100)),
     ]),
 ];
 

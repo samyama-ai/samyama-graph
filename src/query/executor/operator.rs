@@ -19923,6 +19923,177 @@ impl AlgorithmOperator {
         Ok(())
     }
 
+    /// The config map of a structural call, merged, and its `structure`.
+    fn structural_config(
+        &self,
+        allowed: &[&str],
+    ) -> ExecutionResult<(std::collections::HashMap<String, PropertyValue>, Option<String>)> {
+        Self::reject_unknown_config_keys(&self.args, &self.name, allowed)?;
+        let mut config = std::collections::HashMap::new();
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                config.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        let structure = match config.get("structure") {
+            None => None,
+            Some(PropertyValue::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{}: `structure` must be a structure's name, got {other:?}",
+                    self.name
+                )))
+            }
+        };
+        Ok((config, structure))
+    }
+
+    /// A string config value, refused when it is not one.
+    fn config_string(&self, config: &std::collections::HashMap<String, PropertyValue>, key: &str) -> ExecutionResult<Option<String>> {
+        match config.get(key) {
+            None => Ok(None),
+            Some(PropertyValue::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+            Some(other) => Err(ExecutionError::bad_argument(format!(
+                "{}: `{key}` must be a non-empty string, got {other:?}",
+                self.name
+            ))),
+        }
+    }
+
+    /// `algo.structural.astar(source, target, {structure, cost, edgeType, undirected})`
+    /// -- the shortest path guided by the straight line to the target (#2037).
+    ///
+    /// One row: `path` (node ids), `hops`, `length` (the path's straight-line
+    /// length), `direct` (source to target), `stretch` (`length / direct`),
+    /// and `expanded` against `expandedUnguided` -- the work the guide saved,
+    /// measured on this call. No row when no path joins them. See
+    /// `crate::algo::structural` for why only positioned nodes are walked.
+    fn execute_structural_astar(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        use crate::algo::structural::{astar, PathCost, Structure};
+        let (config, structure) = self.structural_config(&["cost", "edgeType", "structure", "undirected"])?;
+        let ids: Vec<NodeId> = self
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                Expression::Literal(PropertyValue::Integer(i)) if *i >= 0 => Some(NodeId::new(*i as u64)),
+                _ => None,
+            })
+            .collect();
+        let [source, target] = ids[..] else {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: takes a source and a target node id, then an optional config map, \
+                 e.g. {}(id(a), id(b), {{structure: 'pdb'}})",
+                self.name, self.name
+            )));
+        };
+        let cost_name = self.config_string(&config, "cost")?.unwrap_or_else(|| PathCost::NAMES[1].to_string());
+        let cost = PathCost::parse(&cost_name).ok_or_else(|| {
+            ExecutionError::bad_argument(format!(
+                "{}: unknown cost `{cost_name}`; use `hops` (fewest relationships) or `length` \
+                 (shortest total distance)",
+                self.name
+            ))
+        })?;
+        let undirected = match config.get("undirected") {
+            None => true,
+            Some(PropertyValue::Boolean(b)) => *b,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{}: `undirected` must be true or false, got {other:?}",
+                    self.name
+                )))
+            }
+        };
+        let edge_type = self.config_string(&config, "edgeType")?;
+        let structure = Structure::resolve(store, structure.as_deref())
+            .map_err(|e| ExecutionError::bad_argument(format!("{}: {e}", self.name)))?;
+        let view = self.view(store, structure.convention.label.as_deref(), edge_type.as_deref(), None)?;
+        let route = astar(&structure, &view, source, target, cost, undirected)
+            .map_err(|e| ExecutionError::bad_argument(format!("{}: {e}", self.name)))?;
+        if let Some(r) = route {
+            let mut rec = Record::new();
+            let float = |f: f64| Value::Property(PropertyValue::Float(f));
+            rec.bind(
+                "path".to_string(),
+                Value::Property(PropertyValue::Array(
+                    r.path.iter().map(|id| PropertyValue::Integer(id.as_u64() as i64)).collect(),
+                )),
+            );
+            rec.bind("hops".to_string(), Value::Property(PropertyValue::Integer(r.hops as i64)));
+            rec.bind("length".to_string(), float(r.length));
+            rec.bind("direct".to_string(), float(r.direct));
+            rec.bind("stretch".to_string(), r.stretch.map_or(Value::Property(PropertyValue::Null), float));
+            rec.bind("expanded".to_string(), Value::Property(PropertyValue::Integer(r.expanded as i64)));
+            rec.bind(
+                "expandedUnguided".to_string(),
+                Value::Property(PropertyValue::Integer(r.expanded_unguided as i64)),
+            );
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.structural.stress({structure, radius, edgeType, limit})` -- pairs
+    /// close in space but far apart in the graph (#2037).
+    ///
+    /// One row per pair of positioned nodes within `radius` (default: the
+    /// structure's declared contact radius) that no relationship joins:
+    /// `source, target, distance, pathLength, hops, stretch`, unreachable
+    /// pairs first (`pathLength`, `hops` and `stretch` null), then the highest
+    /// stretch.
+    fn execute_structural_stress(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        use crate::algo::structural::{stress, Structure};
+        const DEFAULT_LIMIT: i64 = 100;
+        let (config, structure) = self.structural_config(&["edgeType", "limit", "radius", "structure"])?;
+        let limit = match config.get("limit") {
+            None => DEFAULT_LIMIT,
+            Some(PropertyValue::Integer(i)) if *i >= 1 => *i,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{}: `limit` must be a positive integer, got {other:?}",
+                    self.name
+                )))
+            }
+        } as usize;
+        let edge_type = self.config_string(&config, "edgeType")?;
+        let structure = Structure::resolve(store, structure.as_deref())
+            .map_err(|e| ExecutionError::bad_argument(format!("{}: {e}", self.name)))?;
+        let radius = match config.get("radius") {
+            Some(PropertyValue::Float(f)) => *f,
+            Some(PropertyValue::Integer(i)) => *i as f64,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{}: `radius` must be a number, got {other:?}",
+                    self.name
+                )))
+            }
+            None => structure.contact_radius().ok_or_else(|| {
+                ExecutionError::bad_argument(format!(
+                    "{}: give a `radius`: structure `{}` was declared without a contact radius",
+                    self.name, structure.convention.name
+                ))
+            })?,
+        };
+        let view = self.view(store, structure.convention.label.as_deref(), edge_type.as_deref(), None)?;
+        let pairs = stress(&structure, &view, radius)
+            .map_err(|e| ExecutionError::bad_argument(format!("{}: {e}", self.name)))?;
+        for p in pairs.into_iter().take(limit) {
+            let mut rec = Record::new();
+            let opt_float = |f: Option<f64>| Value::Property(f.map_or(PropertyValue::Null, PropertyValue::Float));
+            self.bind_node(store, &mut rec, "source", p.a.as_u64());
+            self.bind_node(store, &mut rec, "target", p.b.as_u64());
+            rec.bind("distance".to_string(), Value::Property(PropertyValue::Float(p.distance)));
+            rec.bind("pathLength".to_string(), opt_float(p.path_length));
+            rec.bind(
+                "hops".to_string(),
+                Value::Property(p.hops.map_or(PropertyValue::Null, |h| PropertyValue::Integer(h as i64))),
+            );
+            rec.bind("stretch".to_string(), opt_float(p.stretch));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
     /// `algo.negativeSampling({strategy, count, k, seed})` yielding `node1,
     /// node2`: pairs that are not edges, for training link prediction (ML-04,
     /// #1725). See `samyama_graph_algorithms::negative_sampling` for the three
@@ -21934,6 +22105,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
+                "structural.astar" => self.execute_structural_astar(store)?,
+                "structural.stress" => self.execute_structural_stress(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,
@@ -22044,6 +22217,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
+                "structural.astar" => self.execute_structural_astar(store)?,
+                "structural.stress" => self.execute_structural_stress(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,
