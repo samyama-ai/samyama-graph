@@ -25,6 +25,96 @@ fn get_runtime() -> &'static Runtime {
     })
 }
 
+pyo3::create_exception!(
+    samyama,
+    RequestCancelled,
+    pyo3::exceptions::PyException,
+    "A request stopped by its `CancelToken` before it finished (API-06, #1741)."
+);
+
+/// Stops a request in flight (API-06, #1741).
+///
+/// Pass one as `cancel=` to `query`, `query_readonly`, `query_stream` or
+/// `nlq`, and call `cancel()` from any thread -- a timer, a UI callback, the
+/// `asyncio` wrapper when its task is cancelled. The waiting call raises
+/// `RequestCancelled` within about 50 ms, and the request is dropped, which
+/// closes its connection.
+///
+/// What that stops on the server: a **stream** stops producing rows when its
+/// connection closes (#1393). A buffered query that the server has already
+/// started is not interrupted -- the engine has no cancel-this-query call --
+/// and runs to its end or to the query deadline. What the token guarantees is
+/// that the *caller* is no longer held by it.
+///
+/// A token stays cancelled: one used again cancels the next call at once,
+/// before anything is sent.
+#[pyclass]
+#[derive(Clone)]
+struct CancelToken {
+    flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[pymethods]
+impl CancelToken {
+    #[new]
+    fn new() -> Self {
+        CancelToken { flag: Arc::new(std::sync::atomic::AtomicBool::new(false)) }
+    }
+
+    /// Ask every call using this token to stop. Safe from any thread.
+    fn cancel(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether `cancel()` has been called.
+    #[getter]
+    fn cancelled(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// How often a blocked call looks up from the network to see whether it has
+/// been asked to stop: by its `CancelToken`, or by Ctrl-C.
+const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Run `fut` to completion on the shared runtime, without the GIL, and stop
+/// early if the caller asks (API-06, #1741).
+///
+/// `py.detach(|| block_on(fut))` -- what every call did -- cannot be stopped:
+/// the thread is inside `block_on` until the server answers, so Ctrl-C waited
+/// for the query, and a cancelled `asyncio` task left its worker thread
+/// waiting behind it. Here the future is polled in `CANCEL_POLL` slices; in
+/// between, the GIL is taken back just long enough to run Python's signal
+/// handlers (Ctrl-C raises `KeyboardInterrupt` out of this call) and to read
+/// the token. Either way out drops the future, which aborts the request.
+///
+/// A slice that ends because the future finished returns at once: the poll
+/// interval bounds how long a *cancel* takes to land, never how long a
+/// result takes to arrive.
+fn wait<F>(py: Python<'_>, cancel: Option<&CancelToken>, fut: F) -> PyResult<F::Output>
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    let mut fut = std::pin::pin!(fut);
+    loop {
+        if cancel.is_some_and(|c| c.cancelled()) {
+            return Err(RequestCancelled::new_err(
+                "the request was cancelled by its CancelToken",
+            ));
+        }
+        // The timer is made inside `block_on`: a tokio timer needs the
+        // runtime's context when it is created, not only when it is polled.
+        let step = py.detach(|| {
+            get_runtime().block_on(async { tokio::time::timeout(CANCEL_POLL, fut.as_mut()).await })
+        });
+        if let Ok(out) = step {
+            return Ok(out);
+        }
+        py.check_signals()?;
+    }
+}
+
 /// Query result returned from Cypher queries
 #[pyclass]
 struct QueryResult {
@@ -75,6 +165,9 @@ struct QueryStream {
     #[pyo3(get)]
     columns: Vec<String>,
     inner: Option<StreamSource>,
+    /// The token the stream was opened with; it can stop the stream between
+    /// rows as well as while it opens.
+    cancel: Option<CancelToken>,
 }
 
 enum StreamSource {
@@ -94,8 +187,20 @@ impl QueryStream {
         let row = match slf.inner.as_mut() {
             None => return Ok(None),
             Some(StreamSource::Buffered(rows)) => rows.next(),
-            Some(StreamSource::Remote(stream)) => {
-                let next = py.detach(|| get_runtime().block_on(stream.next_row()));
+            Some(StreamSource::Remote(_)) => {
+                let token = slf.cancel.clone();
+                let Some(StreamSource::Remote(stream)) = slf.inner.as_mut() else {
+                    unreachable!("matched above")
+                };
+                let next = match wait(py, token.as_ref(), stream.next_row()) {
+                    Ok(next) => next,
+                    Err(e) => {
+                        // Cancelled or interrupted: drop the stream, which
+                        // closes the connection, and the server stops.
+                        slf.inner = None;
+                        return Err(e);
+                    }
+                };
                 match next {
                     Ok(row) => row,
                     Err(e) => {
@@ -370,14 +475,24 @@ impl SamyamaClient {
     /// to recover (samyama-graph#1326). Pass `timeout_seconds=None` to restore
     /// the old behaviour deliberately.
     #[staticmethod]
+    ///
+    /// The client keeps a pool of connections and reuses them (API-06,
+    /// #1741): `pool_max_idle_per_host` is how many idle connections it keeps
+    /// open for reuse, and `pool_idle_timeout_seconds` how long an unused one
+    /// is kept before it is closed (`None` keeps them until the server closes
+    /// them). `pool_max_idle_per_host=0` turns reuse off: every request opens
+    /// a fresh connection.
     #[pyo3(signature = (url, timeout_seconds=30.0, connect_timeout_seconds=5.0,
-                        max_retries=2, retry_base_delay_ms=100))]
+                        max_retries=2, retry_base_delay_ms=100,
+                        pool_max_idle_per_host=8, pool_idle_timeout_seconds=90.0))]
     fn connect(
         url: &str,
         timeout_seconds: Option<f64>,
         connect_timeout_seconds: Option<f64>,
         max_retries: u32,
         retry_base_delay_ms: u64,
+        pool_max_idle_per_host: usize,
+        pool_idle_timeout_seconds: Option<f64>,
     ) -> PyResult<Self> {
         let secs = |v: Option<f64>| -> PyResult<Option<std::time::Duration>> {
             match v {
@@ -396,6 +511,8 @@ impl SamyamaClient {
             connect_timeout: secs(connect_timeout_seconds)?,
             max_retries,
             retry_base_delay: std::time::Duration::from_millis(retry_base_delay_ms),
+            pool_max_idle_per_host,
+            pool_idle_timeout: secs(pool_idle_timeout_seconds)?,
             ..Default::default()
         };
         Ok(SamyamaClient {
@@ -409,15 +526,18 @@ impl SamyamaClient {
     /// and the server rejects any other name. It previously accepted and ignored the
     /// argument, so datasets written under different graph names silently merged into one
     /// (#366). To keep datasets apart here, run a separate instance per dataset.
-    #[pyo3(signature = (cypher, graph="default"))]
-    fn query(&self, py: Python<'_>, cypher: &str, graph: &str) -> PyResult<QueryResult> {
-        let result = py.detach(|| {
-            let rt = get_runtime();
-            match &*self.inner {
-                ClientInner::Embedded(c) => rt.block_on(c.query(graph, cypher)),
-                ClientInner::Remote(c) => rt.block_on(c.query(graph, cypher)),
-            }
-        });
+    #[pyo3(signature = (cypher, graph="default", cancel=None))]
+    fn query(
+        &self,
+        py: Python<'_>,
+        cypher: &str,
+        graph: &str,
+        cancel: Option<CancelToken>,
+    ) -> PyResult<QueryResult> {
+        let result = match &*self.inner {
+            ClientInner::Embedded(c) => wait(py, cancel.as_ref(), c.query(graph, cypher))?,
+            ClientInner::Remote(c) => wait(py, cancel.as_ref(), c.query(graph, cypher))?,
+        };
         match result {
             Ok(r) => convert_query_result(r),
             Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
@@ -427,15 +547,18 @@ impl SamyamaClient {
     /// Execute a read-only Cypher query.
     ///
     /// See `query` for what `graph` does -- and does not -- select.
-    #[pyo3(signature = (cypher, graph="default"))]
-    fn query_readonly(&self, py: Python<'_>, cypher: &str, graph: &str) -> PyResult<QueryResult> {
-        let result = py.detach(|| {
-            let rt = get_runtime();
-            match &*self.inner {
-                ClientInner::Embedded(c) => rt.block_on(c.query_readonly(graph, cypher)),
-                ClientInner::Remote(c) => rt.block_on(c.query_readonly(graph, cypher)),
-            }
-        });
+    #[pyo3(signature = (cypher, graph="default", cancel=None))]
+    fn query_readonly(
+        &self,
+        py: Python<'_>,
+        cypher: &str,
+        graph: &str,
+        cancel: Option<CancelToken>,
+    ) -> PyResult<QueryResult> {
+        let result = match &*self.inner {
+            ClientInner::Embedded(c) => wait(py, cancel.as_ref(), c.query_readonly(graph, cypher))?,
+            ClientInner::Remote(c) => wait(py, cancel.as_ref(), c.query_readonly(graph, cypher))?,
+        };
         match result {
             Ok(r) => convert_query_result(r),
             Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
@@ -453,25 +576,31 @@ impl SamyamaClient {
     /// Remote mode streams with backpressure over `application/x-ndjson`; a
     /// write is refused before it runs. Embedded mode has no connection to
     /// stream over and iterates the read query's result.
-    #[pyo3(signature = (cypher, graph="default"))]
-    fn query_stream(&self, py: Python<'_>, cypher: &str, graph: &str) -> PyResult<QueryStream> {
+    #[pyo3(signature = (cypher, graph="default", cancel=None))]
+    fn query_stream(
+        &self,
+        py: Python<'_>,
+        cypher: &str,
+        graph: &str,
+        cancel: Option<CancelToken>,
+    ) -> PyResult<QueryStream> {
         match &*self.inner {
             ClientInner::Remote(c) => {
-                let stream = py
-                    .detach(|| get_runtime().block_on(c.query_stream(graph, cypher)))
+                let stream = wait(py, cancel.as_ref(), c.query_stream(graph, cypher))?
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Ok(QueryStream {
                     columns: stream.columns().to_vec(),
                     inner: Some(StreamSource::Remote(stream)),
+                    cancel,
                 })
             }
             ClientInner::Embedded(c) => {
-                let result = py
-                    .detach(|| get_runtime().block_on(c.query_readonly(graph, cypher)))
+                let result = wait(py, cancel.as_ref(), c.query_readonly(graph, cypher))?
                     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
                 Ok(QueryStream {
                     columns: result.columns,
                     inner: Some(StreamSource::Buffered(result.records.into_iter())),
+                    cancel,
                 })
             }
         }
@@ -493,7 +622,8 @@ impl SamyamaClient {
     /// Remote mode asks the server (`POST /api/nlq`), which chooses its own
     /// provider, so passing any of the four to a remote client raises
     /// `ValueError` rather than being ignored.
-    #[pyo3(signature = (question, provider=None, model=None, api_key=None, api_base_url=None))]
+    #[pyo3(signature = (question, provider=None, model=None, api_key=None, api_base_url=None, cancel=None))]
+    #[allow(clippy::too_many_arguments)]
     fn nlq(
         &self,
         py: Python<'_>,
@@ -502,6 +632,7 @@ impl SamyamaClient {
         model: Option<String>,
         api_key: Option<String>,
         api_base_url: Option<String>,
+        cancel: Option<CancelToken>,
     ) -> PyResult<String> {
         let settings = NlqSettings { provider, model, api_key, api_base_url };
         let result = match &*self.inner {
@@ -523,10 +654,10 @@ impl SamyamaClient {
                         given.join(", ")
                     )));
                 }
-                py.detach(|| get_runtime().block_on(c.nlq(question)))
+                wait(py, cancel.as_ref(), c.nlq(question))?
             }
             ClientInner::Embedded(c) => {
-                py.detach(|| get_runtime().block_on(c.nlq_with(question, &settings)))
+                wait(py, cancel.as_ref(), c.nlq_with(question, &settings))?
             }
         };
         result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
@@ -534,13 +665,10 @@ impl SamyamaClient {
 
     /// Get server status
     fn status(&self, py: Python<'_>) -> PyResult<ServerStatus> {
-        let result = py.detach(|| {
-            let rt = get_runtime();
-            match &*self.inner {
-                ClientInner::Embedded(c) => rt.block_on(c.status()),
-                ClientInner::Remote(c) => rt.block_on(c.status()),
-            }
-        });
+        let result = match &*self.inner {
+            ClientInner::Embedded(c) => wait(py, None, c.status())?,
+            ClientInner::Remote(c) => wait(py, None, c.status())?,
+        };
         match result {
             Ok(s) => Ok(ServerStatus {
                 status: s.status,
@@ -554,26 +682,20 @@ impl SamyamaClient {
 
     /// Ping the server
     fn ping(&self, py: Python<'_>) -> PyResult<String> {
-        let result = py.detach(|| {
-            let rt = get_runtime();
-            match &*self.inner {
-                ClientInner::Embedded(c) => rt.block_on(c.ping()),
-                ClientInner::Remote(c) => rt.block_on(c.ping()),
-            }
-        });
+        let result = match &*self.inner {
+            ClientInner::Embedded(c) => wait(py, None, c.ping())?,
+            ClientInner::Remote(c) => wait(py, None, c.ping())?,
+        };
         result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
     /// Delete a graph
     #[pyo3(signature = (graph="default"))]
     fn delete_graph(&self, py: Python<'_>, graph: &str) -> PyResult<()> {
-        let result = py.detach(|| {
-            let rt = get_runtime();
-            match &*self.inner {
-                ClientInner::Embedded(c) => rt.block_on(c.delete_graph(graph)),
-                ClientInner::Remote(c) => rt.block_on(c.delete_graph(graph)),
-            }
-        });
+        let result = match &*self.inner {
+            ClientInner::Embedded(c) => wait(py, None, c.delete_graph(graph))?,
+            ClientInner::Remote(c) => wait(py, None, c.delete_graph(graph))?,
+        };
         result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
     }
 
@@ -926,5 +1048,7 @@ fn samyama(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<QueryResult>()?;
     m.add_class::<ServerStatus>()?;
     m.add_class::<QueryStream>()?;
+    m.add_class::<CancelToken>()?;
+    m.add("RequestCancelled", m.py().get_type::<RequestCancelled>())?;
     Ok(())
 }
