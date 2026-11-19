@@ -560,6 +560,12 @@ Loaded in 31 minutes from snapshots, measured 2026-04-02 on one r6a.8xlarge and
 not re-measured since. No harness suite runs this benchmark, so nothing would
 notice it going stale.
 
+Cost of that session, as reported and not re-measured: about $2.50 for one
+r6a.8xlarge spot instance plus EBS storage, covering the 31-minute load of the
+1.07B edges above and the query run below; compute for the load alone was under
+$1. Spot prices vary by region and time, so treat this as that run's cost, not a
+price guarantee.
+
 Times and first rows below are the `time_ms` and `sample_result` columns of
 [`verified-results.csv`](https://graph.samyama.cloud/book/data/benchmark/verified-results.csv)
 (2026-04-02, one r6a.8xlarge). The CSV keeps only the first row of each result,
