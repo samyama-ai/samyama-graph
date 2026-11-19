@@ -108,6 +108,30 @@ with the key bound as a parameter; the server uses the index the constraint
 created, but the client does not check that the constraint exists. Both return
 an error if two nodes hold the key.
 
+## Evaluate an agent on a snapshot
+
+`SamyamaEnv` runs scored episodes against a pinned `.sgsnap`: `reset` hands
+the agent a task and a fresh copy of the graph, `step` runs one Cypher
+statement (500 ms budget) or takes the final answer, and the answer is scored
+with a reward in `[0, 1]`.
+
+```rust
+use samyama_sdk::env::{Action, SamyamaEnv};
+
+let mut env = SamyamaEnv::open("cricket.sgsnap", "tasks.jsonl", 42)?;
+let task = env.reset(None)?;                       // task.prompt, task.schema
+env.step(Action::Query("MATCH (p:Player) RETURN p.name LIMIT 5".into()))?;
+let done = env.step(Action::Answer(vec!["V Kohli".into()]))?;
+println!("reward {}", done.reward);                // F1 against the answer key
+```
+
+A read task's answer key comes from an oracle query run against a copy of the
+snapshot the agent never touches, so writing to its own graph cannot change
+what it is scored against. A write task is scored by postcondition queries on
+the graph the agent leaves. An episode that changed the graph is undone at the
+next `reset`, and the same seed draws the same tasks, so a run repeats exactly.
+The tasks file format is in the `env` module documentation.
+
 ## More
 
 - [`docs/SDK-API-CLI-ARCHITECTURE.md`](../../docs/SDK-API-CLI-ARCHITECTURE.md)
