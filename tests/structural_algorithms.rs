@@ -11,11 +11,15 @@ use samyama::graph::{GraphStore, NodeId, PropertyValue};
 use samyama::query::QueryEngine;
 
 fn run(s: &mut GraphStore, q: &str) {
-    QueryEngine::new().execute_mut(q, s, "default").unwrap_or_else(|e| panic!("{q}: {e}"));
+    QueryEngine::new()
+        .execute_mut(q, s, "default")
+        .unwrap_or_else(|e| panic!("{q}: {e}"));
 }
 
 fn rows(s: &GraphStore, q: &str) -> Result<Vec<HashMap<String, PropertyValue>>, String> {
-    let batch = QueryEngine::new().execute(q, s).map_err(|e| e.to_string())?;
+    let batch = QueryEngine::new()
+        .execute(q, s)
+        .map_err(|e| e.to_string())?;
     Ok(batch
         .records
         .iter()
@@ -23,7 +27,11 @@ fn rows(s: &GraphStore, q: &str) -> Result<Vec<HashMap<String, PropertyValue>>, 
             r.bound_variables()
                 .into_iter()
                 .map(|k| {
-                    let v = r.get(&k).and_then(|v| v.as_property()).cloned().unwrap_or(PropertyValue::Null);
+                    let v = r
+                        .get(&k)
+                        .and_then(|v| v.as_property())
+                        .cloned()
+                        .unwrap_or(PropertyValue::Null);
                     (k, v)
                 })
                 .collect()
@@ -32,7 +40,9 @@ fn rows(s: &GraphStore, q: &str) -> Result<Vec<HashMap<String, PropertyValue>>, 
 }
 
 fn float(v: &PropertyValue) -> f64 {
-    v.as_float().or_else(|| v.as_integer().map(|i| i as f64)).unwrap_or_else(|| panic!("not a number: {v:?}"))
+    v.as_float()
+        .or_else(|| v.as_integer().map(|i| i as f64))
+        .unwrap_or_else(|| panic!("not a number: {v:?}"))
 }
 
 fn ids(v: &PropertyValue) -> Vec<i64> {
@@ -62,7 +72,11 @@ fn grid(side: usize) -> (GraphStore, Vec<NodeId>, Vec<[f64; 3]>) {
     for z in 0..2 {
         for j in 0..side {
             for i in 0..side {
-                let p = [i as f64 + jitter(), j as f64 + jitter(), z as f64 * 1.2 + jitter()];
+                let p = [
+                    i as f64 + jitter(),
+                    j as f64 + jitter(),
+                    z as f64 * 1.2 + jitter(),
+                ];
                 let id = s.create_node("Residue");
                 for (k, v) in ["x", "y", "z"].iter().zip(p) {
                     s.set_node_property("default", id, *k, v).unwrap();
@@ -89,16 +103,27 @@ fn grid(side: usize) -> (GraphStore, Vec<NodeId>, Vec<[f64; 3]>) {
             }
         }
     }
-    edges.extend([(at(0, side - 1, 0), at(side - 1, 0, 1)), (at(1, 1, 1), at(side - 2, side - 2, 0))]);
+    edges.extend([
+        (at(0, side - 1, 0), at(side - 1, 0, 1)),
+        (at(1, 1, 1), at(side - 2, side - 2, 0)),
+    ]);
     for (a, b) in edges {
         let e = s.create_edge(ids[a], ids[b], "BOND").unwrap();
         s.set_edge_property(e, "w", dist(pos[a], pos[b])).unwrap();
     }
-    run(&mut s, "CREATE STRUCTURE INDEX pdb ON :Residue(x, y, z) METRIC euclidean");
+    run(
+        &mut s,
+        "CREATE STRUCTURE INDEX pdb ON :Residue(x, y, z) METRIC euclidean",
+    );
     (s, ids, pos)
 }
 
-fn astar(s: &GraphStore, a: NodeId, b: NodeId, config: &str) -> Result<Vec<HashMap<String, PropertyValue>>, String> {
+fn astar(
+    s: &GraphStore,
+    a: NodeId,
+    b: NodeId,
+    config: &str,
+) -> Result<Vec<HashMap<String, PropertyValue>>, String> {
     rows(
         s,
         &format!(
@@ -122,13 +147,26 @@ fn guided_length_paths_match_the_unguided_weighted_path_and_save_work() {
         // weighted search finds -- including when neither finds a path.
         let reference = rows(
             &s,
-            &format!("CALL algo.weightedPath({}, {}, 'w') YIELD cost RETURN cost", ids[a].as_u64(), ids[b].as_u64()),
+            &format!(
+                "CALL algo.weightedPath({}, {}, 'w') YIELD cost RETURN cost",
+                ids[a].as_u64(),
+                ids[b].as_u64()
+            ),
         )
         .unwrap();
-        let directed = astar(&s, ids[a], ids[b], "{structure: 'pdb', cost: 'length', undirected: false}").unwrap();
+        let directed = astar(
+            &s,
+            ids[a],
+            ids[b],
+            "{structure: 'pdb', cost: 'length', undirected: false}",
+        )
+        .unwrap();
         match (directed.first(), reference.first()) {
             (Some(d), Some(r)) => {
-                assert!((float(&d["length"]) - float(&r["cost"])).abs() < 1e-9, "pair {a} -> {b}");
+                assert!(
+                    (float(&d["length"]) - float(&r["cost"])).abs() < 1e-9,
+                    "pair {a} -> {b}"
+                );
                 // Undirected can only be as short or shorter.
                 assert!(length <= float(&r["cost"]) + 1e-9);
                 compared += 1;
@@ -139,7 +177,10 @@ fn guided_length_paths_match_the_unguided_weighted_path_and_save_work() {
         // The path is real, starts and ends where asked, and is as long as reported.
         let path = ids_of(&got["path"]);
         assert_eq!((path[0], *path.last().unwrap()), (ids[a], ids[b]));
-        let along: f64 = path.windows(2).map(|p| dist(pos[index(&ids, p[0])], pos[index(&ids, p[1])])).sum();
+        let along: f64 = path
+            .windows(2)
+            .map(|p| dist(pos[index(&ids, p[0])], pos[index(&ids, p[1])]))
+            .sum();
         assert!((along - length).abs() < 1e-9);
         assert!((float(&got["direct"]) - dist(pos[a], pos[b])).abs() < 1e-9);
         assert!(float(&got["stretch"]) >= 1.0 - 1e-12);
@@ -147,8 +188,14 @@ fn guided_length_paths_match_the_unguided_weighted_path_and_save_work() {
         assert!(e <= u, "the guide expanded more: {e} vs {u}");
         saved += (e * 2.0 < u) as usize;
     }
-    assert!(saved >= 2, "the guide halved the work on fewer than 2 of 3 pairs");
-    assert!(compared >= 1, "no pair was reachable following direction, so nothing was compared");
+    assert!(
+        saved >= 2,
+        "the guide halved the work on fewer than 2 of 3 pairs"
+    );
+    assert!(
+        compared >= 1,
+        "no pair was reachable following direction, so nothing was compared"
+    );
 }
 
 fn ids_of(v: &PropertyValue) -> Vec<NodeId> {
@@ -164,14 +211,26 @@ fn guided_hop_paths_take_as_few_hops_as_plain_shortest_path() {
     let (s, ids, _) = grid(10);
     let n = ids.len();
     for (a, b) in [(0, n - 1), (3, n - 20), (n / 2, 9)] {
-        let got = &astar(&s, ids[a], ids[b], "{structure: 'pdb', cost: 'hops', undirected: false}").unwrap();
+        let got = &astar(
+            &s,
+            ids[a],
+            ids[b],
+            "{structure: 'pdb', cost: 'hops', undirected: false}",
+        )
+        .unwrap();
         let plain = rows(
             &s,
-            &format!("CALL algo.shortestPath({}, {}) YIELD cost RETURN cost", ids[a].as_u64(), ids[b].as_u64()),
+            &format!(
+                "CALL algo.shortestPath({}, {}) YIELD cost RETURN cost",
+                ids[a].as_u64(),
+                ids[b].as_u64()
+            ),
         )
         .unwrap();
         match (got.first(), plain.first()) {
-            (Some(g), Some(p)) => assert_eq!(float(&g["hops"]), float(&p["cost"]), "pair {a} -> {b}"),
+            (Some(g), Some(p)) => {
+                assert_eq!(float(&g["hops"]), float(&p["cost"]), "pair {a} -> {b}")
+            }
             (None, None) => {}
             other => panic!("reachability disagrees for {a} -> {b}: {other:?}"),
         }
@@ -188,7 +247,10 @@ fn a_node_without_a_position_is_not_walked_and_an_unreachable_target_has_no_row(
     s.create_edge(ids[0], hub, "BOND").unwrap();
     s.create_edge(hub, ids[n - 1], "BOND").unwrap();
     let got = &astar(&s, ids[0], ids[n - 1], "{structure: 'pdb', cost: 'hops'}").unwrap()[0];
-    assert!(float(&got["hops"]) > 2.0, "the path went through a node with no position");
+    assert!(
+        float(&got["hops"]) > 2.0,
+        "the path went through a node with no position"
+    );
     assert!(!ids_of(&got["path"]).contains(&hub));
     // Positioned but unconnected.
     let lone = s.create_node("Residue");
@@ -196,9 +258,14 @@ fn a_node_without_a_position_is_not_walked_and_an_unreachable_target_has_no_row(
         s.set_node_property("default", lone, k, v).unwrap();
     }
     run(&mut s, "REBUILD STRUCTURE INDEX pdb");
-    assert!(astar(&s, ids[0], lone, "{structure: 'pdb'}").unwrap().is_empty());
+    assert!(astar(&s, ids[0], lone, "{structure: 'pdb'}")
+        .unwrap()
+        .is_empty());
     let err = astar(&s, ids[0], hub, "{structure: 'pdb'}").unwrap_err();
-    assert!(err.contains("has no position under structure `pdb`"), "{err}");
+    assert!(
+        err.contains("has no position under structure `pdb`"),
+        "{err}"
+    );
 }
 
 /// A chain of 20 `:Residue` folded into a hairpin: 0..9 out along x, 10..19
@@ -208,7 +275,11 @@ fn hairpin() -> (GraphStore, Vec<NodeId>, Vec<NodeId>) {
     let mut s = GraphStore::new();
     let mut chain = Vec::new();
     for i in 0..20usize {
-        let (x, y) = if i < 10 { (i as f64 * 3.0, 0.0) } else { ((19 - i) as f64 * 3.0, 1.0) };
+        let (x, y) = if i < 10 {
+            (i as f64 * 3.0, 0.0)
+        } else {
+            ((19 - i) as f64 * 3.0, 1.0)
+        };
         let id = s.create_node("Residue");
         for (k, v) in [("x", x), ("y", y), ("z", 0.0)] {
             s.set_node_property("default", id, k, v).unwrap();
@@ -227,7 +298,10 @@ fn hairpin() -> (GraphStore, Vec<NodeId>, Vec<NodeId>) {
         other.push(id);
     }
     s.create_edge(other[0], other[1], "BOND").unwrap();
-    run(&mut s, "CREATE STRUCTURE INDEX fold ON :Residue(x, y, z) METRIC euclidean CONTACT_RADIUS 1.5");
+    run(
+        &mut s,
+        "CREATE STRUCTURE INDEX fold ON :Residue(x, y, z) METRIC euclidean CONTACT_RADIUS 1.5",
+    );
     (s, chain, other)
 }
 
@@ -252,12 +326,18 @@ fn stress_finds_the_hairpins_contacts_and_ranks_the_farthest_round_first() {
         (NodeId::new(a), NodeId::new(b))
     };
     // Unreachable first: the separate chain sits 1.0 below residues 0 and 1.
-    let unreachable: Vec<_> = got.iter().take_while(|r| r["stretch"] == PropertyValue::Null).collect();
+    let unreachable: Vec<_> = got
+        .iter()
+        .take_while(|r| r["stretch"] == PropertyValue::Null)
+        .collect();
     assert_eq!(unreachable.len(), 2, "{got:?}");
     for r in &unreachable {
         let (a, b) = pair(r);
         assert!(other.contains(&a) || other.contains(&b));
-        assert_eq!((r["pathLength"].clone(), r["hops"].clone()), (PropertyValue::Null, PropertyValue::Null));
+        assert_eq!(
+            (r["pathLength"].clone(), r["hops"].clone()),
+            (PropertyValue::Null, PropertyValue::Null)
+        );
     }
     // Then the hairpin contacts, i with 19 - i for i in 0..10, by stretch: the
     // pair at the open end (0, 19) is 19 bonds round, the one at the fold
@@ -265,13 +345,21 @@ fn stress_finds_the_hairpins_contacts_and_ranks_the_farthest_round_first() {
     let reachable: Vec<_> = got.iter().skip(2).collect();
     assert_eq!(reachable.len(), 9, "{reachable:?}");
     let first = pair(reachable[0]);
-    assert_eq!((first.0.min(first.1), first.0.max(first.1)), (chain[0].min(chain[19]), chain[0].max(chain[19])));
+    assert_eq!(
+        (first.0.min(first.1), first.0.max(first.1)),
+        (chain[0].min(chain[19]), chain[0].max(chain[19]))
+    );
     assert_eq!(float(&reachable[0]["hops"]), 19.0);
     // pathLength is 9 * 3 out, 1 across... along the chain: 9 steps of 3.0,
     // the fold's 1.0, and 9 more of 3.0.
     assert!((float(&reachable[0]["pathLength"]) - 55.0).abs() < 1e-9);
-    assert!((float(&reachable[0]["stretch"]) - 55.0).abs() < 1e-9, "distance is 1.0");
-    assert!(reachable.windows(2).all(|w| float(&w[0]["stretch"]) >= float(&w[1]["stretch"])));
+    assert!(
+        (float(&reachable[0]["stretch"]) - 55.0).abs() < 1e-9,
+        "distance is 1.0"
+    );
+    assert!(reachable
+        .windows(2)
+        .all(|w| float(&w[0]["stretch"]) >= float(&w[1]["stretch"])));
     // No pair is directly bonded.
     assert!(got.iter().all(|r| r["hops"] != PropertyValue::Integer(1)));
     let limited = stress(&s, "{structure: 'fold', limit: 3}").unwrap();
@@ -301,14 +389,23 @@ fn stress_on_map_positions_uses_metres() {
     let d = float(&got[0]["distance"]);
     assert!((d - 500.4).abs() < 1.0, "not metres: {d}");
     assert!(float(&got[0]["stretch"]) > 18.0, "{got:?}");
-    assert!(stress(&s, "{radius: 100}").unwrap().is_empty(), "a 100 m radius found a 500 m pair");
+    assert!(
+        stress(&s, "{radius: 100}").unwrap().is_empty(),
+        "a 100 m radius found a 500 m pair"
+    );
 }
 
 #[test]
 fn bad_calls_are_refused_with_the_reason() {
     let (mut s, ids, _) = grid(3);
     let (a, b) = (ids[0].as_u64(), ids[1].as_u64());
-    let refused = |s: &GraphStore, q: &str| QueryEngine::new().execute(q, s).err().map(|e| e.to_string()).unwrap_or_default();
+    let refused = |s: &GraphStore, q: &str| {
+        QueryEngine::new()
+            .execute(q, s)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+    };
     let cases = [
         (format!("CALL algo.structural.astar({a}, {b}, {{structure: 'nope'}}) YIELD path RETURN path"), "no structure named `nope`; this graph has: pdb"),
         (format!("CALL algo.structural.astar({a}, {b}, {{cost: 'time'}}) YIELD path RETURN path"), "unknown cost `time`"),
@@ -328,8 +425,14 @@ fn bad_calls_are_refused_with_the_reason() {
         }
     }
     // Two structures: a name is needed. A hierarchy has no distance.
-    run(&mut s, "CREATE STRUCTURE INDEX again ON :Residue(x, y, z) METRIC euclidean");
-    let e = refused(&s, &format!("CALL algo.structural.astar({a}, {b}) YIELD path RETURN path"));
+    run(
+        &mut s,
+        "CREATE STRUCTURE INDEX again ON :Residue(x, y, z) METRIC euclidean",
+    );
+    let e = refused(
+        &s,
+        &format!("CALL algo.structural.astar({a}, {b}) YIELD path RETURN path"),
+    );
     if !e.contains("several structures; name one") {
         wrong.push(format!("two structures: {e}"));
     }
@@ -340,7 +443,10 @@ fn bad_calls_are_refused_with_the_reason() {
     if !e.contains("has no distance") {
         wrong.push(format!("hierarchy: {e}"));
     }
-    let e = refused(&GraphStore::new(), "CALL algo.structural.stress({radius: 1}) YIELD stretch RETURN stretch");
+    let e = refused(
+        &GraphStore::new(),
+        "CALL algo.structural.stress({radius: 1}) YIELD stretch RETURN stretch",
+    );
     if !e.contains("no 3D or geographic structure") {
         wrong.push(format!("no structure: {e}"));
     }
@@ -374,7 +480,10 @@ fn the_hop_guide_allows_for_long_relationships() {
     }
     s.create_edge(source, far, "LINK").unwrap();
     s.create_edge(far, target, "LINK").unwrap();
-    run(&mut s, "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean");
+    run(
+        &mut s,
+        "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean",
+    );
     let got = &astar(&s, source, target, "{cost: 'hops'}").unwrap()[0];
     assert_eq!(float(&got["hops"]), 2.0, "{got:?}");
     assert_eq!(ids_of(&got["path"]), vec![source, far, target]);

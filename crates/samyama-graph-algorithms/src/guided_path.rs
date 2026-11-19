@@ -81,13 +81,20 @@ pub fn guided_shortest_path(
     remaining: impl Fn(usize) -> f64,
 ) -> Option<GuidedPath> {
     let n = view.node_count;
-    assert!(source < n && target < n, "source or target is not in the view");
+    assert!(
+        source < n && target < n,
+        "source or target is not in the view"
+    );
     let mut best = vec![f64::INFINITY; n];
     let mut parent = vec![usize::MAX; n];
     let mut heap = BinaryHeap::new();
     let mut expanded = 0;
     best[source] = 0.0;
-    heap.push(Entry { priority: remaining(source), cost: 0.0, node: source });
+    heap.push(Entry {
+        priority: remaining(source),
+        cost: 0.0,
+        node: source,
+    });
     while let Some(Entry { cost, node, .. }) = heap.pop() {
         if cost > best[node] {
             continue; // superseded by a cheaper route
@@ -101,9 +108,17 @@ pub fn guided_shortest_path(
                 path.push(at);
             }
             path.reverse();
-            return Some(GuidedPath { path, cost, expanded });
+            return Some(GuidedPath {
+                path,
+                cost,
+                expanded,
+            });
         }
-        let preds: &[usize] = if undirected { view.predecessors(node) } else { &[] };
+        let preds: &[usize] = if undirected {
+            view.predecessors(node)
+        } else {
+            &[]
+        };
         for &next in view.successors(node).iter().chain(preds) {
             let Some(c) = step(node, next) else { continue };
             debug_assert!(c >= 0.0, "a negative step cost breaks the search");
@@ -111,7 +126,11 @@ pub fn guided_shortest_path(
             if through < best[next] {
                 best[next] = through;
                 parent[next] = node;
-                heap.push(Entry { priority: through + remaining(next), cost: through, node: next });
+                heap.push(Entry {
+                    priority: through + remaining(next),
+                    cost: through,
+                    node: next,
+                });
             }
         }
     }
@@ -150,8 +169,14 @@ mod tests {
             (x % 1000) as f64 / 1000.0
         };
         let n = side * side;
-        let pos: Vec<[f64; 2]> =
-            (0..n).map(|i| [(i % side) as f64 + 0.4 * next(), (i / side) as f64 + 0.4 * next()]).collect();
+        let pos: Vec<[f64; 2]> = (0..n)
+            .map(|i| {
+                [
+                    (i % side) as f64 + 0.4 * next(),
+                    (i / side) as f64 + 0.4 * next(),
+                ]
+            })
+            .collect();
         let mut edges = Vec::new();
         for i in 0..n {
             if i % side + 1 < side {
@@ -189,7 +214,12 @@ mod tests {
         let guided =
             guided_shortest_path(&v, 0, target, true, step, |w| dist(pos[w], pos[target])).unwrap();
         let blind = guided_shortest_path(&v, 0, target, true, step, |_| 0.0).unwrap();
-        assert!((guided.cost - blind.cost).abs() < 1e-9, "{} vs {}", guided.cost, blind.cost);
+        assert!(
+            (guided.cost - blind.cost).abs() < 1e-9,
+            "{} vs {}",
+            guided.cost,
+            blind.cost
+        );
         assert!(
             guided.expanded * 2 < blind.expanded,
             "the guide saved too little: {} vs {}",
@@ -197,7 +227,11 @@ mod tests {
             blind.expanded
         );
         // The path is real and its cost is its length.
-        let along: f64 = guided.path.windows(2).map(|p| dist(pos[p[0]], pos[p[1]])).sum();
+        let along: f64 = guided
+            .path
+            .windows(2)
+            .map(|p| dist(pos[p[0]], pos[p[1]]))
+            .sum();
         assert!((along - guided.cost).abs() < 1e-9);
         assert_eq!((guided.path[0], *guided.path.last().unwrap()), (0, target));
     }
@@ -210,7 +244,8 @@ mod tests {
             let target = v.node_count - 1;
             let hops = |_: usize, _: usize| Some(1.0);
             let guided =
-                guided_shortest_path(&v, 0, target, true, hops, |x| dist(pos[x], pos[target]) / w).unwrap();
+                guided_shortest_path(&v, 0, target, true, hops, |x| dist(pos[x], pos[target]) / w)
+                    .unwrap();
             let bfs = guided_shortest_path(&v, 0, target, true, hops, |_| 0.0).unwrap();
             assert_eq!(guided.cost, bfs.cost, "seed {seed}");
             assert_eq!(guided.path.len() - 1, guided.cost as usize);
@@ -222,7 +257,13 @@ mod tests {
     fn unwalkable_steps_are_not_walked_and_unreachable_is_none() {
         // 0 - 1 - 2 - 3, with 1 - 2 refused.
         let v = view(4, &[(0, 1), (1, 2), (2, 3)]);
-        let step = |u: usize, w: usize| if (u.min(w), u.max(w)) == (1, 2) { None } else { Some(1.0) };
+        let step = |u: usize, w: usize| {
+            if (u.min(w), u.max(w)) == (1, 2) {
+                None
+            } else {
+                Some(1.0)
+            }
+        };
         assert_eq!(guided_shortest_path(&v, 0, 3, true, step, |_| 0.0), None);
         assert!(guided_shortest_path(&v, 0, 1, true, step, |_| 0.0).is_some());
     }
@@ -262,7 +303,10 @@ mod tests {
         let one = |_: usize, _: usize| Some(1.0);
         let first = guided_shortest_path(&v, 0, 3, false, one, |_| 0.0).unwrap();
         for _ in 0..5 {
-            assert_eq!(guided_shortest_path(&v, 0, 3, false, one, |_| 0.0).unwrap(), first);
+            assert_eq!(
+                guided_shortest_path(&v, 0, 3, false, one, |_| 0.0).unwrap(),
+                first
+            );
         }
     }
 

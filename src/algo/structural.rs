@@ -71,13 +71,19 @@ impl Structure {
     pub fn resolve(store: &GraphStore, name: Option<&str>) -> Result<Self, String> {
         let all = store.structure_registry.effective_conventions(store);
         let measurable = |c: &&StructuralConvention| {
-            matches!(c.manifold, ManifoldSpec::Euclidean3d { .. } | ManifoldSpec::GeoSpherical { .. })
+            matches!(
+                c.manifold,
+                ManifoldSpec::Euclidean3d { .. } | ManifoldSpec::GeoSpherical { .. }
+            )
         };
         let convention = match name {
             Some(n) => {
                 let c = all.iter().find(|c| c.name == n).ok_or_else(|| {
                     let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
-                    format!("no structure named `{n}`; this graph has: {}", list_or_none(&names))
+                    format!(
+                        "no structure named `{n}`; this graph has: {}",
+                        list_or_none(&names)
+                    )
                 })?;
                 if !measurable(&c) {
                     return Err(format!(
@@ -93,9 +99,11 @@ impl Structure {
                 match usable.as_slice() {
                     [one] => (*one).clone(),
                     [] => {
-                        return Err("this graph has no 3D or geographic structure; declare one with \
+                        return Err(
+                            "this graph has no 3D or geographic structure; declare one with \
                                     CREATE STRUCTURE INDEX name ON :Label(x, y, z)"
-                            .to_string())
+                                .to_string(),
+                        )
                     }
                     many => {
                         let names: Vec<&str> = many.iter().map(|c| c.name.as_str()).collect();
@@ -132,7 +140,14 @@ impl Structure {
                 let [lon, lat, alt] = p.coords;
                 let (lat, lon) = (lat.to_radians(), lon.to_radians());
                 let r = EARTH_RADIUS_M + alt;
-                (p.node_id, [r * lat.cos() * lon.cos(), r * lat.cos() * lon.sin(), r * lat.sin()])
+                (
+                    p.node_id,
+                    [
+                        r * lat.cos() * lon.cos(),
+                        r * lat.cos() * lon.sin(),
+                        r * lat.sin(),
+                    ],
+                )
             })
             .collect()
     }
@@ -141,7 +156,9 @@ impl Structure {
     pub fn contact_radius(&self) -> Option<f64> {
         match &self.convention.manifold {
             ManifoldSpec::Euclidean3d { contact_radius, .. } => *contact_radius,
-            ManifoldSpec::GeoSpherical { contact_radius_m, .. } => *contact_radius_m,
+            ManifoldSpec::GeoSpherical {
+                contact_radius_m, ..
+            } => *contact_radius_m,
             _ => None,
         }
     }
@@ -201,7 +218,12 @@ pub fn astar(
             .node_to_index
             .get(&id.as_u64())
             .copied()
-            .ok_or_else(|| format!("the {which} node {} is not in the graph searched", id.as_u64()))?;
+            .ok_or_else(|| {
+                format!(
+                    "the {which} node {} is not in the graph searched",
+                    id.as_u64()
+                )
+            })?;
         structure.distance(id, id).ok_or_else(|| {
             format!(
                 "the {which} node {} has no position under structure `{}`",
@@ -226,15 +248,27 @@ pub fn astar(
                 .flat_map(|u| view.successors(u).iter().map(move |&w| (u, w)))
                 .filter_map(|(u, w)| length(u, w))
                 .fold(0.0, f64::max);
-            let bound = |w: usize| if longest > 0.0 { to_target(w) / longest } else { 0.0 };
+            let bound = |w: usize| {
+                if longest > 0.0 {
+                    to_target(w) / longest
+                } else {
+                    0.0
+                }
+            };
             let guided = guided_shortest_path(view, s, t, undirected, hop, bound);
             let blind = guided_shortest_path(view, s, t, undirected, hop, |_| 0.0);
             guided.zip(blind)
         }
     };
-    let Some((found, blind)) = route else { return Ok(None) };
+    let Some((found, blind)) = route else {
+        return Ok(None);
+    };
     let direct = structure.distance(source, target).unwrap_or(0.0);
-    let length: f64 = found.path.windows(2).filter_map(|p| length(p[0], p[1])).sum();
+    let length: f64 = found
+        .path
+        .windows(2)
+        .filter_map(|p| length(p[0], p[1]))
+        .sum();
     Ok(Some(GuidedRoute {
         hops: found.path.len() - 1,
         path: found.path.iter().map(|&i| id_at(view, i)).collect(),
@@ -270,9 +304,15 @@ pub struct StressPair {
 /// Read undirected: closeness in space is symmetric, and a path either way
 /// counts. Coincident nodes are skipped -- the straight line has no length
 /// to divide by.
-pub fn stress(structure: &Structure, view: &GraphView, radius: f64) -> Result<Vec<StressPair>, String> {
+pub fn stress(
+    structure: &Structure,
+    view: &GraphView,
+    radius: f64,
+) -> Result<Vec<StressPair>, String> {
     if !(radius > 0.0 && radius.is_finite()) {
-        return Err(format!("`radius` must be a positive distance, got {radius}"));
+        return Err(format!(
+            "`radius` must be a positive distance, got {radius}"
+        ));
     }
     let points: Vec<(NodeId, [f64; 3])> = structure
         .spatial_points()
@@ -285,7 +325,11 @@ pub fn stress(structure: &Structure, view: &GraphView, radius: f64) -> Result<Ve
         grid.entry(cell(p)).or_default().push(i);
     }
     let joined: HashSet<(usize, usize)> = (0..view.node_count)
-        .flat_map(|u| view.successors(u).iter().map(move |&w| (u.min(w), u.max(w))))
+        .flat_map(|u| {
+            view.successors(u)
+                .iter()
+                .map(move |&w| (u.min(w), u.max(w)))
+        })
         .collect();
 
     let mut close = Vec::new();
@@ -294,11 +338,18 @@ pub fn stress(structure: &Structure, view: &GraphView, radius: f64) -> Result<Ve
         for dx in -1..=1 {
             for dy in -1..=1 {
                 for dz in -1..=1 {
-                    let Some(bucket) = grid.get(&[cx + dx, cy + dy, cz + dz]) else { continue };
+                    let Some(bucket) = grid.get(&[cx + dx, cy + dy, cz + dz]) else {
+                        continue;
+                    };
                     for &j in bucket.iter().filter(|&&j| j > i) {
                         let b = points[j].0;
-                        let Some(d) = structure.distance(a, b) else { continue };
-                        let (ia, ib) = (view.node_to_index[&a.as_u64()], view.node_to_index[&b.as_u64()]);
+                        let Some(d) = structure.distance(a, b) else {
+                            continue;
+                        };
+                        let (ia, ib) = (
+                            view.node_to_index[&a.as_u64()],
+                            view.node_to_index[&b.as_u64()],
+                        );
                         if d > 0.0 && d <= radius && !joined.contains(&(ia.min(ib), ia.max(ib))) {
                             close.push((a.min(b), a.max(b), d));
                             if close.len() > MAX_STRESS_PAIRS {
@@ -319,7 +370,10 @@ pub fn stress(structure: &Structure, view: &GraphView, radius: f64) -> Result<Ve
     let mut out: Vec<StressPair> = close
         .into_iter()
         .map(|(a, b, distance)| {
-            let (s, t) = (view.node_to_index[&a.as_u64()], view.node_to_index[&b.as_u64()]);
+            let (s, t) = (
+                view.node_to_index[&a.as_u64()],
+                view.node_to_index[&b.as_u64()],
+            );
             let to_b = |w: usize| structure.distance(id_at(view, w), b).unwrap_or(0.0);
             let found = guided_shortest_path(view, s, t, true, length, to_b);
             StressPair {
@@ -334,7 +388,10 @@ pub fn stress(structure: &Structure, view: &GraphView, radius: f64) -> Result<Ve
         .collect();
     out.sort_by(|x, y| {
         let rank = |p: &StressPair| p.stretch.unwrap_or(f64::INFINITY);
-        rank(y).total_cmp(&rank(x)).then(x.a.cmp(&y.a)).then(x.b.cmp(&y.b))
+        rank(y)
+            .total_cmp(&rank(x))
+            .then(x.a.cmp(&y.a))
+            .then(x.b.cmp(&y.b))
     });
     Ok(out)
 }
