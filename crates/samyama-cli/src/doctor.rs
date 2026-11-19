@@ -228,16 +228,114 @@ fn check_nlq_endpoint(get: impl Fn(&str) -> Option<String>, timeout: Duration) -
     }
 }
 
+/// Where a strict Snap cannot read without the `removable-media` plug.
+const REMOVABLE_MEDIA_ROOTS: [&str; 2] = ["/media", "/mnt"];
+
+/// `dir` as an absolute path, without touching the filesystem: a data
+/// directory that does not exist yet still has a place it will be.
+fn absolute(dir: &std::path::Path) -> std::path::PathBuf {
+    std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())
+}
+
+/// Under a strict Snap, can `/media` and `/mnt` be read? (#2203)
+///
+/// A `.sgsnap` on a USB stick or a mounted disk is the usual way a graph
+/// reaches an edge gateway, and a strict Snap without the `removable-media`
+/// plug gets "permission denied" there -- an error that names the file, not
+/// the cause. The plug is not connected automatically on install.
+///
+/// `connected` is `snapctl is-connected removable-media`: `Some(true)` or
+/// `Some(false)`, or `None` when it could not be asked. A disconnected plug
+/// is `Warn` with the command that fixes it, and `Fail` when the data
+/// directory itself is on removable media, since the server cannot start
+/// there.
+fn check_snap_removable_media(
+    get: impl Fn(&str) -> Option<String>,
+    data_dir: &std::path::Path,
+    connected: impl FnOnce() -> Option<bool>,
+) -> Check {
+    const NAME: &str = "snap removable-media";
+    let Some(snap) = get("SNAP_NAME").filter(|_| get("SNAP").is_some()) else {
+        return Check::new(NAME, Verdict::Skipped, "not running as a Snap");
+    };
+    let fix = format!("run `sudo snap connect {snap}:removable-media`");
+    match connected() {
+        Some(true) => Check::new(NAME, Verdict::Pass,
+            format!("connected; {} are readable", REMOVABLE_MEDIA_ROOTS.join(" and "))),
+        Some(false) => {
+            let dir = absolute(data_dir);
+            if REMOVABLE_MEDIA_ROOTS.iter().any(|r| dir.starts_with(r)) {
+                Check::new(NAME, Verdict::Fail, format!(
+                    "not connected, and the data directory {} is on removable media; {fix}",
+                    dir.display()))
+            } else {
+                Check::new(NAME, Verdict::Warn, format!(
+                    "not connected: a .sgsnap under {} cannot be read or imported; {fix}",
+                    REMOVABLE_MEDIA_ROOTS.join(" or ")))
+            }
+        }
+        None => Check::new(NAME, Verdict::Skipped,
+            "running as a Snap, but `snapctl is-connected removable-media` gave no answer"),
+    }
+}
+
+/// Is the data directory where a Snap refresh will not copy it? (#2203)
+///
+/// snapd copies `$SNAP_DATA` in full on every refresh so that `snap revert`
+/// can restore it; `$SNAP_COMMON` is shared by every revision and never
+/// copied. A 200 GB store under `$SNAP_DATA` is 200 GB more disk on each
+/// refresh, so it is `Warn` with where to move it.
+fn check_snap_data_dir(get: impl Fn(&str) -> Option<String>, data_dir: &std::path::Path) -> Check {
+    const NAME: &str = "snap data location";
+    if get("SNAP").is_none() {
+        return Check::new(NAME, Verdict::Skipped, "not running as a Snap");
+    }
+    let dir = absolute(data_dir);
+    let under = |var: &str| get(var).filter(|v| !v.is_empty()).filter(|v| dir.starts_with(v));
+    if let Some(common) = under("SNAP_COMMON") {
+        return Check::new(NAME, Verdict::Pass,
+            format!("{} is under $SNAP_COMMON ({common}), shared by every revision", dir.display()));
+    }
+    if let Some(data) = under("SNAP_DATA") {
+        let to = get("SNAP_COMMON").map_or_else(|| "$SNAP_COMMON".to_string(), |c| format!("{c}/data"));
+        return Check::new(NAME, Verdict::Warn, format!(
+            "{} is under $SNAP_DATA ({data}), which every refresh copies in full; use {to}",
+            dir.display()));
+    }
+    Check::new(NAME, Verdict::Pass,
+        format!("{} is outside the Snap's revisioned data, so a refresh does not copy it", dir.display()))
+}
+
+/// `snapctl is-connected removable-media`, inside a Snap. Exit 0 is
+/// connected and 1 is not; anything else, or no `snapctl`, is no answer.
+fn removable_media_connected() -> Option<bool> {
+    let status = std::process::Command::new("snapctl")
+        .args(["is-connected", "removable-media"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
 /// Everything that can be decided without talking to a server.
 pub fn local_checks(url: &str, data_dir: &std::path::Path) -> Vec<Check> {
+    let env = |v: &str| std::env::var(v).ok();
     vec![
         Check::new("client version", Verdict::Pass, env!("CARGO_PKG_VERSION")),
         check_url(url),
         check_memory(),
         check_data_dir(data_dir),
         check_open_files(open_file_limit().as_deref()),
-        check_nlq(|v| std::env::var(v).ok()),
-        check_nlq_endpoint(|v| std::env::var(v).ok(), NLQ_CONNECT_TIMEOUT),
+        check_nlq(env),
+        check_nlq_endpoint(env, NLQ_CONNECT_TIMEOUT),
+        // `snapctl` is run only inside a Snap; the check returns first outside one.
+        check_snap_removable_media(env, data_dir, removable_media_connected),
+        check_snap_data_dir(env, data_dir),
     ]
 }
 
@@ -480,6 +578,7 @@ pub fn report(checks: Vec<Check>) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn a_failing_check_sets_a_non_zero_exit_code() {
@@ -834,5 +933,74 @@ mod tests {
         let cs = local_checks("http://localhost:8080", std::path::Path::new("."));
         assert!(cs.len() >= 4, "a doctor that checks nothing reports a clean bill of health");
         assert!(cs.iter().all(|c| !c.detail.is_empty()), "every check must show what it saw");
+    }
+
+    fn snap_env(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |k| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    }
+
+    const IN_SNAP: &[(&str, &str)] = &[
+        ("SNAP", "/snap/samyama/x1"),
+        ("SNAP_NAME", "samyama"),
+        ("SNAP_DATA", "/var/snap/samyama/x1"),
+        ("SNAP_COMMON", "/var/snap/samyama/common"),
+    ];
+
+    #[test]
+    fn the_snap_checks_skip_outside_a_snap_without_asking_snapctl() {
+        let none = snap_env(&[]);
+        let c = check_snap_removable_media(&none, Path::new("/mnt/usb/data"), || {
+            panic!("snapctl asked outside a Snap")
+        });
+        assert_eq!(c.verdict, Verdict::Skipped);
+        assert_eq!(check_snap_data_dir(&none, Path::new("/var/snap/samyama/x1/data")).verdict, Verdict::Skipped);
+    }
+
+    #[test]
+    fn a_disconnected_removable_media_plug_says_how_to_connect_it() {
+        let env = snap_env(IN_SNAP);
+        let c = check_snap_removable_media(&env, Path::new("/var/snap/samyama/common/data"), || Some(false));
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+        assert!(c.detail.contains("sudo snap connect samyama:removable-media"), "{}", c.detail);
+        assert!(c.detail.contains("/media or /mnt"), "{}", c.detail);
+        // On removable media itself, the server cannot start: a failure.
+        for dir in ["/media/pi/usb/data", "/mnt/disk/data"] {
+            let c = check_snap_removable_media(&env, Path::new(dir), || Some(false));
+            assert_eq!(c.verdict, Verdict::Fail, "{dir}: {}", c.detail);
+            assert!(c.detail.contains(dir) && c.detail.contains("snap connect"), "{}", c.detail);
+        }
+        // `/mntx` is not `/mnt`.
+        let c = check_snap_removable_media(&env, Path::new("/mntx/data"), || Some(false));
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+    }
+
+    #[test]
+    fn a_connected_plug_passes_and_no_answer_is_a_skip() {
+        let env = snap_env(IN_SNAP);
+        let c = check_snap_removable_media(&env, Path::new("/mnt/disk/data"), || Some(true));
+        assert_eq!(c.verdict, Verdict::Pass, "{}", c.detail);
+        let c = check_snap_removable_media(&env, Path::new("/mnt/disk/data"), || None);
+        assert_eq!(c.verdict, Verdict::Skipped, "{}", c.detail);
+    }
+
+    #[test]
+    fn the_snap_name_in_the_hint_is_the_installed_one() {
+        // A parallel install (`snap install samyama_test`) has its own name.
+        let env = snap_env(&[("SNAP", "/snap/samyama_test/x1"), ("SNAP_NAME", "samyama_test")]);
+        let c = check_snap_removable_media(&env, Path::new("/srv/data"), || Some(false));
+        assert!(c.detail.contains("samyama_test:removable-media"), "{}", c.detail);
+    }
+
+    #[test]
+    fn a_data_directory_under_snap_data_warns_and_names_snap_common() {
+        let env = snap_env(IN_SNAP);
+        let c = check_snap_data_dir(&env, Path::new("/var/snap/samyama/x1/data"));
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+        assert!(c.detail.contains("/var/snap/samyama/common/data"), "{}", c.detail);
+        let c = check_snap_data_dir(&env, Path::new("/var/snap/samyama/common/data"));
+        assert_eq!(c.verdict, Verdict::Pass, "{}", c.detail);
+        assert!(c.detail.contains("$SNAP_COMMON"), "{}", c.detail);
+        let c = check_snap_data_dir(&env, Path::new("/srv/samyama"));
+        assert_eq!(c.verdict, Verdict::Pass, "{}", c.detail);
     }
 }
