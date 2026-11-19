@@ -632,7 +632,14 @@ pub fn from_store(store: &GraphStore, embedding: &str) -> Result<HybridGraph, St
             let nodes = collect(label);
             let mut rows = Vec::with_capacity(nodes.len());
             for n in &nodes {
-                match n.get_property(embedding).and_then(PropertyValue::to_vector) {
+                // Through the store, not `Node::get_property`: a bulk-loaded
+                // property can live in the columnar side, which a detached
+                // `Node` cannot see (#1313).
+                match store
+                    .node_property(n.id, embedding)
+                    .as_ref()
+                    .and_then(PropertyValue::to_vector)
+                {
                     Some(v) => rows.push(v),
                     None if required => {
                         return Err(format!(
