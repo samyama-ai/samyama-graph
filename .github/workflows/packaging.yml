@@ -1,0 +1,55 @@
+name: Packaging
+
+# The .deb and .rpm (#2203) are built and attached by tag-release.yml, which
+# runs only when a release is cut. This runs the same build and the same
+# install-and-run smoke test on a pull request that changes the packaging,
+# so a broken unit or install script is found in review rather than at the
+# next release.
+#
+# Not a required check: it is filtered by path, and a path-filtered workflow
+# reports nothing on the pull requests it skips (see ci.yml, #1865).
+
+on:
+  pull_request:
+    paths:
+      - "ops/nfpm.yaml"
+      - "ops/systemd/**"
+      - "ops/packaging/**"
+      - ".github/workflows/packaging.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    name: .deb and .rpm install and run as a service
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build, for glibc 2.34 and newer
+        run: ops/packaging/build-portable.sh
+
+      - name: Build the .deb and .rpm
+        env:
+          NFPM_VERSION: v2.41.1
+        run: |
+          set -euo pipefail
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          go install "github.com/goreleaser/nfpm/v2/cmd/nfpm@${NFPM_VERSION}"
+          mkdir -p dist
+          for format in deb rpm; do
+            VERSION="$VERSION" ARCH=amd64 \
+              "$(go env GOPATH)/bin/nfpm" package -f ops/nfpm.yaml -p "$format" -t dist/
+          done
+          ls -l dist
+
+      - name: The packages install and run as a service
+        run: |
+          set -euo pipefail
+          for image in debian:12 ubuntu:24.04; do
+            ops/packaging/smoke-in-container.sh "$image" dist/*.deb
+          done
+          ops/packaging/smoke-in-container.sh almalinux:9 dist/*.rpm
