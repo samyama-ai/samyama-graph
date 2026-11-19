@@ -2104,7 +2104,7 @@ fn fastrp_writes_embeddings_and_validates_config() {
         other => panic!("{other:?}"),
     }
     match store.node_property(NodeId::new(ids[0] as u64), "emb") {
-        Some(PropertyValue::Array(v)) => assert_eq!(v.len(), 4),
+        Some(PropertyValue::Vector(v)) => assert_eq!(v.len(), 4),
         other => panic!("{other:?}"),
     }
     for (cfg, want) in [
@@ -2149,7 +2149,7 @@ fn node2vec_writes_embeddings_and_validates_config() {
     .unwrap();
     assert_eq!(rows.len(), 3);
     match store.node_property(NodeId::new(ids[1] as u64), "n2v") {
-        Some(PropertyValue::Array(v)) => assert_eq!(v.len(), 3),
+        Some(PropertyValue::Vector(v)) => assert_eq!(v.len(), 3),
         other => panic!("{other:?}"),
     }
     let rows = run_algo_mut(
@@ -6692,6 +6692,20 @@ fn call_writes_reads_the_config_as_well_as_the_name() {
     ));
     // A procedure that always writes still does, config or not.
     assert!(AlgorithmOperator::call_writes("algo.fastRP", &[]));
+    // ...unless it is asked to stream (#1736), and still does with a
+    // `writeProperty`, which the write path then refuses as contradictory.
+    let stream = vec![lmap(&[("write", PropertyValue::Boolean(false))])];
+    assert!(!AlgorithmOperator::call_writes("algo.fastRP", &stream));
+    assert!(!AlgorithmOperator::call_writes("node2vec", &stream));
+    assert!(AlgorithmOperator::call_writes("algo.or.solve", &stream));
+    assert!(AlgorithmOperator::call_writes(
+        "algo.fastRP",
+        &[lmap(&[("write", PropertyValue::Boolean(false)), ("writeProperty", pstr("v"))])]
+    ));
+    assert!(AlgorithmOperator::call_writes(
+        "algo.fastRP",
+        &[lmap(&[("write", pstr("no"))])]
+    ));
 }
 
 #[test]
