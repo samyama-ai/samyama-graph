@@ -429,9 +429,10 @@ impl CommandHandler {
             let persist_failed = if let Some(ref persist_mgr) = self.persistence {
                 let mutations = store_guard.take_write_log();
                 let _persist =
-                    tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64).entered();
+                    tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64, entities = tracing::field::Empty).entered();
                 match persist_mgr.apply_mutations(&graph_name, &store_guard, &mutations) {
                     Ok(n) => {
+                        _persist.record("entities", n as i64);
                         debug!("Persisted {} entities from {} mutations", n, mutations.len());
                         None
                     }
