@@ -1,7 +1,7 @@
 # ADR-015: Graph-Native Query Planning
 
 ## Status
-**Implemented** — Core planner operational since v0.6.0. Enhanced 2026-03-20: EXPLAIN shows candidate plan diagnostics (count, costs, alternatives), fallback to legacy planner for label-free patterns, 21 regression tests, `SAMYAMA_GRAPH_NATIVE=true` env var.
+**Implemented** — Core planner operational since v0.6.0. Enhanced 2026-03-20: EXPLAIN shows candidate plan diagnostics (count, costs, alternatives), fallback to legacy planner for label-free patterns, 21 regression tests, `SAMYAMA_GRAPH_NATIVE=true` env var. **On by default since #1729** (2026-11-19); `SAMYAMA_GRAPH_NATIVE=false` falls back.
 
 ## Date
 2026-03-06 (Implemented v0.6.0, enhanced 2026-03-20)
@@ -141,7 +141,7 @@ plan, per query rather than per server:
 
 | Option | Effect |
 |---|---|
-| `planner=cost` | Every MATCH the enumerator can plan is planned by it, as `SAMYAMA_GRAPH_NATIVE=true` does for the whole server |
+| `planner=cost` | Every MATCH the enumerator can plan is planned by it, as the server does by default since #1729 (`SAMYAMA_GRAPH_NATIVE=false` turns it off server-wide) |
 | `planner=legacy` | The default planner, whatever the server's setting |
 | `plan=N` | Each MATCH runs its N-th cheapest candidate, numbered as EXPLAIN numbers `Alternative plans`; implies `planner=cost` |
 | `runtime=volcano` | The one runtime there is; any other runtime is an error |
