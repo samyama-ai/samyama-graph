@@ -1497,6 +1497,20 @@ impl Query {
             Clause::Call(call) => AlgorithmOperator::call_writes(&call.procedure_name, &call.arguments),
             _ => false,
         }) || self.calls_a_writing_vector_procedure()
+            || self.calls_a_writing_feature_procedure()
+    }
+
+    /// `feature.define` / `feature.materialize` / `feature.drop` (ML-07),
+    /// which change the store's feature registry.
+    fn calls_a_writing_feature_procedure(&self) -> bool {
+        use crate::query::executor::feature_ops::call_writes;
+        self.call_clause
+            .as_ref()
+            .is_some_and(|c| call_writes(&c.procedure_name))
+            || self.clauses.iter().any(|c| match c {
+                Clause::Call(call) => call_writes(&call.procedure_name),
+                _ => false,
+            })
     }
 
     /// `vector.knnGraph` / `vector.similarityJoin` with `write: true` (#1979),

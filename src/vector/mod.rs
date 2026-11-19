@@ -48,6 +48,7 @@
 //! raw distance, lower is better (#1980). See `DistanceMetric::score`.
 
 pub mod distance;
+pub mod exact;
 pub mod index;
 pub mod manager;
 
@@ -56,3 +57,4 @@ pub use manager::{VectorIndexManager, IndexKey};
 
 mod checkpoint;
 pub mod strategy;
+pub mod work;

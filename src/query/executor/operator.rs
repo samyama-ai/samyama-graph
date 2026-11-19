@@ -533,6 +533,54 @@ pub(crate) mod statement_clock {
     }
 }
 
+/// The random source `rand()` and `randomUUID()` draw from (ML-08, #1747).
+///
+/// Unseeded, each call draws from the thread's generator, as before. Seeded --
+/// `POST /api/query/export` with `seed` -- the statement draws from one
+/// generator built from that seed, so the same query over the same graph with
+/// the same seed returns the same rows, byte for byte. Without that, a dataset
+/// sampled with `WHERE rand() < 0.1` could never be rebuilt.
+///
+/// Thread-local, like `statement_clock`: a statement runs on one thread, and a
+/// filter that calls `rand()` is never split across threads (see
+/// `FilterOperator::predicate_is_parallel`), so the draws come in row order.
+/// The generator is `StdRng` from `rand` 0.8, whose stream is fixed for that
+/// version; the export manifest records the engine version for that reason.
+pub mod statement_rng {
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static RNG: RefCell<Option<StdRng>> = const { RefCell::new(None) };
+    }
+
+    /// Seed this thread's statement generator. The guard unseeds it on drop.
+    pub fn seed(seed: u64) -> Guard {
+        RNG.with(|r| *r.borrow_mut() = Some(StdRng::seed_from_u64(seed)));
+        Guard
+    }
+
+    /// The next `rand()` value in `[0, 1)`.
+    pub fn next_f64() -> f64 {
+        RNG.with(|r| match r.borrow_mut().as_mut() {
+            Some(g) => g.gen::<f64>(),
+            None => rand::thread_rng().gen::<f64>(),
+        })
+    }
+
+    /// 128 random bits from the seeded generator, or `None` when unseeded.
+    pub fn seeded_u128() -> Option<u128> {
+        RNG.with(|r| r.borrow_mut().as_mut().map(|g| g.gen::<u128>()))
+    }
+
+    pub struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            RNG.with(|r| *r.borrow_mut() = None);
+        }
+    }
+}
+
 
 /// Build a `Duration` with `nanos` carried into `seconds`.
 ///
@@ -3753,11 +3801,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 _ => Err(ExecutionError::TypeError("exp() requires numeric".to_string())),
             }
         }
-        "rand" => {
-            use rand::Rng;
-            let val = rand::thread_rng().gen::<f64>();
-            Ok(Value::Property(PropertyValue::Float(val)))
-        }
+        "rand" => Ok(Value::Property(PropertyValue::Float(statement_rng::next_f64()))),
         "timestamp" => {
             let ts = statement_clock::now().timestamp_millis();
             Ok(Value::Property(PropertyValue::Integer(ts)))
@@ -4942,7 +4986,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "randomuuid" => {
             use std::time::{SystemTime, UNIX_EPOCH};
             let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-            let seed = t.as_nanos();
+            // A seeded statement draws the bits from its seed, so an export
+            // that mints ids rebuilds with the same ones (ML-08, #1747).
+            let seed = statement_rng::seeded_u128().unwrap_or(t.as_nanos());
             // Simple v4-like UUID (not cryptographically secure, but unique enough)
             let uuid = format!("{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
                 (seed & 0xFFFFFFFF) as u32,
@@ -6558,6 +6604,14 @@ pub trait PhysicalOperator: Send {
     /// Reset the operator to start from the beginning
     fn reset(&mut self);
 
+    /// Work this operator did that its time and row counts do not show, as
+    /// `(counter, value)` pairs, for PROFILE (#1970). Empty for an operator
+    /// with nothing to add. Read when the operator first produces and when it
+    /// finishes, like [`memory_bytes`](Self::memory_bytes).
+    fn work(&self) -> Vec<(&'static str, u64)> {
+        Vec::new()
+    }
+
     /// Bytes this operator holds in rows it has buffered, or `None` for one
     /// that streams a row at a time (#2078).
     ///
@@ -7951,6 +8005,13 @@ impl FilterOperator {
     /// Unset in normal use. `0` forces parallel, a large value forces
     /// sequential.
     pub fn predicate_is_parallel(predicate: &Expression) -> bool {
+        // A predicate that draws random numbers stays on one thread: split
+        // across threads, the rows would take the draws in a different order
+        // each run, and a seeded statement would stop being reproducible
+        // (ML-08, #1747). `WHERE rand() < 0.1` is how datasets are sampled.
+        if super::planner::is_volatile(predicate) {
+            return false;
+        }
         let threshold = std::env::var("SAMYAMA_FILTER_PARALLEL_COST")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -14830,6 +14891,24 @@ pub struct VectorSearchOperator {
     results: Vec<(NodeId, f32)>,
     /// Current index in results
     current: usize,
+    /// What the search did, for PROFILE (#1970); `None` until it has run.
+    work: Option<SearchWork>,
+}
+
+/// The work one vector search did (#1970): what its strategy cost, which its
+/// time alone does not say.
+#[derive(Clone, Copy, Debug, Default)]
+struct SearchWork {
+    /// Distances computed, by the graph walk and by exact scans.
+    distances: u64,
+    /// HNSW searches the widening loop ran; 0 when the plan went straight to
+    /// an exact scan.
+    graph_searches: u64,
+    /// Times widening abandoned the graph for an exact scan.
+    exact_fallbacks: u64,
+    /// Times the WHERE pushed into the search (#1969), or the hierarchy
+    /// scope (#445), was evaluated for a candidate.
+    filter_checks: u64,
 }
 
 impl VectorSearchOperator {
@@ -14857,6 +14936,7 @@ impl VectorSearchOperator {
             scope: None,
             results: Vec::new(),
             current: 0,
+            work: None,
         }
     }
 
@@ -14899,6 +14979,23 @@ impl VectorSearchOperator {
         if !self.results.is_empty() || self.current > 0 {
             return Ok(());
         }
+        let before = crate::vector::work::Work::now();
+        let checks = std::cell::Cell::new(0u64);
+        let outcome = self.search(store, &checks);
+        let did = crate::vector::work::Work::now().since(before);
+        // Added to, not replaced: a search that found nothing runs again on
+        // the next pull, and PROFILE's time covers both runs.
+        let w = self.work.get_or_insert_with(SearchWork::default);
+        w.distances += did.distances;
+        w.graph_searches += did.graph_searches;
+        w.exact_fallbacks += did.exact_fallbacks;
+        w.filter_checks += checks.get();
+        outcome
+    }
+
+    /// Run the search into `self.results`, counting each filter evaluation
+    /// in `checks`.
+    fn search(&mut self, store: &GraphStore, checks: &std::cell::Cell<u64>) -> ExecutionResult<()> {
         // A missing index is reported by the search itself (#1660), so a
         // missing metric here only means there is nothing to score.
         self.metric = store.vector_index.metric(&self.label, &self.property_key);
@@ -14943,6 +15040,7 @@ impl VectorSearchOperator {
         // "no match".
         let error = std::cell::RefCell::new(None);
         let keep = |id: NodeId| {
+            checks.set(checks.get() + 1);
             if error.borrow().is_some() || !in_scope(id) {
                 return false;
             }
@@ -15019,6 +15117,16 @@ impl PhysicalOperator for VectorSearchOperator {
 
     fn reset(&mut self) {
         self.current = 0;
+    }
+
+    fn work(&self) -> Vec<(&'static str, u64)> {
+        let Some(w) = self.work else { return Vec::new() };
+        vec![
+            ("distances", w.distances),
+            ("graph_searches", w.graph_searches),
+            ("exact_fallbacks", w.exact_fallbacks),
+            ("filter_checks", w.filter_checks),
+        ]
     }
 
     fn describe(&self) -> OperatorDescription {
