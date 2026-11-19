@@ -40,6 +40,7 @@ mod types;
 mod store;
 mod mapping;
 mod mapping_impl;
+mod graph_as_rdf;
 mod namespace;
 mod serialization;
 mod schema;
@@ -61,6 +62,7 @@ pub use mapping::{
 };
 
 pub use mapping_impl::{RdfImportReport, SyncReport, IRI_PROPERTY};
+pub use graph_as_rdf::{GraphAsRdf, TripleSource};
 
 pub use namespace::{
     NamespaceManager, Namespace,

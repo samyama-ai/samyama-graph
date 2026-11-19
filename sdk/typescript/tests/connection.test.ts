@@ -54,17 +54,24 @@ describe("connection management", () => {
       timeoutMs: undefined,
       maxRetries: undefined,
       retryBaseDelayMs: undefined,
+      maxConnections: undefined,
     });
     assert.deepEqual(t.connectionOptions, {
       timeoutMs: 30_000,
       maxRetries: 2,
       retryBaseDelayMs: 100,
+      maxConnections: 10,
     });
   });
 
   test("an explicit option still overrides its default", () => {
     const t = new HttpTransport("http://127.0.0.1:1", { timeoutMs: 5, maxRetries: 0 });
-    assert.deepEqual(t.connectionOptions, { timeoutMs: 5, maxRetries: 0, retryBaseDelayMs: 100 });
+    assert.deepEqual(t.connectionOptions, {
+      timeoutMs: 5,
+      maxRetries: 0,
+      retryBaseDelayMs: 100,
+      maxConnections: 10,
+    });
   });
 
   test("a client built with only a url gets the transport's defaults (#1595)", () => {
@@ -80,6 +87,7 @@ describe("connection management", () => {
         timeoutMs: 30_000,
         maxRetries: 2,
         retryBaseDelayMs: 100,
+        maxConnections: 10,
       });
     }
   });
