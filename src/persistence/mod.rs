@@ -387,6 +387,22 @@ impl PersistenceManager {
         store: &GraphStore,
         mutations: &[crate::graph::event::Mutation],
     ) -> Result<usize, PersistenceError> {
+        // Counted here, the one path both auto-commit statements and
+        // transaction commits take, so `/metrics` cannot miss one (#2080).
+        // An empty log is a read or a no-op write, not a persist.
+        let outcome = self.apply_mutations_uncounted(tenant, store, mutations);
+        if !mutations.is_empty() {
+            health::record_persist(mutations.len(), outcome.is_ok());
+        }
+        outcome
+    }
+
+    fn apply_mutations_uncounted(
+        &self,
+        tenant: &str,
+        store: &GraphStore,
+        mutations: &[crate::graph::event::Mutation],
+    ) -> Result<usize, PersistenceError> {
         use crate::graph::event::Mutation;
         use std::collections::HashMap;
 
