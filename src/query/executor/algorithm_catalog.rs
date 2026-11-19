@@ -29,6 +29,9 @@ pub enum AlgorithmCategory {
     Temporal,
     Embedding,
     Optimization,
+    /// Retrieval for an AI caller: vector search, then the graph around the
+    /// matches (AI-07).
+    Retrieval,
 }
 
 /// One callable algorithm.
@@ -184,6 +187,8 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
         Optimization,
         &["path", "cost", "resource"],
     ),
+    // GraphRAG retrieval (AI-07): seeds by vector search, then the graph.
+    read("algo.graphRag", &["algo.retrieve"], Retrieval, &["node", "score", "hops", "seed", "community", "path"]),
 ];
 
 /// How an argument is passed: by position, or as a key of the config map.
@@ -430,6 +435,23 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         opt("costProperty", T::String),
         LABEL,
         EDGE_TYPE,
+    ]),
+    ("algo.graphRag", &[
+        Param { name: "query", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None },
+        Param { name: "label", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        Param { name: "property", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        key("strategy", T::String, D::String("local")),
+        key("k", T::Integer, D::Integer(5)),
+        key("hops", T::Integer, D::Integer(2)),
+        key("decay", T::Float, D::Float(0.5)),
+        key("communities", T::Integer, D::Integer(3)),
+        key("limit", T::Integer, D::Integer(50)),
+        EDGE_TYPE,
+        opt("timeProperty", T::String),
+        opt("since", T::Float),
+        opt("until", T::Float),
+        opt("hierarchy", T::String),
+        opt("under", T::NodeId),
     ]),
 ];
 

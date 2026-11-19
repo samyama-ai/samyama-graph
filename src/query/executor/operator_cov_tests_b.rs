@@ -6812,6 +6812,19 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
             let k4 = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
             return (algo_graph(4, &k4, None).0, vec![]);
         }
+        // The path, with a 2-d vector index on its nodes for the seeds.
+        "graphrag" | "retrieve" => {
+            let (mut store, ids) = path4();
+            store
+                .create_vector_index("V", "v", 2, crate::vector::DistanceMetric::Cosine)
+                .unwrap();
+            for (i, &id) in ids.iter().enumerate() {
+                let v = PropertyValue::Vector(vec![1.0, i as f32]);
+                store.set_node_property(TENANT, NodeId::new(id as u64), "v", v).unwrap();
+            }
+            let query = PropertyValue::Array(vec![PropertyValue::Float(1.0), PropertyValue::Float(0.0)]);
+            return (store, vec![lmap(&[("query", query), ("label", pstr("V")), ("property", pstr("v"))])]);
+        }
         "or.solve" => {
             return (
                 solve_store(),

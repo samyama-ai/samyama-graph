@@ -242,7 +242,8 @@ paths:
                         category:
                           type: string
                           enum: [centrality, community, path, link_prediction, similarity,
-                                 structure, graph_metric, temporal, embedding, optimization]
+                                 structure, graph_metric, temporal, embedding, optimization,
+                                 retrieval]
                         parameters:
                           type: array
                           items:
