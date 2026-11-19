@@ -181,7 +181,10 @@ impl FilterPlan {
         // per node it reaches (#1999). Neither exceeds the index.
         let beam = (ef.max(k) as f64).min(nf);
         let expanded = if s == 0.0 { nf } else { (beam / s).min(nf) };
-        let inline_work = (expanded * links).min(nf) * d + expanded;
+        // Every node reached is both scored and asked the predicate, so the
+        // predicate is priced per node reached, not per node expanded.
+        let reached = (expanded * links).min(nf);
+        let inline_work = reached * d + reached;
         Self::decide(s, exact_work, widen_work, inline_work, candidates)
     }
     /// The name EXPLAIN prints for the strategy.
