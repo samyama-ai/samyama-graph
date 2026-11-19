@@ -625,9 +625,15 @@ async fn gemini_sends_both_the_mime_type_and_the_schema() {
         r#"{"candidates":[{"content":{"parts":[{"text":"RETURN 1"}]}}]}"#.to_string(),
     )]);
     let client = NLQClient::new(&cfg(LLMProvider::Gemini, &srv.base_url, Some("k"), None)).unwrap();
+    let mut gemini_schema = schema();
+    gemini_schema
+        .schema
+        .as_object_mut()
+        .unwrap()
+        .remove("additionalProperties");
 
     let out = client
-        .complete_structured("q", Some(&schema()))
+        .complete_structured("q", Some(&gemini_schema))
         .await
         .unwrap();
     assert!(out.schema_enforced);
@@ -643,6 +649,16 @@ async fn gemini_sends_both_the_mime_type_and_the_schema() {
     );
     assert!(gc["responseSchema"].get("additionalProperties").is_none());
     assert_eq!(gc["temperature"], 0.0);
+
+    let err = client
+        .complete_structured("q", Some(&schema()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, NLQError::ConfigError(ref message) if message.contains("additionalProperties") && message.contains("not supported by Gemini")),
+        "{err:?}"
+    );
+    assert_eq!(srv.requests().len(), 1, "unsupported schema must not be sent");
 }
 
 #[tokio::test]
