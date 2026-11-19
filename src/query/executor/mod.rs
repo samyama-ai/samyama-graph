@@ -82,6 +82,7 @@ pub mod analyze_ops;
 pub mod cost_model;
 pub mod hierarchy_detector;
 pub mod hierarchy_ops;
+pub mod feature_ops;
 pub mod projection_ops;
 pub mod structure_ops;
 pub mod point_ops;

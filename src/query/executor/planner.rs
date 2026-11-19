@@ -917,7 +917,11 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
 /// The refusal for a procedure name nothing dispatches: a likely intended
 /// name when there is one, and otherwise where the procedures are.
 pub fn unknown_procedure_message(name: &str) -> String {
-    match crate::query::suggest::closest(name, KNOWN_DB_PROCEDURES.iter().copied()) {
+    let known = KNOWN_DB_PROCEDURES
+        .iter()
+        .chain(super::feature_ops::FeatureProcedure::NAMES)
+        .copied();
+    match crate::query::suggest::closest(name, known) {
         Some(known) => format!("Unknown procedure: `{name}`. Did you mean `{known}`?"),
         None => format!(
             "Unknown procedure: `{name}`. The schema procedures are {}; graph \
@@ -4066,6 +4070,20 @@ impl QueryPlanner {
             return Ok(Box::new(super::point_ops::PointNearestOperator::new(
                 label, property, centre, k, node_var, distance_var,
             )));
+        }
+
+        // Declarative feature definitions and their values (ML-07, #1742).
+        if let Some(procedure) = super::feature_ops::FeatureProcedure::from_name(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::feature_ops::FeatureOperator::new(
+                procedure,
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
         }
 
         // Similarity graphs from a vector index (#1979).
