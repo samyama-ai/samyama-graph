@@ -157,7 +157,8 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     read("algo.temporalShortestPath", &[], Temporal, &["arrival", "path", "times"]),
     read("algo.symptomExplanation", &[], Temporal, &["node", "explains", "onset", "path", "times"]),
     // Embeddings and dimensionality reduction. fastRP and node2vec write the
-    // vector as a node property (ML-06); see `execute_fastrp`/`execute_node2vec`
+    // vector as a node property (ML-06), or stream it on `write: false`
+    // (#1736); see `execute_fastrp`/`execute_node2vec`
     // for what each does and does not do.
     read("algo.pca", &[], Embedding, &["node", "projection"]),
     write("algo.fastRP", Embedding, &["node", "embedding"]),
@@ -388,6 +389,8 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         key("iterationWeights", T::List, D::FloatList(&[1.0, 1.0, 1.0])),
         key("seed", T::Integer, D::Integer(387_844_754_753)),
         key("normalize", T::Boolean, D::Boolean(true)),
+        // Writes by default; `write: false` streams the vectors instead (#1736).
+        key("write", T::Boolean, D::Boolean(true)),
         key("writeProperty", T::String, D::String("embedding")),
     ]),
     ("algo.node2vec", &[
@@ -400,6 +403,8 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         key("inOutFactor", T::Float, D::Float(1.0)),
         key("windowSize", T::Integer, D::Integer(5)),
         key("seed", T::Integer, D::Integer(336_337_323_314)),
+        // Writes by default; `write: false` streams the vectors instead (#1736).
+        key("write", T::Boolean, D::Boolean(true)),
         key("writeProperty", T::String, D::String("embedding")),
     ]),
     ("algo.or.solve", &[

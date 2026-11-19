@@ -66,6 +66,9 @@ pub struct NodeCounters {
     /// The largest `PhysicalOperator::memory_bytes` read from the operator,
     /// plus one so that 0 can mean "never reported" (#2078).
     memory_plus_one: AtomicU64,
+    /// The operator's own work counters (`PhysicalOperator::work`, #1970),
+    /// as last read.
+    work: std::sync::Mutex<Vec<(&'static str, u64)>>,
 }
 
 /// One node of the instrumented plan, in pre-order.
@@ -103,6 +106,12 @@ impl ProfileNode {
     /// the rows, like `/api/memory`, not an allocator reading.
     pub fn memory_bytes(&self) -> Option<u64> {
         self.counters.memory_plus_one.load(Ordering::Relaxed).checked_sub(1)
+    }
+
+    /// The operator's own work counters (#1970), such as the distances a
+    /// vector search computed. Empty for an operator that reports none.
+    pub fn work(&self) -> Vec<(&'static str, u64)> {
+        self.counters.work.lock().map(|w| w.clone()).unwrap_or_default()
     }
 
     /// How far the estimate was from what happened: the larger of the two
@@ -148,6 +157,12 @@ impl ProfiledOperator {
                 self.counters
                     .memory_plus_one
                     .fetch_max(bytes as u64 + 1, Ordering::Relaxed);
+            }
+            let work = self.inner.work();
+            if !work.is_empty() {
+                if let Ok(mut slot) = self.counters.work.lock() {
+                    *slot = work;
+                }
             }
         }
         out
@@ -240,6 +255,10 @@ impl PhysicalOperator for ProfiledOperator {
 
     fn memory_bytes(&self) -> Option<usize> {
         self.inner.memory_bytes()
+    }
+
+    fn work(&self) -> Vec<(&'static str, u64)> {
+        self.inner.work()
     }
 }
 
@@ -357,8 +376,11 @@ fn estimate_section(nodes: &[ProfileNode], selves: &[Duration]) -> String {
             ),
             _ => ("-".to_string(), "-".to_string(), ""),
         };
+        // Only for an operator that reports work, so every other line reads
+        // exactly as before (#1970).
+        let work: String = node.work().iter().map(|(k, v)| format!(" {k}={v}")).collect();
         out.push_str(&format!(
-            "  {label:<38} estimated={estimated} actual={} q-error={q_error} time={:.3}ms memory={}{flag}\n",
+            "  {label:<38} estimated={estimated} actual={} q-error={q_error} time={:.3}ms memory={}{work}{flag}\n",
             node.rows(),
             self_time.as_secs_f64() * 1000.0,
             node.memory_bytes().map_or_else(|| "-".to_string(), |b| format!("{b}B")),

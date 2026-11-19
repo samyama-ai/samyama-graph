@@ -182,8 +182,12 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
         for inner in pair.into_inner() {
             match inner.as_rule() {
                 Rule::explain_clause => {
-                    query.explain = true;
-                    query.profile = inner.as_str().to_uppercase().starts_with("PROFILE");
+                    // As `parse_query` sets them: PROFILE is not also EXPLAIN.
+                    // Both flags set made the executor's EXPLAIN branch answer
+                    // a PROFILE without running it.
+                    let profile = inner.as_str().to_uppercase().starts_with("PROFILE");
+                    query.profile = profile;
+                    query.explain = !profile;
                     query.plan_json = inner.into_inner().any(|p| p.as_rule() == Rule::explain_format);
                 }
                 Rule::cypher_options => parse_cypher_options(inner, &mut query.plan_options)?,
@@ -1278,6 +1282,7 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
     let mut similarity = "cosine".to_string(); // Default
     let mut quantization = Quantization::None; // NDS-09; unchanged unless asked for
     let mut params = crate::vector::HnswParams::default(); // #1971
+    let mut kind = crate::vector::IndexKind::Hnsw; // #1975
 
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1302,8 +1307,10 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                 // 1536-dimension index, and the mismatch only surfaced later
                 // against the caller's *vector*, which is the wrong thing to
                 // blame (#474).
-                const ACCEPTED: [&str; 6] =
-                    ["dimensions", "similarity", "quantization", "m", "ef_construction", "ef"];
+                const ACCEPTED: [&str; 9] = [
+                    "dimensions", "similarity", "quantization", "m", "ef_construction", "ef",
+                    "kind", "nlist", "nprobe",
+                ];
                 let mut unknown: Vec<&String> = options_map
                     .keys()
                     .filter(|k| !ACCEPTED.contains(&k.as_str()))
@@ -1318,7 +1325,8 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                     return Err(ParseError::SemanticError(format!(
                         "CREATE VECTOR INDEX: unknown option {listed}. Accepted options are \
 `dimensions` (integer), `similarity` (string), `quantization` (string), \
-`m`, `ef_construction` and `ef` (integers)."
+`kind` (string), `m`, `ef_construction` and `ef` (integers, HNSW), \
+`nlist` and `nprobe` (integers, IVF)."
                     )));
                 }
 
@@ -1343,6 +1351,40 @@ fn parse_create_vector_index_statement(pair: pest::iterators::Pair<Rule>, query:
                 params.ef = positive("ef")?;
                 params
                     .validate()
+                    .map_err(|e| ParseError::SemanticError(format!("CREATE VECTOR INDEX: {e}")))?;
+
+                // The index kind (#1975). Each kind's parameters are refused
+                // on the other: an option the index ignores would build one
+                // the caller did not ask for, as above.
+                if let Some(value) = options_map.get("kind") {
+                    kind = match value {
+                        PropertyValue::String(s) => crate::vector::IndexKind::parse(s).ok_or_else(|| {
+                            ParseError::SemanticError(format!(
+                                "CREATE VECTOR INDEX: unknown `kind` {s:?}. Accepted values are `hnsw` and `ivf`."
+                            ))
+                        })?,
+                        other => {
+                            return Err(ParseError::SemanticError(format!(
+                                "CREATE VECTOR INDEX: `kind` must be a string, got {other:?}"
+                            )))
+                        }
+                    };
+                }
+                let foreign: &[&str] = match kind {
+                    crate::vector::IndexKind::Hnsw => &["nlist", "nprobe"],
+                    crate::vector::IndexKind::Ivf(_) => &["m", "ef_construction", "ef"],
+                };
+                if let Some(key) = foreign.iter().find(|k| options_map.contains_key(**k)) {
+                    return Err(ParseError::SemanticError(format!(
+                        "CREATE VECTOR INDEX: `{key}` does not apply to a `kind: '{}'` index",
+                        kind.name()
+                    )));
+                }
+                if let crate::vector::IndexKind::Ivf(ref mut ivf) = kind {
+                    ivf.nlist = positive("nlist")?;
+                    ivf.nprobe = positive("nprobe")?;
+                }
+                kind.validate()
                     .map_err(|e| ParseError::SemanticError(format!("CREATE VECTOR INDEX: {e}")))?;
 
                 if let Some(value) = options_map.get("dimensions") {
@@ -1396,6 +1438,7 @@ Accepted values are `none` and `fp16`."
         index_name,
         quantization,
         params,
+        kind,
         label: label.ok_or_else(|| ParseError::SemanticError("Missing label in CREATE VECTOR INDEX".to_string()))?,
         property_key: property_key.ok_or_else(|| ParseError::SemanticError("Missing property key in CREATE VECTOR INDEX".to_string()))?,
         dimensions,
