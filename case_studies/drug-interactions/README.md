@@ -36,6 +36,42 @@ the most gene targets — a two-hop graph join that's the backbone of interactio
 checking) → most widespread side effects → most-indicated drugs → adverse-event
 volume. Every query returns real rows (DoD-gated).
 
+## Question catalog
+
+[`drug-interactions.sgqueries`](./drug-interactions.sgqueries) holds 57 questions
+(17 easy, 27 medium, 13 hard; four unanswerable), built with `catalog-build --release`
+against the pinned snapshot. [`questions.json`](questions.json) is its source, and the
+NLQ accuracy benchmark
+([competitor-benchmarks#260](https://git.samyama.ai/Samyama.ai/samyama-graph-competitor-benchmarks/issues/260))
+reads it as its question set. Every entry is checked
+weekly against the published snapshot by
+[`kg-catalogs.yml`](../../.github/workflows/kg-catalogs.yml).
+
+```bash
+samyama queries list case_studies/drug-interactions/drug-interactions.sgqueries
+samyama queries run  case_studies/drug-interactions/drug-interactions.sgqueries --snapshot druginteractions.sgsnap \
+    --entry <id> [--param name=value]...
+samyama verify druginteractions.sgsnap --queries case_studies/drug-interactions/drug-interactions.sgqueries
+```
+
+Names are unique per label (no two `Drug`, `Gene`, `SideEffect`, `Indication` or
+`AdverseEvent` nodes share a name), and each drug-gene, drug-side-effect,
+drug-indication and drug-adverse-event pair has one edge, so counts need no `DISTINCT`.
+SIDER side effects are mixed case (`Nausea`); FDA adverse event terms are upper case
+(`NAUSEA`), so a question comparing the two matches them ignoring case.
+
+**Data caveats the catalog surfaces.**
+- `Bioactivity` records link only to `Gene` targets, never to a `Drug`, so "what was
+  measured for drug X" cannot be answered (`di_unanswerable_drug_ic50`).
+- 13,479 of the 19,842 drugs have no edge at all (`di_isolated_drugs`), and some
+  well-known drugs (Fluoxetine, Paroxetine) have side effects but no gene interactions.
+- `HAS_INDICATION` mixes three extraction methods (`NLP_indication`,
+  `NLP_precondition`, `text_mention`), so an "indication" can be a precondition such
+  as asthma for a beta blocker; `di_indication_true_drugs` keeps only `NLP_indication`.
+- 21,075 of the 35,066 drug-gene interactions have no `interaction_type`.
+- FDA adverse events are capped at the 50 most-reported terms per drug, so many drugs
+  tie at 50 terms; the catalog ranks by report count instead.
+
 ## Data & license
 
 Sources: DrugBank, DGIdb, SIDER, ChEMBL, OpenFDA (see the
