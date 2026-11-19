@@ -82,6 +82,7 @@ pub mod analyze_ops;
 pub mod cost_model;
 pub mod hierarchy_detector;
 pub mod hierarchy_ops;
+pub mod feature_ops;
 pub mod projection_ops;
 pub mod structure_ops;
 pub mod point_ops;
@@ -848,6 +849,17 @@ impl<'a> MutQueryExecutor<'a> {
             query.clone()
         };
         let query = &query;
+
+        // This executor does not profile. Answering `PROFILE (FORMAT JSON)`
+        // with rows, or with an EXPLAIN document, would be read as a profile.
+        if query.profile && query.plan_json {
+            return Err(ExecutionError::PlanningError(
+                "PROFILE (FORMAT JSON) is not supported for a statement that writes: the write \
+                 executor runs statements without profiling them. EXPLAIN (FORMAT JSON) describes \
+                 the plan without running it."
+                    .to_string(),
+            ));
+        }
 
         // A read-only `CALL {}` subquery goes through the same path as on the
         // read executor. HTTP and RESP route every statement through here, so
