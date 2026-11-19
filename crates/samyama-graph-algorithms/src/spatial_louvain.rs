@@ -153,7 +153,15 @@ fn model(view: &GraphView, distance: &dyn Fn(usize, usize) -> f64, bins: usize) 
             edges[band(d[i * n + j])] += 1.0;
         }
     }
-    let f: Vec<f64> = (0..bins).map(|b| if expected[b] > 0.0 { edges[b] / expected[b] } else { 0.0 }).collect();
+    let f: Vec<f64> = (0..bins)
+        .map(|b| {
+            if expected[b] > 0.0 {
+                edges[b] / expected[b]
+            } else {
+                0.0
+            }
+        })
+        .collect();
     let mut w = vec![0.0; n * n];
     for i in 0..n {
         for j in 0..n {
@@ -165,8 +173,16 @@ fn model(view: &GraphView, distance: &dyn Fn(usize, usize) -> f64, bins: usize) 
             w[i * n + j] += 1.0;
         }
     }
-    let deterrence = (0..bins).map(|b| (d_max * (b + 1) as f64 / bins as f64, f[b])).collect();
-    Model { n, w, neighbours, two_m, deterrence }
+    let deterrence = (0..bins)
+        .map(|b| (d_max * (b + 1) as f64 / bins as f64, f[b]))
+        .collect();
+    Model {
+        n,
+        w,
+        neighbours,
+        two_m,
+        deterrence,
+    }
 }
 
 /// One level of local moving over a dense `n x n` matrix `w`, with the
@@ -194,7 +210,9 @@ fn local_moving(n: usize, w: &[f64], neighbours: &[Vec<usize>]) -> (Vec<usize>, 
             let mut best = own;
             let mut best_value = sum[own];
             let mut consider = |c: usize, value: f64| {
-                if value > best_value + MIN_GAIN || (value >= best_value - MIN_GAIN && c < best && value > best_value) {
+                if value > best_value + MIN_GAIN
+                    || (value >= best_value - MIN_GAIN && c < best && value > best_value)
+                {
                     best = c;
                     best_value = value;
                 }
@@ -296,7 +314,11 @@ pub fn spatial_louvain(
     }
     let community = renumber(&membership);
     let modularity = Some(spatial_modularity_of(&model, &community));
-    Ok(SpatialCommunities { community, modularity, deterrence: model.deterrence })
+    Ok(SpatialCommunities {
+        community,
+        modularity,
+        deterrence: model.deterrence,
+    })
 }
 
 fn spatial_modularity_of(model: &Model, community: &[usize]) -> f64 {
@@ -363,14 +385,18 @@ mod tests {
     fn nmi(a: &[usize], b: &[usize]) -> f64 {
         let n = a.len() as f64;
         let mut joint: HashMap<(usize, usize), f64> = HashMap::new();
-        let (mut pa, mut pb): (HashMap<usize, f64>, HashMap<usize, f64>) = (HashMap::new(), HashMap::new());
+        let (mut pa, mut pb): (HashMap<usize, f64>, HashMap<usize, f64>) =
+            (HashMap::new(), HashMap::new());
         for (&x, &y) in a.iter().zip(b) {
             *joint.entry((x, y)).or_default() += 1.0;
             *pa.entry(x).or_default() += 1.0;
             *pb.entry(y).or_default() += 1.0;
         }
         let h = |p: &HashMap<usize, f64>| -p.values().map(|c| c / n * (c / n).ln()).sum::<f64>();
-        let i: f64 = joint.iter().map(|(&(x, y), &c)| c / n * ((c / n) / (pa[&x] / n * pb[&y] / n)).ln()).sum();
+        let i: f64 = joint
+            .iter()
+            .map(|(&(x, y), &c)| c / n * ((c / n) / (pa[&x] / n * pb[&y] / n)).ln())
+            .sum();
         let (ha, hb) = (h(&pa), h(&pb));
         if ha + hb == 0.0 {
             1.0
@@ -422,7 +448,10 @@ mod tests {
             spatial_total += nmi(&spatial.community, &group) / 3.0;
             plain_total += nmi(&plain, &group) / 3.0;
         }
-        assert!(spatial_total > 0.95, "the spatial model did not recover the planted groups: NMI {spatial_total:.3}");
+        assert!(
+            spatial_total > 0.95,
+            "the spatial model did not recover the planted groups: NMI {spatial_total:.3}"
+        );
         assert!(
             spatial_total > plain_total + 0.2,
             "no clearly better than ordinary Louvain: {spatial_total:.3} vs {plain_total:.3}"
@@ -435,7 +464,11 @@ mod tests {
         for bins in [1, 7, 30] {
             let m = model(&v, &euclid(&pos), bins);
             let expected: f64 = -(0..m.n * m.n).map(|x| m.w[x]).sum::<f64>() + m.two_m;
-            assert!((expected - m.two_m).abs() < 1e-6 * m.two_m, "bins {bins}: P sums to {expected}, 2m is {}", m.two_m);
+            assert!(
+                (expected - m.two_m).abs() < 1e-6 * m.two_m,
+                "bins {bins}: P sums to {expected}, 2m is {}",
+                m.two_m
+            );
             // A partition of one community has modularity exactly 0.
             let one = vec![0; v.node_count];
             assert!(spatial_modularity_of(&m, &one).abs() < 1e-9);
@@ -452,7 +485,10 @@ mod tests {
         let singletons: Vec<usize> = (0..v.node_count).collect();
         assert!(q >= spatial_modularity(&v, euclid(&pos), 12, &singletons).unwrap());
         assert!(q >= 0.0);
-        assert!(q >= spatial_modularity(&v, euclid(&pos), 12, &group).unwrap() - 0.05, "far below the planted partition");
+        assert!(
+            q >= spatial_modularity(&v, euclid(&pos), 12, &group).unwrap() - 0.05,
+            "far below the planted partition"
+        );
     }
 
     #[test]
@@ -485,7 +521,10 @@ mod tests {
     fn no_edges_leaves_every_node_alone_with_no_modularity() {
         let v = view(4, &[]);
         let found = spatial_louvain(&v, |_, _| 1.0, 3).unwrap();
-        assert_eq!((found.community, found.modularity), (vec![0, 1, 2, 3], None));
+        assert_eq!(
+            (found.community, found.modularity),
+            (vec![0, 1, 2, 3], None)
+        );
         let empty = spatial_louvain(&view(0, &[]), |_, _| 1.0, 3).unwrap();
         assert!(empty.community.is_empty());
     }
@@ -495,7 +534,10 @@ mod tests {
         let plain = view(3, &[(0, 1), (1, 2)]);
         let noisy = view(3, &[(0, 1), (1, 0), (0, 1), (1, 2), (2, 2)]);
         let d = |i: usize, j: usize| (i as f64 - j as f64).abs();
-        assert_eq!(spatial_louvain(&plain, d, 2).unwrap(), spatial_louvain(&noisy, d, 2).unwrap());
+        assert_eq!(
+            spatial_louvain(&plain, d, 2).unwrap(),
+            spatial_louvain(&noisy, d, 2).unwrap()
+        );
     }
 
     #[test]
@@ -504,14 +546,25 @@ mod tests {
         let found = spatial_louvain(&v, euclid(&pos), 10).unwrap();
         let f: Vec<f64> = found.deterrence.iter().map(|&(_, f)| f).collect();
         assert!(f[0] > 10.0 * f[5], "{f:?}");
-        assert!(found.deterrence.windows(2).all(|w| w[0].0 < w[1].0), "bands out of order");
+        assert!(
+            found.deterrence.windows(2).all(|w| w[0].0 < w[1].0),
+            "bands out of order"
+        );
     }
 
     #[test]
     fn too_many_nodes_or_no_bins_are_refused() {
         let big = view(MAX_NODES + 1, &[]);
-        assert_eq!(spatial_louvain(&big, |_, _| 1.0, 3).unwrap_err(), SpatialError::TooLarge(MAX_NODES + 1));
-        assert_eq!(spatial_louvain(&view(2, &[(0, 1)]), |_, _| 1.0, 0).unwrap_err(), SpatialError::NoBins);
-        assert!(SpatialError::TooLarge(5).to_string().contains("square of the node count"));
+        assert_eq!(
+            spatial_louvain(&big, |_, _| 1.0, 3).unwrap_err(),
+            SpatialError::TooLarge(MAX_NODES + 1)
+        );
+        assert_eq!(
+            spatial_louvain(&view(2, &[(0, 1)]), |_, _| 1.0, 0).unwrap_err(),
+            SpatialError::NoBins
+        );
+        assert!(SpatialError::TooLarge(5)
+            .to_string()
+            .contains("square of the node count"));
     }
 }

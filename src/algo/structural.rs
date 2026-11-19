@@ -24,7 +24,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use samyama_graph_algorithms::{guided_shortest_path, spatial_louvain, GraphView, SpatialCommunities};
+use samyama_graph_algorithms::{
+    guided_shortest_path, spatial_louvain, GraphView, SpatialCommunities,
+};
 
 use crate::graph::{GraphStore, NodeId};
 use crate::index::point::EARTH_RADIUS_M;
@@ -420,7 +422,10 @@ fn positioned_subview(structure: &Structure, view: &GraphView) -> (GraphView, Ve
     let ids: Vec<NodeId> = keep.iter().map(|&i| id_at(view, i)).collect();
     let raw: Vec<u64> = ids.iter().map(|id| id.as_u64()).collect();
     let index = raw.iter().enumerate().map(|(k, &id)| (id, k)).collect();
-    (GraphView::from_adjacency_list(n, raw, index, out, inc, None), ids)
+    (
+        GraphView::from_adjacency_list(n, raw, index, out, inc, None),
+        ids,
+    )
 }
 
 /// Communities of the positioned nodes of `view` against the spatial null
@@ -434,7 +439,10 @@ pub fn spatial_communities(
 ) -> Result<(Vec<(NodeId, usize)>, Option<f64>), String> {
     let (sub, ids) = positioned_subview(structure, view);
     let distance = |i: usize, j: usize| structure.distance(ids[i], ids[j]).unwrap_or(0.0);
-    let SpatialCommunities { community, modularity, .. } =
-        spatial_louvain(&sub, distance, bins).map_err(|e| e.to_string())?;
+    let SpatialCommunities {
+        community,
+        modularity,
+        ..
+    } = spatial_louvain(&sub, distance, bins).map_err(|e| e.to_string())?;
     Ok((ids.into_iter().zip(community).collect(), modularity))
 }

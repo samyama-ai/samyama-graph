@@ -503,7 +503,10 @@ fn nmi(a: &[i64], b: &[i64]) -> f64 {
         *pb.entry(y).or_default() += 1.0;
     }
     let h = |p: &HashMap<i64, f64>| -p.values().map(|c| c / n * (c / n).ln()).sum::<f64>();
-    let i: f64 = joint.iter().map(|(&(x, y), &c)| c / n * ((c / n) / (pa[&x] / n * pb[&y] / n)).ln()).sum();
+    let i: f64 = joint
+        .iter()
+        .map(|(&(x, y), &c)| c / n * ((c / n) / (pa[&x] / n * pb[&y] / n)).ln())
+        .sum();
     let (ha, hb) = (h(&pa), h(&pb));
     if ha + hb == 0.0 {
         1.0
@@ -544,7 +547,10 @@ fn mixed_groups(n: usize, seed: u64) -> (GraphStore, Vec<NodeId>, Vec<i64>) {
             }
         }
     }
-    run(&mut s, "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean");
+    run(
+        &mut s,
+        "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean",
+    );
     (s, ids, group)
 }
 
@@ -567,12 +573,19 @@ fn spatial_louvain_recovers_groups_mixed_in_space_that_louvain_splits_by_place()
             "CALL algo.structural.spatialLouvain() YIELD node, communityId RETURN id(node) AS id, communityId AS c",
             &ids,
         );
-        let plain = communities(&s, "CALL algo.louvain() YIELD node, communityId RETURN id(node) AS id, communityId AS c", &ids);
+        let plain = communities(
+            &s,
+            "CALL algo.louvain() YIELD node, communityId RETURN id(node) AS id, communityId AS c",
+            &ids,
+        );
         spatial_sum += nmi(&spatial, &group) / 3.0;
         plain_sum += nmi(&plain, &group) / 3.0;
     }
     assert!(spatial_sum > 0.95, "spatial NMI {spatial_sum:.3}");
-    assert!(spatial_sum > plain_sum + 0.2, "spatial {spatial_sum:.3} vs louvain {plain_sum:.3}");
+    assert!(
+        spatial_sum > plain_sum + 0.2,
+        "spatial {spatial_sum:.3} vs louvain {plain_sum:.3}"
+    );
 }
 
 #[test]
@@ -606,7 +619,10 @@ fn spatial_louvain_reports_one_modularity_and_leaves_unpositioned_nodes_out() {
             lonely.set_node_property("default", id, k, v).unwrap();
         }
     }
-    run(&mut lonely, "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean");
+    run(
+        &mut lonely,
+        "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean",
+    );
     let alone = rows(&lonely, "CALL algo.structural.spatialLouvain() YIELD communityId, modularity RETURN communityId, modularity").unwrap();
     assert_eq!(alone.len(), 3);
     assert!(alone.iter().all(|r| r["modularity"] == PropertyValue::Null));
@@ -616,11 +632,24 @@ fn spatial_louvain_reports_one_modularity_and_leaves_unpositioned_nodes_out() {
 fn spatial_louvain_refuses_bad_bins_and_too_many_nodes() {
     let (s, _, _) = mixed_groups(20, 9);
     for (q, expected) in [
-        ("CALL algo.structural.spatialLouvain({bins: 0}) YIELD node RETURN node", "`bins` must be an integer from 1 to 1000"),
-        ("CALL algo.structural.spatialLouvain({bins: 'many'}) YIELD node RETURN node", "`bins` must be an integer"),
-        ("CALL algo.structural.spatialLouvain({colour: 1}) YIELD node RETURN node", "unknown config key `colour`"),
+        (
+            "CALL algo.structural.spatialLouvain({bins: 0}) YIELD node RETURN node",
+            "`bins` must be an integer from 1 to 1000",
+        ),
+        (
+            "CALL algo.structural.spatialLouvain({bins: 'many'}) YIELD node RETURN node",
+            "`bins` must be an integer",
+        ),
+        (
+            "CALL algo.structural.spatialLouvain({colour: 1}) YIELD node RETURN node",
+            "unknown config key `colour`",
+        ),
     ] {
-        let e = QueryEngine::new().execute(q, &s).err().map(|e| e.to_string()).unwrap_or_default();
+        let e = QueryEngine::new()
+            .execute(q, &s)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
         assert!(e.contains(expected), "{q}: {e}");
     }
     let mut big = GraphStore::new();
@@ -630,9 +659,15 @@ fn spatial_louvain_refuses_bad_bins_and_too_many_nodes() {
             big.set_node_property("default", id, k, v).unwrap();
         }
     }
-    run(&mut big, "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean");
+    run(
+        &mut big,
+        "CREATE STRUCTURE INDEX sites ON :Site(x, y, z) METRIC euclidean",
+    );
     let e = QueryEngine::new()
-        .execute("CALL algo.structural.spatialLouvain() YIELD node RETURN node", &big)
+        .execute(
+            "CALL algo.structural.spatialLouvain() YIELD node RETURN node",
+            &big,
+        )
         .unwrap_err()
         .to_string();
     assert!(e.contains("2001 nodes is more than the 2000"), "{e}");
