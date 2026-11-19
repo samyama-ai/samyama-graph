@@ -504,6 +504,33 @@ pub struct QueryResponse {
     /// CALL subquery).
     #[serde(skip_serializing_if = "Option::is_none")]
     plan_hash: Option<String>,
+    /// What this statement cost (#2079, COST-06).
+    stats: QueryStats,
+}
+
+/// What one statement cost, on every query response (#2079, COST-06).
+///
+/// Only what is measured for free: two clock readings around work the handler
+/// does anyway, and counts it already holds. Rows examined and peak memory
+/// are not here: either needs a counter in every operator on every query, and
+/// `PROFILE` already reports rows per operator for a query worth looking at.
+#[derive(Serialize, Debug, Clone, Copy, Default)]
+pub struct QueryStats {
+    /// Parsing, planning and running the statement, in milliseconds. A result
+    /// served from the result cache reports the lookup, not the original run.
+    pub elapsed_ms: f64,
+    /// Waiting for the store's read or write lock before the statement could
+    /// start. Contention shows here and not in `elapsed_ms`. `0` inside a
+    /// transaction, which already holds the lock.
+    pub lock_wait_ms: f64,
+    /// Rows in the result.
+    pub rows: usize,
+    /// Whether the statement was run as a write.
+    pub is_write: bool,
+}
+
+fn ms(d: std::time::Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
 }
 
 /// Handler for Cypher queries
@@ -679,11 +706,15 @@ async fn run_query(
     }
 
     let snapshot_version: u64;
+    let mut stats = QueryStats { is_write, ..QueryStats::default() };
+    let asked = std::time::Instant::now();
     let (result, full_props) = if is_write {
         // `mutate` records the changes and persists them: a write here used to reach
         // memory only, and returned 200 all the same (#1094).
         let (result, version, props) = state
             .mutate(&payload.graph, |store| {
+                stats.lock_wait_ms = ms(asked.elapsed());
+                let started = std::time::Instant::now();
                 let result = state.engine.execute_mut_with_params_within(
                     &payload.query,
                     store,
@@ -691,6 +722,7 @@ async fn run_query(
                     &params,
                     time_limit,
                 );
+                stats.elapsed_ms = ms(started.elapsed());
                 let props = result
                     .as_ref()
                     .map(|b| merged_node_properties(&b.records, store))
@@ -706,6 +738,10 @@ async fn run_query(
             // A stage of the request's trace (#2077).
             state.store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
         };
+        // Measured after the span closes, so the wait in `stats` is the wait
+        // the trace shows (#2079).
+        stats.lock_wait_ms = ms(asked.elapsed());
+        let started = std::time::Instant::now();
         // The result cache is keyed on the statement text, which does not say which
         // dialect it was read under, so a GQL request must not be served from it until
         // the key carries the dialect. Bypassing is the conservative half of that:
@@ -733,6 +769,7 @@ async fn run_query(
                 requested_dialect(&payload),
             )
         };
+        stats.elapsed_ms = ms(started.elapsed());
         // Read while the guard is still held: taken afterwards it could name a
         // version this result was not computed against, which is worse than
         // no provenance at all.
@@ -744,7 +781,7 @@ async fn run_query(
         (result, props)
     };
 
-    render_query_result(result, &full_props, served_from_cache, snapshot_version)
+    render_query_result(result, &full_props, served_from_cache, snapshot_version, stats)
 }
 
 /// The media type a client sends in `Accept` to ask for a streamed result.
@@ -1025,6 +1062,7 @@ async fn query_in_transaction(
         .statement_is_write(&payload.query)
         .unwrap_or(false);
     let time_limit = state.query_time_limit(&payload.graph);
+    let started = std::time::Instant::now();
     let result = if is_write {
         state.engine.execute_mut_with_params_within(
             &payload.query,
@@ -1038,12 +1076,13 @@ async fn query_in_transaction(
             .engine
             .execute_with_params_within(&payload.query, store, params, time_limit)
     };
+    let stats = QueryStats { elapsed_ms: ms(started.elapsed()), is_write, ..QueryStats::default() };
     let props = result
         .as_ref()
         .map(|b| merged_node_properties(&b.records, store))
         .unwrap_or_default();
     let version = store.current_version;
-    render_query_result(result, &props, false, version)
+    render_query_result(result, &props, false, version, stats)
 }
 
 /// One result row as JSON, in column order.
@@ -1184,9 +1223,11 @@ fn render_query_result(
     full_props: &HashMap<u64, HashMap<String, PropertyValue>>,
     served_from_cache: bool,
     snapshot_version: u64,
+    stats: QueryStats,
 ) -> axum::response::Response {
     match result {
         Ok(batch) => {
+            let stats = QueryStats { rows: batch.records.len(), ..stats };
             let mut nodes = HashMap::new();
             let mut edges = HashMap::new();
             let mut records = Vec::new();
@@ -1222,6 +1263,7 @@ fn render_query_result(
                 notifications: crate::query::executor::operator::notifications::take(),
                 snapshot_version,
                 plan_hash: batch.plan_hash.map(|h| format!("{h:016x}")),
+                stats,
             })
             .into_response()
         }
