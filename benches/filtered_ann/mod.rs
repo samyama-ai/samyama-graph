@@ -3,6 +3,8 @@
 #![allow(dead_code)]
 use super::ann_common::{Metric, Vectors};
 
+pub mod graph;
+
 #[derive(Clone, Copy, Debug)]
 pub enum Correlation {
     Positive,
