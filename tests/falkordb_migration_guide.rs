@@ -175,7 +175,6 @@ async fn falkordb_only_commands_are_unknown_and_explain_works_as_a_prefix() {
         "GRAPH.PROFILE",
         "GRAPH.CONFIG",
         "GRAPH.CONSTRAINT",
-        "GRAPH.SLOWLOG",
         "GRAPH.COPY",
         "GRAPH.INFO",
         "GRAPH.MEMORY",

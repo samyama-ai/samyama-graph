@@ -66,7 +66,8 @@ is now refused ([#1897](https://github.com/samyama-ai/samyama-graph/issues/1897)
 | `--compact` | typed compact reply | **refused**: read as an odd number of parameter arguments |
 | `GRAPH.RO_QUERY` with a write | refused | refused |
 | `GRAPH.EXPLAIN`, `GRAPH.PROFILE` | commands | `unknown command`; write `EXPLAIN …` or `PROFILE …` **inside** `GRAPH.QUERY` instead, which returns the plan as a `plan` column |
-| `GRAPH.CONFIG`, `GRAPH.CONSTRAINT`, `GRAPH.SLOWLOG`, `GRAPH.COPY`, `GRAPH.INFO`, `GRAPH.MEMORY` | commands | `unknown command`. Constraints are Cypher here: `CREATE CONSTRAINT … REQUIRE p.name IS UNIQUE` |
+| `GRAPH.SLOWLOG default` and `GRAPH.SLOWLOG default RESET` | commands | the same commands, same reply shape: entries `[timestamp (s), command, query, duration (ms)]`, newest first, and `OK`. Also `GRAPH.SLOWLOG GET [count]`, `LEN`, `RESET` (Redis `SLOWLOG` style, with row counts). Admin only once `--auth-file` is set. The log records statements slower than `SLOW_QUERY_MS` |
+| `GRAPH.CONFIG`, `GRAPH.CONSTRAINT`, `GRAPH.COPY`, `GRAPH.INFO`, `GRAPH.MEMORY` | commands | `unknown command`. Constraints are Cypher here: `CREATE CONSTRAINT … REQUIRE p.name IS UNIQUE` |
 | `GRAPH.LIST` | every graph key | `["default"]` |
 | `AUTH` | Redis `AUTH <password>` or `AUTH <user> <password>` | only `AUTH <user> <secret>`, once `--auth-file` is set; the one-argument form is refused. See [DATA-HANDLING.md](DATA-HANDLING.md) |
 | Several statements as one unit | Redis `MULTI` … `EXEC` queues them | `MULTI` is an unknown command; use `GRAPH.BEGIN`, then `GRAPH.COMMIT` or `GRAPH.ROLLBACK` on the same connection. See [ACID-GUARANTEES.md](ACID-GUARANTEES.md) |
