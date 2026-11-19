@@ -4,7 +4,8 @@
 
 use crate::graph::NodeId;
 use crate::vector::index::graph_io::GRAPH_SUFFIXES;
-use crate::vector::index::{HnswParams, Quantization};
+use crate::vector::index::ivf::PARTITION_SUFFIX;
+use crate::vector::index::{HnswParams, IndexKind, Quantization};
 use crate::vector::index::{VectorIndex, DistanceMetric, VectorError, VectorResult};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -100,11 +101,37 @@ impl VectorIndexManager {
         quantization: Quantization,
         params: HnswParams,
     ) -> VectorResult<()> {
+        self.create_index_with_kind(
+            name,
+            label,
+            property_key,
+            dimensions,
+            metric,
+            quantization,
+            params,
+            IndexKind::Hnsw,
+        )
+    }
+
+    /// Create a named index of the given kind (#1975).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_index_with_kind(
+        &self,
+        name: Option<&str>,
+        label: &str,
+        property_key: &str,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: Quantization,
+        params: HnswParams,
+        kind: IndexKind,
+    ) -> VectorResult<()> {
         params.validate().map_err(VectorError::IndexError)?;
+        kind.validate().map_err(VectorError::IndexError)?;
         self.insert_index(
             label,
             property_key,
-            VectorIndex::with_params(dimensions, metric, quantization, params),
+            VectorIndex::with_kind(dimensions, metric, quantization, params, kind),
         );
         if let Some(name)= name.map(str::trim).filter(|n| !n.is_empty()) {
             self.names.write().unwrap().insert(
@@ -178,6 +205,20 @@ impl VectorIndexManager {
         match self.get_index(label, property_key) {
             Some(index) => {
                 index.write().unwrap().set_params(params);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Change an index's kind (#1975), rebuilding it from the vectors it
+    /// holds when the kind or `nlist` changes. Returns `false` when there is
+    /// no such index.
+    pub fn set_kind(&self, label: &str, property_key: &str, kind: IndexKind) -> VectorResult<bool> {
+        kind.validate().map_err(VectorError::IndexError)?;
+        match self.get_index(label, property_key) {
+            Some(index) => {
+                index.write().unwrap().set_kind(kind);
                 Ok(true)
             }
             None => Ok(false),
@@ -367,6 +408,15 @@ impl VectorIndexManager {
                     ef: params.ef,
                 });
             }
+            // Likewise the kind, when it is not HNSW (#1975).
+            let kind = index.kind();
+            if kind != IndexKind::Hnsw {
+                out.push(IndexDefinition::VectorKind {
+                    label: key.label.clone(),
+                    property: key.property_key.clone(),
+                    kind,
+                });
+            }
         }
         out
     }
@@ -543,12 +593,13 @@ impl VectorIndexManager {
         // was honoured -- the caller asked for half the memory, got an f32
         // index, and was told the statement succeeded (#1385).
         // So do the HNSW parameters (#1971), for the same reason.
-        let (dims, metric, quantization, params) = {
+        // And the kind (#1975).
+        let (dims, metric, quantization, params, kind) = {
             let indices = self.indices.read().unwrap();
             match indices.get(&key) {
                 Some(idx_lock) => {
                     let idx = idx_lock.read().unwrap();
-                    (idx.dimensions(), idx.metric(), idx.quantization(), idx.params())
+                    (idx.dimensions(), idx.metric(), idx.quantization(), idx.params(), idx.kind())
                 }
                 None => return Ok(()), // no index registered for this key — nothing to do
             }
@@ -557,13 +608,15 @@ impl VectorIndexManager {
         // Skip individual vectors that don't match the index dimension rather than
         // aborting the whole rebuild — a single malformed embedding must not leave the
         // entire index empty (which then returns 0 results / panics on search).
-        let mut new_index = VectorIndex::with_params(dims, metric, quantization, params);
+        let mut new_index = VectorIndex::with_kind(dims, metric, quantization, params, kind);
         let mut skipped = 0usize;
         for (node_id, vec) in vectors {
-            if new_index.add(*node_id, vec).is_err() {
+            if new_index.add_untrained(*node_id, vec).is_err() {
                 skipped += 1;
             }
         }
+        // An IVF index trains once, on everything, rather than as it grew.
+        new_index.train_if_due();
         if skipped > 0 {
             eprintln!(
                 "[vector] rebuild {}.{}: indexed {} vectors, skipped {} with mismatched dimension (expected {})",
@@ -668,6 +721,7 @@ impl VectorIndexManager {
             index.dump(&index_path)?;
             if graphs {
                 index.dump_graph(path, &index_filename)?;
+                index.dump_partition(path, &index_filename)?;
             }
 
             let mut entry = serde_json::json!({
@@ -677,6 +731,7 @@ impl VectorIndexManager {
                 "metric": index.metric(),
                 "quantization": index.quantization(),
                 "params": index.params(),
+                "kind": index.kind(),
                 "filename": index_filename,
             });
             // Written only when known, so an index whose model is unknown
@@ -748,11 +803,26 @@ impl VectorIndexManager {
                 Some(q) => serde_json::from_value(q.clone()).map_err(|e| VectorError::IndexError(e.to_string()))?,
                 None => Quantization::None,
             };
+            // Optional: metadata written before #1975 has no `kind`, and its
+            // index is HNSW.
+            let kind: IndexKind = match item.get("kind") {
+                Some(v) => serde_json::from_value(v.clone()).map_err(|e| VectorError::IndexError(e.to_string()))?,
+                None => IndexKind::Hnsw,
+            };
             let verified = graphs.is_some_and(|ok| {
-                GRAPH_SUFFIXES.iter().all(|s| ok.contains(&format!("{filename}{s}")))
+                if kind.is_ivf() {
+                    ok.contains(&format!("{filename}{PARTITION_SUFFIX}"))
+                } else {
+                    GRAPH_SUFFIXES.iter().all(|s| ok.contains(&format!("{filename}{s}")))
+                }
             });
             let reloaded = if verified {
-                match VectorIndex::load_graph(path, filename, dimensions, metric, quantization, params) {
+                let loaded = if kind.is_ivf() {
+                    VectorIndex::load_partition(path, filename, dimensions, metric, quantization, params, kind)
+                } else {
+                    VectorIndex::load_graph(path, filename, dimensions, metric, quantization, params)
+                };
+                match loaded {
                     Ok(index) => Some(index),
                     Err(e) => {
                         eprintln!("[vector] {filename}: {e}; rebuilding from the vector list");
@@ -768,7 +838,7 @@ impl VectorIndexManager {
                     index
                 }
                 None => {
-                    let index = VectorIndex::load_with_params(&index_path, dimensions, metric, quantization, params)?;
+                    let index = VectorIndex::load_with_kind(&index_path, dimensions, metric, quantization, params, kind)?;
                     report.rebuilt += 1;
                     report.vectors_reinserted += index.len();
                     index
@@ -1015,6 +1085,11 @@ fn widen(
     let len = index.len();
     let asked = std::cell::RefCell::new(HashMap::new());
     let keep = |id: NodeId| *asked.borrow_mut().entry(id).or_insert_with(|| keep(id));
+    // An IVF index applies the filter as it scans its lists, and probes more
+    // of them until `k` pass (#1975); `ef` is this query's `nprobe`.
+    if index.kind().is_ivf() {
+        return index.search_ivf_where(query, k, ef, &keep);
+    }
     // No shortcut for an empty index or `k == 0`: the search itself runs at
     // least once, so its checks -- a query of the wrong dimension -- still
     // refuse.
