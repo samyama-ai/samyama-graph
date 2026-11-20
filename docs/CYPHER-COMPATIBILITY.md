@@ -85,7 +85,11 @@ One thing, verified:
 | | `RETURN` / `RETURN DISTINCT` | ✅ | |
 | | `ORDER BY` | ✅ | |
 | | `SKIP` / `LIMIT` | ✅ | |
-| | `EXPLAIN` | ✅ | |
+| | `EXPLAIN` | ✅ | A query with `USING` hints gets a `--- Planner hints ---` section naming each hint and what it did (#2253) |
+| | `USING INDEX n:Label(prop)` / `USING INDEX SEEK …` | ✅ | Neo4j's spelling, after the `MATCH` / `OPTIONAL MATCH` pattern and before its `WHERE`. Starts the pattern at `n` with an `IndexScan` on that index, moving the start of a path if need be. **Mandatory**, as in Neo4j: no such index, no predicate on `n.prop` the index can answer, a variable no pattern binds, or one without that label is an error naming the hint, never a silently dropped hint (#1675, `tests/planner_hints.rs`) |
+| | `USING SCAN n:Label` | ✅ | Starts the pattern at `n` with a label `NodeScan`, bypassing `id()` lookups and every index. Mandatory, like `USING INDEX`. A hint chooses the plan only: the predicates still filter, so the answer is the unhinted one |
+| | `USING JOIN ON n, …` | ✅ | Checked (each variable must be bound by a pattern) and accepted: comma-separated patterns are already joined on their shared variables, so there is no join point to choose |
+| | `ANALYZE` / `ANALYZE :Label` | ✅ | Not openCypher. Recomputes the cardinality and property statistics the planner estimates from, and returns one row: `nodes, edges, labels, edge_types, cache_was_stale`, or for `:Label` `label, nodes, properties, cache_was_stale`. Statistics are one cache for the whole graph, so the label form recomputes the same set and reports that label's part; an absent label reports 0. Every write already invalidates the cache, so this is a diagnostic that also forces recomputation, not a repair for staleness (#1446, `tests/analyze_refreshes_statistics.rs`) |
 | **Write** | `CREATE` | ✅ | |
 | | `DELETE` / `DETACH DELETE` | ✅ | |
 | | `SET` / `REMOVE` | ✅ | |
