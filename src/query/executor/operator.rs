@@ -3139,8 +3139,9 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint",
     "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
     "tostringornull", "toupper", "touppercase", "trim", "type", "valuetype",
-    "vector.distance", "vector.similarity.cosine", "vector.similarity.euclidean",
-    "vector.similarity.maxsim", "vector.similarity.sparsedot", "vector_distance",
+    "vector.distance", "vector.muvera.encode", "vector.similarity.cosine",
+    "vector.similarity.euclidean", "vector.similarity.maxsim", "vector.similarity.sparsedot",
+    "vector_distance",
 ];
 
 /// Is `name` a function this engine implements?
@@ -3334,6 +3335,7 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("vector.similarity.euclidean", 2),
     ("vector.similarity.maxsim", 2),
     ("vector.similarity.sparsedot", 2),
+    ("vector.muvera.encode", 2),
     ("vector.distance", 3),
     ("vector_distance", 3),
 ];
@@ -4928,6 +4930,69 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let who = "vector.similarity.sparseDot";
             let (a, b) = (sparse_vector_arg(&args[0], who)?, sparse_vector_arg(&args[1], who)?);
             Ok(Value::Property(PropertyValue::Float(sparse_dot(&a, &b))))
+        }
+        // A MUVERA fixed-dimensional encoding of a multi-vector (#1978): one
+        // vector whose inner product with another side's encoding estimates
+        // MaxSim, so a multi-vector can go in an ordinary vector index for
+        // candidate generation. Rerank with `vector.similarity.maxSim`.
+        "vector.muvera.encode" => {
+            let who = "vector.muvera.encode";
+            let tokens = multi_vector_arg(&args[0], who)?;
+            use crate::vector::muvera::{encode, Params, Role};
+            let role = match &args[1] {
+                Value::Property(PropertyValue::String(r)) => match r.to_ascii_uppercase().as_str() {
+                    "QUERY" => Role::Query,
+                    "DOCUMENT" => Role::Document,
+                    other => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "`{who}()`: unknown role '{other}'; expected QUERY or DOCUMENT"
+                        )))
+                    }
+                },
+                _ => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{who}()` takes the role as a string, QUERY or DOCUMENT"
+                    )))
+                }
+            };
+            let mut params = Params::default();
+            match args.get(2) {
+                None => {}
+                Some(Value::Property(PropertyValue::Map(options))) => {
+                    for (key, value) in options {
+                        let n = match value {
+                            PropertyValue::Integer(i) if *i >= 0 => *i as u64,
+                            _ => {
+                                return Err(ExecutionError::bad_argument(format!(
+                                    "`{who}()`: option `{key}` must be a non-negative integer"
+                                )))
+                            }
+                        };
+                        let small = || usize::try_from(n).unwrap_or(usize::MAX);
+                        match key.as_str() {
+                            "bits" => params.bits = small(),
+                            "projection" => params.projection = small(),
+                            "repetitions" => params.repetitions = small(),
+                            "seed" => params.seed = n,
+                            other => {
+                                return Err(ExecutionError::bad_argument(format!(
+                                    "`{who}()`: unknown option `{other}`; expected bits, \
+                                     projection, repetitions or seed"
+                                )))
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{who}()` takes its options as a map, such as \
+                         {{bits: 4, projection: 8, repetitions: 8, seed: 0}}"
+                    )))
+                }
+            }
+            let encoded = encode(&tokens, role, &params)
+                .map_err(|e| ExecutionError::bad_argument(format!("`{who}()`: {e}")))?;
+            Ok(Value::Property(PropertyValue::Vector(encoded)))
         }
         // A distance, lower is better, by the metric named in the third
         // argument -- Neo4j's `vector_distance`, under both spellings.
