@@ -143,8 +143,9 @@ fulltext_one = _{ "(" ~ variable ~ "." ~ property_key ~ ")" }
 drop_fulltext_index_stmt = { ^"DROP" ~ ^"FULLTEXT" ~ ^"INDEX" ~ index_name }
 
 show_indexes_stmt = { ^"SHOW" ~ (^"INDEXES" | ^"INDEX") }
-// ANALYZE -- recompute the planner statistics (LANG-13).
-analyze_stmt = { ^"ANALYZE" }
+// ANALYZE -- recompute the planner statistics (LANG-13). `ANALYZE :Label`
+// recomputes the same statistics and reports the part that describes Label.
+analyze_stmt = { ^"ANALYZE" ~ (":" ~ label)? }
 show_constraints_stmt = { ^"SHOW" ~ ^"CONSTRAINTS" }
 create_constraint_stmt = { ^"CREATE" ~ ^"CONSTRAINT" ~ (constraint_modern | constraint_legacy) }
 // Neo4j 4+/5 form. The optional name must not swallow the `IF` or `FOR` keyword, and is

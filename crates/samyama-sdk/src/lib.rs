@@ -44,6 +44,7 @@ pub mod client;
 pub struct ReadmeDoctests;
 
 pub mod embedded;
+pub mod env;
 pub mod error;
 pub mod models;
 pub mod remote;

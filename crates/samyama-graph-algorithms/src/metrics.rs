@@ -23,35 +23,8 @@
 //! computed over only the reachable part is a smaller number that looks like
 //! a real one.
 
-use std::collections::VecDeque;
-
 use crate::common::{GraphView, NodeId};
-
-/// Hop distance from `source` to every node, `-1` where unreachable.
-fn bfs(view: &GraphView, source: usize, bidirectional: bool) -> Vec<i64> {
-    let n = view.node_count;
-    let mut dist = vec![-1i64; n];
-    dist[source] = 0;
-    let mut q = VecDeque::new();
-    q.push_back(source);
-    while let Some(v) = q.pop_front() {
-        let mut walk = |w: usize, dist: &mut Vec<i64>, q: &mut VecDeque<usize>| {
-            if dist[w] < 0 {
-                dist[w] = dist[v] + 1;
-                q.push_back(w);
-            }
-        };
-        for &w in view.successors(v) {
-            walk(w, &mut dist, &mut q);
-        }
-        if bidirectional {
-            for &w in view.predecessors(v) {
-                walk(w, &mut dist, &mut q);
-            }
-        }
-    }
-    dist
-}
+use crate::frontier::{self, Direction};
 
 /// Each node's distance to the furthest node it can reach, or `None` when it
 /// cannot reach every node.
@@ -60,14 +33,15 @@ fn bfs(view: &GraphView, source: usize, bidirectional: bool) -> Vec<i64> {
 /// number indistinguishable from a real eccentricity on a connected graph.
 pub fn eccentricity(view: &GraphView, bidirectional: bool) -> Vec<Option<i64>> {
     let n = view.node_count;
+    let dir = Direction::undirected_if(bidirectional);
+    let mut bfs = frontier::Bfs::new(n);
     (0..n)
         .map(|v| {
-            let d = bfs(view, v, bidirectional);
-            if d.iter().any(|&x| x < 0) {
-                None
-            } else {
-                Some(d.into_iter().max().unwrap_or(0))
-            }
+            bfs.distances(view, v, dir);
+            // Discovery order is depth order, so the last node reached is the
+            // furthest.
+            (bfs.reached().len() == n)
+                .then(|| bfs.reached().last().and_then(|&u| bfs.depth(u)).unwrap_or(0) as i64)
         })
         .collect()
 }
@@ -99,15 +73,11 @@ pub fn radius(view: &GraphView, bidirectional: bool) -> Option<i64> {
 pub fn average_neighbour_degree(view: &GraphView, bidirectional: bool) -> Vec<f64> {
     let n = view.node_count;
     let nb = |i: usize| undirected_neighbour_set(view, i, bidirectional);
-    let deg: Vec<usize> = (0..n).map(|i| nb(i).len()).collect();
-    (0..n)
-        .map(|i| {
-            let ns = nb(i);
-            if ns.is_empty() {
-                return 0.0;
-            }
-            ns.iter().map(|&w| deg[w] as f64).sum::<f64>() / ns.len() as f64
-        })
+    let deg = frontier::aggregate_neighbours(n, nb, |_| 0usize, |count, _| count + 1);
+    // Neighbour degrees summed in neighbour order, then divided.
+    frontier::aggregate_neighbours(n, nb, |_| (0.0f64, 0usize), |(sum, count), w| (sum + deg[w] as f64, count + 1))
+        .into_iter()
+        .map(|(sum, count)| if count == 0 { 0.0 } else { sum / count as f64 })
         .collect()
 }
 
@@ -125,15 +95,17 @@ pub fn average_neighbour_degree(view: &GraphView, bidirectional: bool) -> Vec<f6
 /// centrality asks how many edges touch a node, a shape metric asks how many
 /// distinct nodes it sits beside. Both were checked against NetworkX and the
 /// conventions are its, not ours.
+///
+/// **Not deduplicated when directed**: there each edge is a neighbour, a
+/// parallel pair counts twice, and only a self-loop is dropped. That is the
+/// convention these metrics were checked against, kept as it was when they
+/// moved onto `frontier` (#1695).
 fn undirected_neighbour_set(view: &GraphView, i: usize, bidirectional: bool) -> Vec<usize> {
-    let mut v: Vec<usize> = view.successors(i).to_vec();
     if bidirectional {
-        v.extend_from_slice(view.predecessors(i));
-        v.sort_unstable();
-        v.dedup();
+        frontier::distinct_neighbours(view, i, Direction::Both)
+    } else {
+        frontier::neighbours(view, i, Direction::Out).filter(|&u| u != i).collect()
     }
-    v.retain(|&u| u != i);
-    v
 }
 
 /// Degree assortativity: the Pearson correlation of degree across edges.

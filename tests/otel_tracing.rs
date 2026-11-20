@@ -111,6 +111,12 @@ async fn a_read_is_traced_stage_by_stage_under_the_callers_trace() {
     assert_eq!(execute.parent_span_id, me);
     let plan = out.one("samyama.query.plan");
     assert_eq!(plan.parent_span_id, execute.span_context.span_id(), "planning is part of executing");
+    // The planner's estimate and the plan's identity ride on the span, so a
+    // slow trace can be read against what the planner expected.
+    assert!(matches!(attr(&plan, "estimated_rows"), Some(Value::F64(r)) if r >= 0.0), "{plan:?}");
+    assert!(matches!(attr(&plan, "estimated_cost"), Some(Value::F64(c)) if c >= 0.0), "{plan:?}");
+    let hash = attr(&plan, "plan_hash").map(|v| v.as_str().into_owned()).unwrap_or_default();
+    assert!(hash.len() == 16 && hash.chars().all(|c| c.is_ascii_hexdigit()), "plan_hash {hash:?}");
 
     for s in out.all() {
         assert_eq!(s.span_context.trace_id(), request.span_context.trace_id(), "{} left the trace", s.name);
@@ -153,6 +159,30 @@ async fn a_write_traces_the_writers_lock_and_the_disk_write() {
     let persist = out.one("samyama.storage.persist");
     assert_eq!(persist.parent_span_id, me);
     assert!(matches!(attr(&persist, "mutations"), Some(Value::I64(n)) if n >= 1), "{persist:?}");
+    assert!(matches!(attr(&persist, "entities"), Some(Value::I64(n)) if n >= 1), "{persist:?}");
+}
+
+#[tokio::test]
+async fn a_model_call_is_a_span_with_its_provider_model_and_outcome() {
+    use samyama::nlq::client::NLQClient;
+    use samyama::persistence::tenant::{LLMProvider, NLQConfig};
+    let (out, _sub) = traced();
+    let client = NLQClient::new(&NLQConfig {
+        enabled: true,
+        provider: LLMProvider::Mock,
+        model: "mock-model".into(),
+        api_key: None,
+        api_base_url: None,
+        system_prompt: None,
+    })
+    .unwrap();
+    client.complete("who knows alice?").await.unwrap();
+
+    let call = out.one("samyama.ai.llm_call");
+    assert_eq!(attr(&call, "provider"), Some(Value::from("Mock")));
+    assert_eq!(attr(&call, "model"), Some(Value::from("mock-model")));
+    assert_eq!(attr(&call, "failed"), Some(Value::from(false)));
+    assert!(matches!(attr(&call, "latency_ms"), Some(Value::I64(ms)) if ms >= 0), "{call:?}");
 }
 
 // ── RESP ────────────────────────────────────────────────────────────────────
