@@ -40,6 +40,11 @@ pub enum SamyamaError {
     /// Persistence error
     #[error("Persistence error: {0}")]
     PersistenceError(String),
+
+    /// A rollback refused because another writer committed changes since the
+    /// checkpoint; carries the entities and the diff (#2093)
+    #[error("{0}")]
+    RollbackConflict(Box<samyama::graph::RollbackConflict>),
 }
 
 pub type SamyamaResult<T> = Result<T, SamyamaError>;

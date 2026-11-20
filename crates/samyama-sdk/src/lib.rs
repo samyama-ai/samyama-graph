@@ -68,6 +68,7 @@ pub use samyama::graph::{
     GraphStore, Node, Edge, NodeId, EdgeId, EdgeType, Label,
     PropertyValue, PropertyMap,
     GraphError, GraphResult,
+    GraphDiff, RollbackStats, RollbackConflict, PropertyChange, LabelChange, EntityRef,
 };
 pub use samyama::query::{QueryEngine, RecordBatch, CacheStats};
 
