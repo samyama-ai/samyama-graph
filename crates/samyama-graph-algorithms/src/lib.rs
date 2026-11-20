@@ -8,6 +8,7 @@ mod gpu_parity_coverage;
 #[cfg(all(test, feature = "gpu"))]
 mod gpu_parity_tests;
 pub mod pagerank;
+pub mod frontier;
 pub mod progress;
 pub mod community;
 pub mod pathfinding;
@@ -92,3 +93,5 @@ pub use embeddings::{fastrp, node2vec, FastRpConfig, Node2VecConfig};
 #[path = "lib_cov_tests.rs"]
 mod cov_tests;
 pub use split::{assign_groups, entity_leaks, group_leaks, split_names, time_leaks, time_split, GroupLeak};
+#[cfg(test)]
+mod frontier_parity_tests;

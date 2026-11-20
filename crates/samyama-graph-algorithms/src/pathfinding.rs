@@ -3,7 +3,9 @@
 //! BFS and Dijkstra. Counted towards ALGO-01 (algorithms callable from Cypher).
 
 use super::common::{GraphView, NodeId};
-use std::collections::{HashMap, VecDeque, BinaryHeap};
+use std::collections::{HashMap, BinaryHeap};
+
+use crate::frontier::{self, Direction, Visit};
 use std::cmp::Ordering;
 
 /// Result of a pathfinding algorithm
@@ -23,44 +25,36 @@ pub fn bfs(
 ) -> Option<PathResult> {
     let source_idx = *view.node_to_index.get(&source)?;
     let target_idx = *view.node_to_index.get(&target)?;
-
-    let mut queue = VecDeque::new();
-    let mut visited = HashMap::new(); // index -> parent_index
-    
-    queue.push_back(source_idx);
-    visited.insert(source_idx, None);
-
-    while let Some(current_idx) = queue.pop_front() {
-        if current_idx == target_idx {
-            // Reconstruct path
-            let mut path = Vec::new();
-            let mut curr = Some(target_idx);
-            while let Some(idx) = curr {
-                path.push(view.index_to_node[idx]);
-                if let Some(parent) = visited.get(&idx) {
-                    curr = *parent;
-                } else {
-                    curr = None;
-                }
-            }
-            path.reverse();
-            return Some(PathResult {
-                source,
-                target,
-                cost: (path.len() - 1) as f64,
-                path,
-            });
-        }
-
-        for &next_idx in view.successors(current_idx) {
-            if !visited.contains_key(&next_idx) {
-                visited.insert(next_idx, Some(current_idx));
-                queue.push_back(next_idx);
-            }
-        }
+    let path_of = |path: Vec<NodeId>| PathResult { source, target, cost: (path.len() - 1) as f64, path };
+    if source_idx == target_idx {
+        return Some(path_of(vec![source]));
     }
 
-    None
+    // Each node's parent is the node that reached it first; the walk stops
+    // the moment the target is reached.
+    let mut parent = vec![usize::MAX; view.node_count];
+    let mut bfs = frontier::Bfs::new(view.node_count);
+    let found = bfs.walk(&[source_idx], |u, _| frontier::neighbours(view, u, Direction::Out), |e| {
+        if e.discovered {
+            parent[e.to] = e.from;
+        }
+        if e.discovered && e.to == target_idx {
+            Visit::Stop
+        } else {
+            Visit::Continue
+        }
+    });
+    if !found {
+        return None;
+    }
+    let mut path = vec![view.index_to_node[target_idx]];
+    let mut at = target_idx;
+    while at != source_idx {
+        at = parent[at];
+        path.push(view.index_to_node[at]);
+    }
+    path.reverse();
+    Some(path_of(path))
 }
 
 /// State for Dijkstra priority queue
@@ -225,46 +219,33 @@ pub fn bfs_all_shortest_paths(
         }];
     }
 
-    // BFS tracking all parents for each discovered node
+    // Every parent at the shortest distance. Nodes at or beyond the target's
+    // distance are not expanded: nothing past it can be on a shortest path.
     let mut parents: HashMap<usize, Vec<usize>> = HashMap::new();
     let mut distance: HashMap<usize, usize> = HashMap::new();
-    let mut queue = VecDeque::new();
-
-    queue.push_back(source_idx);
-    distance.insert(source_idx, 0);
-
-    let mut target_distance: Option<usize> = None;
-
-    while let Some(current) = queue.pop_front() {
-        let current_dist = distance[&current];
-
-        // Stop if we've gone past the target distance
-        if let Some(td) = target_distance {
-            if current_dist >= td {
-                continue;
-            }
-        }
-
-        for &next_idx in view.successors(current) {
-            let next_dist = current_dist + 1;
-
-            if let Some(&existing_dist) = distance.get(&next_idx) {
-                if next_dist == existing_dist {
-                    // Same distance — add as additional parent
-                    parents.entry(next_idx).or_default().push(current);
+    let target_distance: std::cell::Cell<Option<usize>> = std::cell::Cell::new(None);
+    let mut bfs = frontier::Bfs::new(view.node_count);
+    bfs.walk(
+        &[source_idx],
+        |u, depth| {
+            let expand = target_distance.get().is_none_or(|td| depth < td);
+            frontier::neighbours(view, u, Direction::Out).filter(move |_| expand)
+        },
+        |e| {
+            if e.discovered {
+                parents.insert(e.to, vec![e.from]);
+                if e.to == target_idx {
+                    target_distance.set(Some(e.to_depth));
                 }
-                // Longer path — skip
-            } else {
-                // First time reaching this node
-                distance.insert(next_idx, next_dist);
-                parents.insert(next_idx, vec![current]);
-                queue.push_back(next_idx);
-
-                if next_idx == target_idx {
-                    target_distance = Some(next_dist);
-                }
+            } else if e.is_shortest() {
+                // Same distance: another parent.
+                parents.entry(e.to).or_default().push(e.from);
             }
-        }
+            Visit::Continue
+        },
+    );
+    for &v in bfs.reached() {
+        distance.insert(v, bfs.depth(v).expect("a reached node has a depth"));
     }
 
     // If target not reached, return empty

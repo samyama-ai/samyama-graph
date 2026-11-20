@@ -150,7 +150,8 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     read("algo.temporalShortestPath", &[], Temporal, &["arrival", "path", "times"]),
     read("algo.symptomExplanation", &[], Temporal, &["node", "explains", "onset", "path", "times"]),
     // Embeddings and dimensionality reduction. fastRP and node2vec write the
-    // vector as a node property (ML-06); see `execute_fastrp`/`execute_node2vec`
+    // vector as a node property (ML-06), or stream it on `write: false`
+    // (#1736); see `execute_fastrp`/`execute_node2vec`
     // for what each does and does not do.
     read("algo.pca", &[], Embedding, &["node", "projection"]),
     write("algo.fastRP", Embedding, &["node", "embedding"]),
@@ -237,6 +238,35 @@ pub struct Param {
     /// A second spelling the engine also accepts for this key.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub also: Option<&'static str>,
+    /// The smallest value the engine accepts as given, where it enforces one
+    /// (#2013). Absent means none is enforced, not that any value is sensible.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bound: Option<Bound>,
+}
+
+/// What the engine does with a value below a parameter's minimum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BelowMin {
+    /// The call fails with an error naming the parameter.
+    Refused,
+    /// The value is raised to the minimum and the call runs.
+    Clamped,
+    /// The value is replaced by the default and the call runs.
+    Replaced,
+}
+
+/// A lower bound the engine enforces on a numeric parameter (#2013).
+///
+/// Only bounds the code checks are listed, each verified by calling the
+/// algorithm below it (`every_listed_bound_is_enforced`). Every one is a
+/// minimum; no parameter has an enforced maximum.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Bound {
+    pub min: f64,
+    /// `false` when `min` itself is out of range (`returnFactor > 0`).
+    pub inclusive: bool,
+    pub below: BelowMin,
 }
 
 use ParamDefault as D;
@@ -244,23 +274,35 @@ use ParamType as T;
 
 /// A positional argument.
 const fn pos(name: &'static str, ty: ParamType, required: bool) -> Param {
-    Param { name, kind: ParamKind::Positional, ty, required, default: None, also: None }
+    Param { name, kind: ParamKind::Positional, ty, required, default: None, also: None, bound: None }
 }
 
 /// An optional config-map key with a default.
 const fn key(name: &'static str, ty: ParamType, default: ParamDefault) -> Param {
-    Param { name, kind: ParamKind::Config, ty, required: false, default: Some(default), also: None }
+    Param { name, kind: ParamKind::Config, ty, required: false, default: Some(default), also: None, bound: None }
 }
 
 /// An optional config-map key that is simply not applied when left out.
 const fn opt(name: &'static str, ty: ParamType) -> Param {
-    Param { name, kind: ParamKind::Config, ty, required: false, default: None, also: None }
+    Param { name, kind: ParamKind::Config, ty, required: false, default: None, also: None, bound: None }
 }
 
 /// A config key read under a second spelling as well.
 const fn aka(p: Param, also: &'static str) -> Param {
     Param { also: Some(also), ..p }
 }
+
+/// `p`, which the engine holds at `min` or above.
+const fn at_least(p: Param, min: f64, below: BelowMin) -> Param {
+    Param { bound: Some(Bound { min, inclusive: true, below }), ..p }
+}
+
+/// `p`, which the engine holds strictly above `min`.
+const fn above(p: Param, min: f64, below: BelowMin) -> Param {
+    Param { bound: Some(Bound { min, inclusive: false, below }), ..p }
+}
+
+use BelowMin as B;
 
 const LABEL: Param = opt("label", T::String);
 const EDGE_TYPE: Param = opt("edgeType", T::String);
@@ -280,8 +322,8 @@ const PATH_ENUM: &[Param] = &[
     EDGE_TYPE,
     opt("weightProperty", T::String),
     opt("heuristicProperty", T::String),
-    key("k", T::Integer, D::Integer(3)),
-    key("limit", T::Integer, D::Integer(1000)),
+    at_least(key("k", T::Integer, D::Integer(3)), 1.0, B::Clamped),
+    at_least(key("limit", T::Integer, D::Integer(1000)), 1.0, B::Clamped),
 ];
 
 /// The arguments each catalogued algorithm reads, by catalogue name.
@@ -295,24 +337,24 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         key("damping", T::Float, D::Float(0.85)),
         key("iterations", T::Integer, D::Integer(20)),
     ]),
-    ("algo.articleRank", &[LABEL, EDGE_TYPE, key("dampingFactor", T::Float, D::Float(0.85)), key("iterations", T::Integer, D::Integer(20))]),
+    ("algo.articleRank", &[LABEL, EDGE_TYPE, key("dampingFactor", T::Float, D::Float(0.85)), at_least(key("iterations", T::Integer, D::Integer(20)), 1.0, B::Clamped)]),
     ("algo.personalizedPageRank", &[
         pos("sources", T::List, false),
         LABEL,
         EDGE_TYPE,
         key("dampingFactor", T::Float, D::Float(0.85)),
-        key("iterations", T::Integer, D::Integer(100)),
+        at_least(key("iterations", T::Integer, D::Integer(100)), 1.0, B::Clamped),
     ]),
     ("algo.katz", &[
         LABEL,
         EDGE_TYPE,
         key("alpha", T::Float, D::Float(0.1)),
         key("beta", T::Float, D::Float(1.0)),
-        key("iterations", T::Integer, D::Integer(1000)),
+        at_least(key("iterations", T::Integer, D::Integer(1000)), 1.0, B::Clamped),
         key("tolerance", T::Float, D::Float(1e-6)),
     ]),
-    ("algo.hits", &[LABEL, EDGE_TYPE, key("iterations", T::Integer, D::Integer(500)), key("tolerance", T::Float, D::Float(1e-8))]),
-    ("algo.voteRank", &[pos("k", T::Integer, false), LABEL, EDGE_TYPE, key("k", T::Integer, D::Integer(10))]),
+    ("algo.hits", &[LABEL, EDGE_TYPE, at_least(key("iterations", T::Integer, D::Integer(500)), 1.0, B::Clamped), key("tolerance", T::Float, D::Float(1e-8))]),
+    ("algo.voteRank", &[at_least(pos("k", T::Integer, false), 0.0, B::Clamped), LABEL, EDGE_TYPE, at_least(key("k", T::Integer, D::Integer(10)), 0.0, B::Clamped)]),
     ("algo.degree", METRIC),
     ("algo.closeness", METRIC),
     ("algo.betweenness", METRIC),
@@ -325,7 +367,7 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
     ("algo.louvain", FILTERS),
     ("algo.modularity", &[pos("partition", T::List, true), LABEL, EDGE_TYPE]),
     ("algo.biconnectedComponents", FILTERS),
-    ("algo.kTruss", &[pos("k", T::Integer, false), LABEL, EDGE_TYPE, key("k", T::Integer, D::Integer(3))]),
+    ("algo.kTruss", &[at_least(pos("k", T::Integer, false), 0.0, B::Clamped), LABEL, EDGE_TYPE, at_least(key("k", T::Integer, D::Integer(3)), 0.0, B::Clamped)]),
     ("algo.shortestPath", &[SOURCE, TARGET, opt("weight_property", T::String)]),
     ("algo.weightedPath", &[SOURCE, TARGET, pos("weightProperty", T::String, true)]),
     ("algo.allShortestPaths", PATH_ENUM),
@@ -335,17 +377,17 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
     ("algo.allPairsShortestPath", FILTERS),
     ("algo.dagLongestPath", FILTERS),
     ("algo.transitiveClosure", FILTERS),
-    ("algo.randomWalk", &[SOURCE, LABEL, EDGE_TYPE, key("steps", T::Integer, D::Integer(10)), key("seed", T::Integer, D::Integer(42))]),
+    ("algo.randomWalk", &[SOURCE, LABEL, EDGE_TYPE, at_least(key("steps", T::Integer, D::Integer(10)), 0.0, B::Clamped), key("seed", T::Integer, D::Integer(42))]),
     ("algo.maxFlow", &[SOURCE, pos("sink", T::NodeId, true), pos("capacityProperty", T::String, false)]),
     ("algo.mst", &[pos("weightProperty", T::String, false)]),
-    ("algo.commonNeighbors", &[pos("node1", T::NodeId, false), pos("node2", T::NodeId, false), LABEL, EDGE_TYPE, key("limit", T::Integer, D::Integer(100))]),
-    ("algo.jaccard", &[pos("node1", T::NodeId, false), pos("node2", T::NodeId, false), LABEL, EDGE_TYPE, key("limit", T::Integer, D::Integer(100))]),
-    ("algo.adamicAdar", &[pos("node1", T::NodeId, false), pos("node2", T::NodeId, false), LABEL, EDGE_TYPE, key("limit", T::Integer, D::Integer(100))]),
+    ("algo.commonNeighbors", &[pos("node1", T::NodeId, false), pos("node2", T::NodeId, false), LABEL, EDGE_TYPE, at_least(key("limit", T::Integer, D::Integer(100)), 0.0, B::Clamped)]),
+    ("algo.jaccard", &[pos("node1", T::NodeId, false), pos("node2", T::NodeId, false), LABEL, EDGE_TYPE, at_least(key("limit", T::Integer, D::Integer(100)), 0.0, B::Clamped)]),
+    ("algo.adamicAdar", &[pos("node1", T::NodeId, false), pos("node2", T::NodeId, false), LABEL, EDGE_TYPE, at_least(key("limit", T::Integer, D::Integer(100)), 0.0, B::Clamped)]),
     ("algo.nodeSimilarity", &[
-        pos("topK", T::Integer, false),
+        at_least(pos("topK", T::Integer, false), 0.0, B::Clamped),
         LABEL,
         EDGE_TYPE,
-        key("topK", T::Integer, D::Integer(10)),
+        at_least(key("topK", T::Integer, D::Integer(10)), 0.0, B::Clamped),
         key("cutoff", T::Float, D::Float(0.0)),
     ]),
     ("algo.overlap", FILTERS),
@@ -371,37 +413,41 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
     ("algo.wienerIndex", FILTERS),
     ("algo.transitivity", FILTERS),
     ("algo.globalEfficiency", FILTERS),
-    ("algo.richClub", &[pos("k", T::Integer, false), LABEL, EDGE_TYPE, key("k", T::Integer, D::Integer(1))]),
+    ("algo.richClub", &[at_least(pos("k", T::Integer, false), 0.0, B::Clamped), LABEL, EDGE_TYPE, at_least(key("k", T::Integer, D::Integer(1)), 0.0, B::Clamped)]),
     ("algo.reciprocity", FILTERS),
     ("algo.temporalReachability", &[SOURCE, LABEL, EDGE_TYPE, opt("timeProperty", T::String), opt("startTime", T::Integer)]),
     ("algo.propagationRanking", &[SOURCE, LABEL, EDGE_TYPE, opt("timeProperty", T::String), opt("startTime", T::Integer)]),
     ("algo.temporalShortestPath", &[SOURCE, TARGET, LABEL, EDGE_TYPE, opt("timeProperty", T::String), opt("startTime", T::Integer)]),
     ("algo.symptomExplanation", &[pos("symptoms", T::List, true), LABEL, EDGE_TYPE, opt("timeProperty", T::String)]),
-    ("algo.pca", &[pos("label", T::String, true), pos("properties", T::List, true), pos("nComponents", T::Integer, false)]),
+    ("algo.pca", &[pos("label", T::String, true), pos("properties", T::List, true), at_least(pos("nComponents", T::Integer, false), 1.0, B::Refused)]),
     ("algo.fastRP", &[
         LABEL,
         EDGE_TYPE,
-        key("embeddingDimension", T::Integer, D::Integer(128)),
+        at_least(key("embeddingDimension", T::Integer, D::Integer(128)), 1.0, B::Refused),
         key("iterationWeights", T::List, D::FloatList(&[1.0, 1.0, 1.0])),
         key("seed", T::Integer, D::Integer(387_844_754_753)),
         key("normalize", T::Boolean, D::Boolean(true)),
+        // Writes by default; `write: false` streams the vectors instead (#1736).
+        key("write", T::Boolean, D::Boolean(true)),
         key("writeProperty", T::String, D::String("embedding")),
     ]),
     ("algo.node2vec", &[
         LABEL,
         EDGE_TYPE,
-        key("embeddingDimension", T::Integer, D::Integer(128)),
-        key("walkLength", T::Integer, D::Integer(40)),
-        key("walksPerNode", T::Integer, D::Integer(10)),
-        key("returnFactor", T::Float, D::Float(1.0)),
-        key("inOutFactor", T::Float, D::Float(1.0)),
-        key("windowSize", T::Integer, D::Integer(5)),
+        at_least(key("embeddingDimension", T::Integer, D::Integer(128)), 1.0, B::Refused),
+        at_least(key("walkLength", T::Integer, D::Integer(40)), 2.0, B::Refused),
+        at_least(key("walksPerNode", T::Integer, D::Integer(10)), 1.0, B::Refused),
+        above(key("returnFactor", T::Float, D::Float(1.0)), 0.0, B::Replaced),
+        above(key("inOutFactor", T::Float, D::Float(1.0)), 0.0, B::Replaced),
+        at_least(key("windowSize", T::Integer, D::Integer(5)), 1.0, B::Refused),
         key("seed", T::Integer, D::Integer(336_337_323_314)),
+        // Writes by default; `write: false` streams the vectors instead (#1736).
+        key("write", T::Boolean, D::Boolean(true)),
         key("writeProperty", T::String, D::String("embedding")),
     ]),
     ("algo.or.solve", &[
-        Param { name: "label", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
-        Param { name: "property", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        Param { name: "label", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
+        Param { name: "property", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
         key("algorithm", T::String, D::String("Jaya")),
         aka(opt("costProperty", T::String), "cost_property"),
         aka(opt("costProperties", T::List), "cost_properties"),
@@ -410,24 +456,28 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         aka(opt("minTotal", T::Float), "min_total"),
         opt("budget", T::Float),
         aka(opt("bestKnown", T::Float), "best_known"),
+        // `penalty`, `repair` or `feasibility` (OPT-10, #2266). Its default
+        // depends on the solver -- `penalty` for a single-objective one,
+        // `feasibility` for a multi-objective one -- so none is listed.
+        aka(opt("constraintHandling", T::String), "constraint_handling"),
         aka(key("populationSize", T::Integer, D::Integer(50)), "population_size"),
         aka(key("maxIterations", T::Integer, D::Integer(100)), "max_iterations"),
         // Not applied when left out: an unseeded solve draws from entropy (#2061).
-        opt("seed", T::Integer),
+        at_least(opt("seed", T::Integer), 0.0, B::Refused),
     ]),
     ("algo.negativeSampling", &[
         LABEL,
         EDGE_TYPE,
         key("strategy", T::String, D::String("random")),
-        key("count", T::Integer, D::Integer(100)),
+        at_least(key("count", T::Integer, D::Integer(100)), 1.0, B::Refused),
         key("k", T::Integer, D::Integer(2)),
         key("seed", T::Integer, D::Integer(42)),
     ]),
     ("algo.or.constrainedShortestPath", &[
         SOURCE,
         TARGET,
-        Param { name: "resourceProperty", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
-        Param { name: "maxResource", kind: ParamKind::Config, ty: T::Float, required: true, default: None, also: None },
+        Param { name: "resourceProperty", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
+        Param { name: "maxResource", kind: ParamKind::Config, ty: T::Float, required: true, default: None, also: None, bound: None },
         opt("costProperty", T::String),
         LABEL,
         EDGE_TYPE,
@@ -454,7 +504,95 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
     ]),
 ];
 
+/// What each algorithm computes, one sentence, by catalogue name (#2013).
+///
+/// Taken from the doc comments on each implementation (the `execute_*`
+/// functions and `samyama-graph-algorithms`) or the GDS compatibility notes,
+/// not written from general knowledge; `algo.or.solve`, which has no doc
+/// comment, is described from its parameters and its objective.
+pub const DESCRIPTIONS: &[(&str, &str)] = &[
+    ("algo.pageRank", "PageRank: each node's score from the scores of the nodes linking to it."),
+    ("algo.articleRank", "PageRank that discounts votes from nodes that link to many others, by adding the average out-degree to each denominator."),
+    ("algo.personalizedPageRank", "PageRank biased toward a set of source nodes; with no reachable sources it is plain PageRank."),
+    ("algo.katz", "Katz centrality: influence counted over all walks, decaying with their length."),
+    ("algo.hits", "HITS: a hub and an authority score for each node, computed together."),
+    ("algo.voteRank", "Elects influential nodes one at a time, weakening each winner's neighbours so the seeds are spread out; returns them in election order."),
+    ("algo.degree", "Degree centrality: a node's neighbours divided by the most it could have."),
+    ("algo.closeness", "Closeness centrality, with NetworkX's convention for disconnected graphs."),
+    ("algo.betweenness", "Betweenness centrality by Brandes' algorithm, normalised as NetworkX does."),
+    ("algo.harmonic", "Harmonic centrality: the sum of reciprocal distances to every other node."),
+    ("algo.eigenvector", "Eigenvector centrality by power iteration; an error if it does not converge in 1000 iterations."),
+    ("algo.kCore", "Core number: the largest k for which a node is in the k-core."),
+    ("algo.wcc", "Weakly connected components: the disjoint subgraphs, ignoring edge direction."),
+    ("algo.scc", "Strongly connected components, by Tarjan's algorithm."),
+    ("algo.cdlp", "Community detection by synchronous label propagation (LDBC CDLP): each node takes the most frequent label among its neighbours."),
+    ("algo.louvain", "Louvain community detection: a community per node, and the partition's modularity."),
+    ("algo.modularity", "Scores a given partition: the fraction of edges inside communities, minus what random wiring would give."),
+    ("algo.biconnectedComponents", "Biconnected components: maximal subgraphs with no articulation point."),
+    ("algo.kTruss", "The nodes of the k-truss, where every edge lies in at least k-2 triangles."),
+    ("algo.shortestPath", "Shortest path from source to target: breadth-first, or Dijkstra when a weight property is given."),
+    ("algo.weightedPath", "Weighted shortest path (Dijkstra) on a weight property; negative weights are refused."),
+    ("algo.allShortestPaths", "Every unweighted shortest path from source to target, one row per path."),
+    ("algo.aStar", "A* search: Dijkstra guided by a per-node estimate of the remaining distance."),
+    ("algo.yens", "Yen's algorithm: the k shortest loopless paths from source to target, cheapest first."),
+    ("algo.bellmanFord", "Single-source shortest paths that allow negative weights; refuses a reachable negative cycle."),
+    ("algo.allPairsShortestPath", "Hop distance for every reachable ordered pair of nodes."),
+    ("algo.dagLongestPath", "The longest path in a directed acyclic graph, by edge count."),
+    ("algo.transitiveClosure", "Every reachable ordered pair of nodes."),
+    ("algo.randomWalk", "A seeded random walk of a given number of steps from a source node."),
+    ("algo.maxFlow", "Maximum flow from source to sink by Edmonds-Karp; capacity from a property, else 1."),
+    ("algo.mst", "Minimum spanning tree by Prim's algorithm, undirected; a spanning forest on a disconnected graph."),
+    ("algo.commonNeighbors", "Link prediction by the number of shared neighbours, for one pair or the top unconnected pairs."),
+    ("algo.jaccard", "Link prediction by shared neighbours divided by all neighbours of the pair."),
+    ("algo.adamicAdar", "Link prediction weighting each shared neighbour by 1/ln(its degree)."),
+    ("algo.nodeSimilarity", "The k most similar nodes to each node, by Jaccard similarity of their neighbours."),
+    ("algo.overlap", "Overlap coefficient of neighbourhoods, |A∩B|/min(|A|,|B|), for every pair that has one."),
+    ("algo.cosine", "Cosine similarity of the nodes' neighbourhoods."),
+    ("algo.topologicalSort", "Nodes in dependency order (Kahn's algorithm); a cycle is an error."),
+    ("algo.cycleDetection", "The nodes of one directed cycle in order, or no rows when there is none."),
+    ("algo.bridges", "Edges whose removal increases the number of connected components."),
+    ("algo.articulationPoints", "Nodes whose removal increases the number of connected components."),
+    ("algo.bipartite", "Whether the graph is two-colourable, and which side each node is on."),
+    ("algo.maximalMatching", "A maximal matching: greedily chosen edges that share no endpoint."),
+    ("algo.colouring", "A greedy proper colouring, largest degree first."),
+    ("algo.dominatingSet", "A set of nodes that every node is in or adjacent to."),
+    ("algo.effectiveSize", "Burt's effective size: a node's neighbours minus the redundancy among them."),
+    ("algo.constraint", "Burt's constraint: how far a node's contacts are tied up in each other."),
+    ("algo.triangleCount", "The total number of triangles in the graph, ignoring direction."),
+    ("algo.lcc", "Local clustering coefficient of each node (LDBC LCC)."),
+    ("algo.squareClustering", "How often a node's neighbours close a four-cycle."),
+    ("algo.eccentricity", "Each node's distance to the furthest node it can reach; null if it cannot reach all."),
+    ("algo.diameter", "The largest eccentricity; an error if the graph is not connected."),
+    ("algo.radius", "The smallest eccentricity; an error if the graph is not connected."),
+    ("algo.averageNeighborDegree", "The average degree of each node's neighbours."),
+    ("algo.degreeAssortativity", "Degree assortativity: the Pearson correlation of degree across edges."),
+    ("algo.wienerIndex", "The Wiener index: the sum of shortest-path distances over all pairs."),
+    ("algo.transitivity", "Global clustering coefficient: three times the triangles over the connected triples."),
+    ("algo.globalEfficiency", "The average of 1/distance over all ordered pairs."),
+    ("algo.richClub", "Rich-club coefficient at degree k: how densely the high-degree nodes connect to each other."),
+    ("algo.reciprocity", "The fraction of directed node pairs whose reverse edge also exists."),
+    ("algo.temporalReachability", "Which nodes a source can reach respecting edge times, when, and by what walk."),
+    ("algo.propagationRanking", "What a fault at the source reaches respecting edge times, ranked by how soon."),
+    ("algo.temporalShortestPath", "The earliest-arriving time-respecting path from source to target."),
+    ("algo.symptomExplanation", "Ranks candidate causes for a set of observed (node, time) symptoms."),
+    ("algo.pca", "Principal component analysis over numeric node properties: each node's coordinates on the first components."),
+    ("algo.fastRP", "FastRP node embeddings: random vectors repeatedly averaged over neighbours; written to a node property unless write is false."),
+    ("algo.node2vec", "node2vec embeddings from biased random walks, embedded by random projection of co-occurrence counts."),
+    ("algo.or.solve", "Optimises a numeric property on each node of a label with a metaheuristic solver (Jaya by default), each value within the bounds, minimising the sum of value times its cost property."),
+    ("algo.negativeSampling", "Node pairs that are not edges, for training link prediction (random, degree-matched or k-hop)."),
+    ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
+];
+
 impl AlgorithmEntry {
+    /// What this algorithm computes, from [`DESCRIPTIONS`].
+    pub fn description(&self) -> &'static str {
+        DESCRIPTIONS
+            .iter()
+            .find(|(name, _)| *name == self.name)
+            .map(|(_, d)| *d)
+            .unwrap_or("")
+    }
+
     /// The arguments this algorithm reads, from [`PARAMETERS`].
     pub fn parameters(&self) -> &'static [Param] {
         PARAMETERS
@@ -479,10 +617,11 @@ impl AlgorithmEntry {
 
 impl Serialize for AlgorithmEntry {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut s = serializer.serialize_struct("AlgorithmEntry", 8)?;
+        let mut s = serializer.serialize_struct("AlgorithmEntry", 9)?;
         s.serialize_field("name", self.name)?;
         s.serialize_field("aliases", self.aliases)?;
         s.serialize_field("category", &self.category)?;
+        s.serialize_field("description", self.description())?;
         s.serialize_field("parameters", self.parameters())?;
         s.serialize_field("yields", self.yields)?;
         s.serialize_field("writes", &self.writes)?;
