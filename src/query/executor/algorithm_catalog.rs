@@ -580,6 +580,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
     ("algo.structural.astar", "The shortest path between two positioned nodes, by length or by hops, searched in order of the straight-line distance to the target."),
     ("algo.structural.stress", "Pairs of positioned nodes within a radius that no relationship joins, with the shortest path between them and its stretch over the straight line."),
+    ("algo.structural.spatialLouvain", "Louvain communities against a gravity null model measured from the graph, so a community is more connected than its nodes' distances explain."),
 ];
 
 impl AlgorithmEntry {
