@@ -145,6 +145,9 @@ pub struct Query {
     pub show_indexes: bool,
     /// ANALYZE flag -- recompute the planner's statistics (LANG-13).
     pub analyze: bool,
+    /// `ANALYZE :Label` -- the label whose statistics the row reports. The
+    /// recomputation is the same either way: the store caches one set.
+    pub analyze_label: Option<Label>,
     /// Planner hints from every MATCH in the query (#1675). Keyed by variable,
     /// which names one node across the whole query.
     pub hints: Vec<PlanHint>,
@@ -1564,6 +1567,7 @@ impl Query {
             graph_projection_ddl: None,
             show_indexes: false,
             analyze: false,
+            analyze_label: None,
             hints: Vec::new(),
             plan_options: PlanOptions::default(),
             show_constraints: false,
