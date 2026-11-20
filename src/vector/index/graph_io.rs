@@ -17,11 +17,11 @@
 //! `hnsw_rs` writes native-endian `usize`s, so a sidecar from a different
 //! word size or byte order is refused rather than read.
 
-use super::{bits_key, Backend, StoredVector, VectorIndex};
+use super::{bits_key, Backend, VectorIndex};
 use super::{DistanceMetric, HnswParams, MetricDistance, Quantization};
 use super::{VectorError, VectorResult};
 use half::f16;
-use hnsw_rs::prelude::{AnnT, Hnsw, HnswIo, PointIndexation};
+use hnsw_rs::prelude::{AnnT, Hnsw, HnswIo, PointId, PointIndexation};
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -66,21 +66,23 @@ fn sidecar_path(dir: &Path, name: &str) -> PathBuf {
     dir.join(format!("{name}{}", GRAPH_SUFFIXES[0]))
 }
 
-/// The vectors the graph holds, by data id. Every id below `n` must appear
-/// exactly once, at the index's dimension.
+/// Where the graph keeps each data id's vector, and the hash of its exact
+/// bits, by data id. Every id below `n` must appear exactly once, at the
+/// index's dimension. The vectors stay in the graph, their only copy (#1973).
 fn by_position<T: Clone + Send + Sync>(
     points: &PointIndexation<'_, T>,
     n: usize,
     dimensions: usize,
-) -> Result<Vec<Vec<T>>, String> {
-    let mut slots: Vec<Option<Vec<T>>> = vec![None; n];
+    key: impl Fn(&[T]) -> u64,
+) -> Result<Vec<(PointId, u64)>, String> {
+    let mut slots: Vec<Option<(PointId, u64)>> = vec![None; n];
     for point in points {
         let pos = point.get_origin_id();
         let v = point.get_v();
         if pos >= n || v.len() != dimensions || slots[pos].is_some() {
             return Err("graph entries do not match the sidecar".into());
         }
-        slots[pos] = Some(v.to_vec());
+        slots[pos] = Some((point.get_point_id(), key(v)));
     }
     slots
         .into_iter()
@@ -201,15 +203,10 @@ impl VectorIndex {
                     // Reloading turns this on; a built graph has it off, and
                     // later insertions should link the same way they did.
                     h.set_extend_candidates(false);
-                    let vectors = by_position(h.get_point_indexation(), n, dimensions)?;
-                    for (pos, vector) in vectors.into_iter().enumerate() {
-                        let key = bits_key(&vector, |v: f32| v.to_bits() as u64);
-                        index.exact.entry(key).or_default().push(pos);
-                        index.stored_f32.push(StoredVector {
-                            node_id: s.node_ids[pos],
-                            vector,
-                        });
-                    }
+                    let places = by_position(h.get_point_indexation(), n, dimensions, |v| {
+                        bits_key(v, |x: f32| x.to_bits() as u64)
+                    })?;
+                    index.place(places);
                     index.backend = Backend::F32(h);
                 }
                 Quantization::Fp16 => {
@@ -224,12 +221,10 @@ impl VectorIndex {
                         &params,
                     )?;
                     h.set_extend_candidates(false);
-                    let vectors = by_position(h.get_point_indexation(), n, dimensions)?;
-                    for (pos, vector) in vectors.into_iter().enumerate() {
-                        let key = bits_key(&vector, |v: f16| v.to_bits() as u64);
-                        index.exact.entry(key).or_default().push(pos);
-                        index.stored_f16.push((s.node_ids[pos], vector));
-                    }
+                    let places = by_position(h.get_point_indexation(), n, dimensions, |v| {
+                        bits_key(v, |x: f16| x.to_bits() as u64)
+                    })?;
+                    index.place(places);
                     index.backend = Backend::F16(h);
                 }
                 #[allow(unreachable_patterns)]
@@ -242,11 +237,23 @@ impl VectorIndex {
             Ok(Err(e)) => return Err(bad(format!("graph reload failed: {e}"))),
             Err(_) => return Err(bad("graph reload panicked")),
         }
+        index.node_ids = s.node_ids;
         // Every entry not current was superseded or removed, which is how
         // `add` and `remove` count them.
         index.superseded = n - current.len();
         index.current = current;
         Ok(index)
+    }
+}
+
+impl VectorIndex {
+    /// Record where a reloaded graph keeps each entry, by position.
+    fn place(&mut self, places: Vec<(PointId, u64)>) {
+        self.point_ids.reserve(places.len());
+        for (pos, (point, key)) in places.into_iter().enumerate() {
+            self.exact.entry(key).or_default().push(pos);
+            self.point_ids.push(point);
+        }
     }
 }
 

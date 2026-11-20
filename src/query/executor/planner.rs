@@ -840,6 +840,10 @@ pub struct QueryPlanner {
     /// The query's `CYPHER planner=… plan=N` options (#1616), set per `plan`
     /// call for the same reason as `hints`.
     forcing: std::sync::Mutex<Forcing>,
+    /// The point-index scan a single-node `ORDER BY point.distance(n.p, c)
+    /// LIMIT k` can start from (#2255), set per `plan` call like `hints`.
+    /// Taken by the first scan choice for its variable.
+    nearest: std::sync::Mutex<Option<NearestTopK>>,
 }
 
 /// `CYPHER` options in force for the query being planned (#1616).
@@ -917,7 +921,11 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
 /// The refusal for a procedure name nothing dispatches: a likely intended
 /// name when there is one, and otherwise where the procedures are.
 pub fn unknown_procedure_message(name: &str) -> String {
-    match crate::query::suggest::closest(name, KNOWN_DB_PROCEDURES.iter().copied()) {
+    let known = KNOWN_DB_PROCEDURES
+        .iter()
+        .chain(super::feature_ops::FeatureProcedure::NAMES)
+        .copied();
+    match crate::query::suggest::closest(name, known) {
         Some(known) => format!("Unknown procedure: `{name}`. Did you mean `{known}`?"),
         None => format!(
             "Unknown procedure: `{name}`. The schema procedures are {}; graph \
@@ -936,6 +944,7 @@ impl QueryPlanner {
             trail_enumeration: std::sync::atomic::AtomicBool::new(false),
             hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
             forcing: std::sync::Mutex::new(Forcing::default()),
+            nearest: std::sync::Mutex::new(None),
         }
     }
 
@@ -947,6 +956,7 @@ impl QueryPlanner {
             trail_enumeration: std::sync::atomic::AtomicBool::new(false),
             hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
             forcing: std::sync::Mutex::new(Forcing::default()),
+            nearest: std::sync::Mutex::new(None),
         }
     }
 
@@ -1313,7 +1323,11 @@ impl QueryPlanner {
             },
             plan: options.plan,
         };
+        // Saved and put back rather than cleared: a subquery planned through
+        // `plan` must not hand its outer query's scan away, or keep it.
+        let outer = std::mem::replace(&mut *self.nearest.lock().unwrap(), nearest_top_k(query, store));
         let plan = self.plan_with_hints(query, store);
+        *self.nearest.lock().unwrap() = outer;
         *self.forcing.lock().unwrap() = Forcing::default();
         plan
     }
@@ -1586,8 +1600,8 @@ impl QueryPlanner {
         // checks are independent and this keeps the statement arms together.
         if query.analyze {
             return Ok(ExecutionPlan {
-                root: Box::new(super::analyze_ops::AnalyzeOperator::new()),
-                output_columns: super::analyze_ops::analyze_columns(),
+                root: Box::new(super::analyze_ops::AnalyzeOperator::for_label(query.analyze_label.clone())),
+                output_columns: super::analyze_ops::columns_for(query.analyze_label.as_ref()),
                 // A cache, not the graph. Marking it a write would put it
                 // behind write access and make it unavailable to the person
                 // diagnosing a slow read, which is who asks for it.
@@ -1804,7 +1818,8 @@ impl QueryPlanner {
                     clause.similarity.clone(),
                 ).with_name(clause.index_name.clone())
                  .with_quantization(clause.quantization)
-                 .with_params(clause.params)),
+                 .with_params(clause.params)
+                 .with_kind(clause.kind)),
                 output_columns: vec![],
                 is_write: true, candidates_evaluated: 0, chosen_plan_cost: 0.0, candidate_costs: Vec::new(),
             });
@@ -4067,6 +4082,20 @@ impl QueryPlanner {
             )));
         }
 
+        // Declarative feature definitions and their values (ML-07, #1742).
+        if let Some(procedure) = super::feature_ops::FeatureProcedure::from_name(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::feature_ops::FeatureOperator::new(
+                procedure,
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
+        }
+
         // Similarity graphs from a vector index (#1979).
         if let Some(procedure) = super::vector_ops::VectorProcedure::from_name(&call_clause.procedure_name) {
             let yields: Vec<(String, Option<String>)> = call_clause
@@ -4250,6 +4279,11 @@ impl QueryPlanner {
                 store.vector_index.get_index(&label, &property).and_then(|index| {
                     let index = index.read().ok()?;
                     let params = index.params();
+                    if let Some((nlist, nprobe)) = ivf_probe(&index, ef) {
+                        return Some(crate::vector::strategy::FilterPlan::estimate_enumerated_ivf(
+                            index.len(), index.dimensions(), k, nlist, nprobe, subtree, filter_selectivity,
+                        ));
+                    }
                     Some(crate::vector::strategy::FilterPlan::estimate_enumerated(
                         index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, subtree, filter_selectivity,
                     ))
@@ -4260,17 +4294,28 @@ impl QueryPlanner {
                     let index = store.vector_index.get_index(&label, &property)?;
                     let index = index.read().ok()?;
                     let params = index.params();
+                    if let Some((nlist, nprobe)) = ivf_probe(&index, ef) {
+                        return Some(crate::vector::strategy::FilterPlan::estimate_ivf(
+                            index.len(), index.dimensions(), k, nlist, nprobe, selectivity,
+                        ));
+                    }
                     Some(crate::vector::strategy::FilterPlan::estimate(
                         index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, selectivity,
                     ))
                 })
             };
+            // The index's kind, for EXPLAIN (#1975).
+            let index_kind = store
+                .vector_index
+                .get_index(&label, &property)
+                .and_then(|index| index.read().ok().map(|i| i.kind()));
             Ok(Box::new(
                 VectorSearchOperator::new(label, property, query_vector, k, node_var, score_var)
                     .with_plan(plan)
                     .with_scope(scope)
                     .with_filter(vector_filter)
                     .with_ef(ef)
+                    .with_kind(index_kind)
                     .with_distance_var(distance_var),
             ))
         } else if call_clause.procedure_name == "db.checkIntegrity"
@@ -5115,6 +5160,10 @@ impl QueryPlanner {
             } else if let Some(op) = point_index_scan(&start_var, &path.start.labels, &remaining_predicates, store) {
                 // A spatial predicate on an R-tree-indexed property (#1618).
                 // The predicate stays in the filter: the region is a superset.
+                op
+            } else if let Some(op) = self.nearest_scan(&start_var, &remaining_predicates) {
+                // `ORDER BY point.distance(n.p, c) LIMIT k` over the R-tree
+                // (#2255). The Sort and Limit above stay: this is a superset.
                 op
             } else {
                 Box::new(NodeScanOperator::new(
@@ -8020,6 +8069,125 @@ fn point_index_scan(
     None
 }
 
+/// A single-node `MATCH (n:L) RETURN ... ORDER BY point.distance(n.p, c)
+/// LIMIT k` that a point index on `:L(p)` can answer from its k nearest
+/// (#2255). Found from the whole query, because the scan choice that uses it
+/// never sees the ORDER BY or the LIMIT.
+#[derive(Debug, Clone)]
+struct NearestTopK {
+    var: String,
+    label: Label,
+    property: String,
+    centre: (f64, f64, bool),
+    k: usize,
+}
+
+/// The nearest-first scan a query can start from, or `None`.
+///
+/// Declined unless every row the label scan would produce reaches the sort, so
+/// the index's k nearest are a superset of the rows the `LIMIT` keeps:
+///
+/// * one MATCH, not OPTIONAL, of one node with one label and no inline
+///   properties -- a filter, a join or a second label would drop some of the
+///   k nearest and leave fewer than k rows;
+/// * nothing else in the query: no WHERE, WITH, UNWIND, CALL, UNION or write.
+///   The check compares against an empty query, so a clause added to the AST
+///   later is declined until someone decides it is safe;
+/// * no DISTINCT and no aggregate in RETURN, which would change the row count
+///   between the scan and the sort;
+/// * the first ORDER BY key is ascending `point.distance(n.p, c)` with `c`
+///   constant, written out or through its RETURN alias. Later keys are fine:
+///   the scan includes every node tied with the k-th;
+/// * the index holds at least `SKIP + LIMIT` points. With fewer, a node with
+///   no point -- a null distance, sorted last -- would be in the answer and
+///   not in the index.
+///
+/// A node whose `p` is not a point at all is not in the index, and the scan
+/// never meets it. Over the whole label `point.distance` raises an error on
+/// such a node; through the index the query answers. The spatial predicate
+/// scan above has the same property.
+fn nearest_top_k(query: &Query, store: &GraphStore) -> Option<NearestTopK> {
+    if store.point_index.is_empty() {
+        return None;
+    }
+    let first = query.order_by.as_ref()?.items.first()?;
+    if !first.ascending {
+        return None;
+    }
+    let k = query.skip.unwrap_or(0).checked_add(query.limit?)?;
+    if k == 0 {
+        return None;
+    }
+    let ret = query.return_clause.as_ref()?;
+    if ret.distinct {
+        return None;
+    }
+    let [mc] = query.match_clauses.as_slice() else { return None };
+    let [path] = mc.pattern.paths.as_slice() else { return None };
+    if mc.optional || !path.segments.is_empty() || path.path_variable.is_some() || path.path_type != PathType::Normal {
+        return None;
+    }
+    let node = &path.start;
+    let var = node.variable.clone()?;
+    let [label] = node.labels.as_slice() else { return None };
+    if node.properties.as_ref().is_some_and(|p| !p.is_empty())
+        || node.property_exprs.as_ref().is_some_and(|p| !p.is_empty())
+    {
+        return None;
+    }
+    let mut counter = 0usize;
+    if ret.items.iter().any(|i| !extract_nested_aggregates(&i.expression, &mut counter).1.is_empty()) {
+        return None;
+    }
+    let mut rest = query.clone();
+    rest.match_clauses.clear();
+    rest.return_clause = None;
+    rest.order_by = None;
+    rest.limit = None;
+    rest.skip = None;
+    rest.clauses.clear();
+    rest.params.clear();
+    rest.hints.clear();
+    rest.plan_options = PlanOptions::default();
+    rest.explain = false;
+    rest.profile = false;
+    rest.plan_json = false;
+    if rest != Query::new() {
+        return None;
+    }
+    // `ORDER BY d` where the RETURN wrote `point.distance(...) AS d`.
+    let key = match &first.expression {
+        Expression::Variable(a) => ret
+            .items
+            .iter()
+            .find(|i| i.alias.as_deref() == Some(a.as_str()))
+            .map_or(&first.expression, |i| &i.expression),
+        e => e,
+    };
+    let (property, centre) = super::point_ops::distance_sort_key(&var, key, store)?;
+    let held = store.point_index.with(label.as_str(), &property, |i| i.len())?;
+    if held < k {
+        return None;
+    }
+    Some(NearestTopK { var, label: label.clone(), property, centre, k })
+}
+
+impl QueryPlanner {
+    /// The nearest-first scan `nearest_top_k` found, if it is for `var` and
+    /// nothing is left to filter it.
+    fn nearest_scan(&self, var: &str, preds: &[Expression]) -> Option<OperatorBox> {
+        if !preds.is_empty() {
+            return None;
+        }
+        let mut slot = self.nearest.lock().unwrap();
+        if !slot.as_ref().is_some_and(|n| n.var == var) {
+            return None;
+        }
+        let n = slot.take()?;
+        Some(Box::new(super::point_ops::PointNearestScanOperator::new(n.var, n.label, n.property, n.centre, n.k)))
+    }
+}
+
 /// What remains of a closing segment after a fused cyclic close bound it
 /// (#1614): a filter on the closing relationship's inline properties, if any.
 struct FusedCloseSegment {
@@ -8710,7 +8878,7 @@ fn choose_anchor_index(
 /// `timestamp()` and the temporal constructors read the statement clock, which
 /// is fixed for the statement, so they are not volatile. `rand()`,
 /// `randomUUID()` and the `*.realtime` functions read a fresh value each call.
-fn is_volatile(expr: &Expression) -> bool {
+pub(crate) fn is_volatile(expr: &Expression) -> bool {
     match expr {
         Expression::Function { name, args, .. } => {
             let name = name.to_ascii_lowercase();
@@ -8761,9 +8929,12 @@ fn is_volatile(expr: &Expression) -> bool {
     }
 }
 
-/// The `ef` of `db.index.vector.queryNodes`'s options map (#1971). Any other
-/// key is refused: an option the search ignored would answer at a width the
-/// caller did not ask for, and say nothing.
+/// The `ef` of `db.index.vector.queryNodes`'s options map (#1971), or its
+/// `nprobe` (#1975): the search width, which for an IVF index is the number
+/// of lists it scores. Either name is accepted for either kind, since the
+/// options are read before the index is. Any other key is refused: an option
+/// the search ignored would answer at a width the caller did not ask for,
+/// and say nothing.
 fn vector_query_ef(options: &Expression) -> ExecutionResult<Option<usize>> {
     let bad = |msg: String| ExecutionError::PlanningError(format!("db.index.vector.queryNodes: {msg}"));
     let entries: Vec<(String, Option<i64>)> = match options {
@@ -8791,16 +8962,42 @@ fn vector_query_ef(options: &Expression) -> ExecutionResult<Option<usize>> {
     };
     let mut ef = None;
     for (key, value) in entries {
-        if key != "ef" {
-            return Err(bad(format!("unknown option `{key}`; the accepted option is `ef`")));
+        if key != "ef" && key != "nprobe" {
+            return Err(bad(format!(
+                "unknown option `{key}`; the accepted options are `ef` (HNSW) and `nprobe` (IVF)"
+            )));
+        }
+        if ef.is_some() {
+            return Err(bad("give one of `ef` and `nprobe`, not both".to_string()));
         }
         let value = value
             .filter(|v| *v > 0)
-            .ok_or_else(|| bad("`ef` must be a positive integer literal".to_string()))?;
-        crate::vector::index::check_ef(value as usize).map_err(bad)?;
+            .ok_or_else(|| bad(format!("`{key}` must be a positive integer literal")))?;
+        if key == "ef" {
+            crate::vector::index::check_ef(value as usize).map_err(bad)?;
+        } else {
+            crate::vector::IvfParams { nlist: None, nprobe: Some(value as usize) }
+                .validate()
+                .map_err(bad)?;
+        }
         ef = Some(value as usize);
     }
     Ok(ef)
+}
+
+/// The lists an IVF index has and the number a search of width `width`
+/// would probe, for pricing a filtered search (#1975). `None` for HNSW. An
+/// untrained index is one list, probed whole: it scans everything.
+fn ivf_probe(index: &crate::vector::VectorIndex, width: Option<usize>) -> Option<(usize, usize)> {
+    let crate::vector::IndexKind::Ivf(p) = index.kind() else {
+        return None;
+    };
+    let nlist = index.ivf_lists().max(1);
+    let nprobe = width
+        .or(p.nprobe)
+        .unwrap_or_else(|| crate::vector::index::ivf::auto_nprobe(nlist))
+        .clamp(1, nlist);
+    Some((nlist, nprobe))
 }
 
 /// Flatten an AND-chain expression into a list of individual predicates.
@@ -11744,6 +11941,7 @@ mod tests {
             profile: false,
             plan_json: false,
             analyze: false,
+            analyze_label: None,
             hints: Vec::new(),
             plan_options: Default::default(),
             params: std::collections::HashMap::new(),

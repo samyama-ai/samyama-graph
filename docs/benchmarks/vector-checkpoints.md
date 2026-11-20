@@ -48,12 +48,25 @@ Disk per generation is now about twice the vector bytes: the f32 vector list
 (current entries) and the graph's data file (all entries, superseded ones
 included, at the index's precision).
 
+## IVF centroids
+
+An IVF index (#1975) has no graph. Its generation carries the k-means
+centroids instead, as `<index>.hnsw.partition.ivf` (format, dimension, metric,
+`nlist`, the count trained on, centroids), in the manifest like a graph file.
+Recovery reads the vector list, checks the centroids describe the index, and
+assigns each vector to its nearest centroid: no k-means runs, and the lists
+are the ones the index had. Centroids that fail their checksum or describe
+another index cost a retrain, counted as a rebuild in the report.
+
 ## What remains
 
 Still not zero-rebuild startup. Ordinary server startup does not read these
 checkpoints; it rebuilds indexes from node rows. Restart integration tied to a
-consistent RocksDB generation, a single in-memory vector copy (the index still
-keeps its own list next to the graph's points), and 1M/10M restart/RSS
-measurements remain. Do not load this cache into ordinary startup without a
+consistent RocksDB generation and 1M/10M restart/RSS measurements remain.
+
+The index no longer keeps its own vector list next to the graph's points: the
+graph holds the only in-memory copy, and the index keeps per entry only its
+node id and the point's place in the graph (16 bytes), so `vector_bytes()`
+halved (#1973). The node property column still holds a copy of its own. Do not load this cache into ordinary startup without a
 freshness/generation contract: an old but checksum-valid index must not hide
 newer persisted writes. No startup-speed or memory figure is claimed.

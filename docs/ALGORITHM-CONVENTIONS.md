@@ -25,6 +25,32 @@ Conventions are stated for the algorithm as the engine calls it. `algo.*`,
 the namespace and lower-cases, so `algo.pageRank`, `pagerank` and
 `gds.pageRank` are the same row.
 
+## One walk, two neighbour readings
+
+Fifteen of the algorithms below walk the graph through one shared module,
+`samyama_graph_algorithms::frontier` (ALGO-13): closeness, harmonic,
+betweenness, eccentricity (and so diameter and radius), average neighbour
+degree, all-pairs shortest path (and so the Wiener index), transitive closure,
+global efficiency, bipartite, shortest path (unweighted), all shortest paths
+and k-hop negative sampling. Where the rows below say "BFS", it is that walk:
+breadth-first, nodes expanded in the order they were reached, neighbours in
+stored order with successors before predecessors.
+
+Two readings of "neighbour" are in use, and the rows say which:
+
+- **Every edge** (`neighbours`): a parallel relationship is two neighbours.
+  Betweenness, closeness and harmonic read the graph this way, so two
+  parallel edges are two shortest paths.
+- **Each neighbour once** (`distinct_neighbours`): a parallel pair or a
+  reciprocal `a -> b`, `b -> a` is one adjacency and a self-loop none, as in
+  NetworkX's `nx.Graph(D)`. Bipartite, matching and global efficiency read the
+  graph this way. Average neighbour degree and degree assortativity do too when
+  undirected (the default); with `undirected: false` they count every outgoing
+  edge except a self-loop, so a parallel pair still counts twice.
+
+Moving these algorithms onto the shared walk changed no answer:
+`frontier_parity_tests` holds each to the output it gave before, bit for bit.
+
 ## How to read the columns
 
 | Column | Means |
@@ -319,10 +345,30 @@ Both write a vector as a node property (`writeProperty`, default `embedding`)
 rather than only streaming it -- ML-06 asks for the result "stored as vector
 properties". They write whether or not `writeProperty` is given, which the
 algorithms under "Write-back" above do only when asked; that is the
-deliberate exception, documented at the call site. Both require write access (`CALL ... YIELD node, embedding` through
-`MutQueryExecutor`) for that reason, and both are seeded and reproducible: no
-call to a clock or a process RNG, every random draw is a pure function of
-`(seed, node index, dimension index)` computed with SplitMix64.
+deliberate exception, documented at the call site. Both require write access
+(`CALL ... YIELD node, embedding` through `MutQueryExecutor`) for that reason,
+and both are seeded and reproducible: no call to a clock or a process RNG,
+every random draw is a pure function of `(seed, node index, dimension index)`
+computed with SplitMix64.
+
+| Config | Effect | Access |
+|---|---|---|
+| (none), or `write: true` | Stores `embedding` on every node in scope and yields it | Write |
+| `writeProperty: 'p'` | Stores `p` instead | Write |
+| `write: false` | Yields the rows and stores nothing (#1736) | Read |
+| `write: false, writeProperty: 'p'` | Refused: it asks for no write and for one | -- |
+
+The stored value is a `Vector` (`f32` per dimension), the type the vector index
+reads directly, so an index on the property finds a node by its own embedding
+with no conversion (`tests/graph_embeddings.rs`). The yielded
+`embedding` carries the same `f32` values widened back to floats, so a stream
+returns exactly what a write would have stored. A list literal stays 64-bit
+(#628); the narrowing applies to stored embeddings only.
+
+Running the call again overwrites the stored vectors, which is how they are
+refreshed. Nothing records which run, config or seed produced a stored vector:
+versioning (ML-06's "versioned") is not built. `mutate` mode is not built either,
+because a projection cannot hold a property yet (ALGO-05).
 
 **node2vec here runs the real biased 2nd-order random walks (`returnFactor` =
 p, `inOutFactor` = q) but embeds them with a random-projection of the walks'
