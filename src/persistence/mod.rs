@@ -365,6 +365,50 @@ impl PersistenceManager {
         }
     }
 
+    /// Roll `store` back to checkpoint `version` and persist the rollback (#2093).
+    ///
+    /// A rollback is a write: it runs with the store's write log on, and what
+    /// it journals goes through [`Self::apply_mutations`] like any statement.
+    /// The log is left as it was found, on or off. If the persist fails the
+    /// rollback stays in memory, which no longer matches the disk, so the
+    /// server is marked degraded (`health::mark_degraded`) and the error says
+    /// so. A refused rollback (`GraphError::RollbackConflict`, an unpinned
+    /// checkpoint) changes nothing and persists nothing.
+    pub fn rollback_to(
+        &self,
+        tenant: &str,
+        store: &mut GraphStore,
+        version: u64,
+    ) -> Result<crate::graph::RollbackStats, String> {
+        use crate::graph::event::Mutation;
+        let was_logging = store.write_log_enabled();
+        if !was_logging {
+            store.enable_write_log();
+        }
+        let outcome = store.rollback_to(version);
+        let mutations: Vec<Mutation> = store
+            .take_write_log()
+            .into_iter()
+            .map(|m| match m {
+                Mutation::NodeUpserted(id) if store.get_node(id).is_none() => Mutation::NodeDeleted(id),
+                Mutation::EdgeUpserted(id) if store.get_edge(id).is_none() => Mutation::EdgeDeleted(id),
+                m => m,
+            })
+            .collect();
+        if !was_logging {
+            store.disable_write_log();
+        }
+        let stats = outcome.map_err(|e| e.to_string())?;
+        if let Err(e) = self.apply_mutations(tenant, store, &mutations) {
+            let reason = format!(
+                "rollback to checkpoint {version} applied in memory but could not be persisted: {e}"
+            );
+            health::mark_degraded(reason.clone());
+            return Err(reason);
+        }
+        Ok(stats)
+    }
+
     /// Persist a statement's changes, as recorded by [`GraphStore::take_write_log`] (#1094).
     ///
     /// This replaces reading durability off the *result* of a write query. That older
