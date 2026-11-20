@@ -572,6 +572,8 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.solve", "Optimises a numeric property on each node of a label with a metaheuristic solver (Jaya by default), each value within the bounds, minimising the sum of value times its cost property."),
     ("algo.negativeSampling", "Node pairs that are not edges, for training link prediction (random, degree-matched or k-hop)."),
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
+    ("algo.structural.astar", "The shortest path between two positioned nodes, by length or by hops, searched in order of the straight-line distance to the target."),
+    ("algo.structural.stress", "Pairs of positioned nodes within a radius that no relationship joins, with the shortest path between them and its stretch over the straight line."),
 ];
 
 impl AlgorithmEntry {
