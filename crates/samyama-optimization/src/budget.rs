@@ -151,6 +151,14 @@ impl<P: Problem> Problem for Budgeted<P> {
     fn budget_exhausted(&self) -> bool {
         self.exhausted() || self.inner.budget_exhausted()
     }
+
+    fn can_repair(&self) -> bool {
+        self.inner.can_repair()
+    }
+
+    fn repair(&self, variables: &Array1<f64>) -> Option<Array1<f64>> {
+        self.inner.repair(variables)
+    }
 }
 
 impl<P: MultiObjectiveProblem> MultiObjectiveProblem for Budgeted<P> {
@@ -177,6 +185,14 @@ impl<P: MultiObjectiveProblem> MultiObjectiveProblem for Budgeted<P> {
 
     fn budget_exhausted(&self) -> bool {
         self.exhausted() || self.inner.budget_exhausted()
+    }
+
+    fn can_repair(&self) -> bool {
+        self.inner.can_repair()
+    }
+
+    fn repair(&self, variables: &Array1<f64>) -> Option<Array1<f64>> {
+        self.inner.repair(variables)
     }
 }
 
