@@ -53,6 +53,28 @@ class ServerStatus:
 class RequestCancelled(Exception):
     """A request stopped by its `CancelToken` before it finished (API-06)."""
 
+class RollbackConflict(Exception):
+    """A rollback refused because another writer committed changes to the same
+    entities since the checkpoint (#2093). The graph is unchanged."""
+
+    checkpoint: int
+    entities: list[dict[str, Any]]
+    diff: dict[str, Any]
+
+class Branch:
+    """A checkpoint as a `with` block (#2093). Leaving the block rolls back to
+    it unless `commit()` was called. Exceptions are never suppressed."""
+
+    @property
+    def version(self) -> int: ...
+    @property
+    def open(self) -> bool: ...
+    def diff(self) -> dict[str, Any]: ...
+    def commit(self) -> None: ...
+    def rollback(self) -> dict[str, Any]: ...
+    def __enter__(self) -> "Branch": ...
+    def __exit__(self, *exc: Any) -> bool: ...
+
 class CancelToken:
     """Stops a request in flight (API-06): pass as `cancel=`, call `cancel()`
     from any thread. The waiting call raises `RequestCancelled` within about
@@ -239,4 +261,19 @@ class SamyamaClient:
     def vector_search(
         self, label: str, property: str, query_vector: list[float], k: int = 10
     ) -> list[tuple[int, float]]: ...
+
+    # Checkpoints (#2093). Embedded only; not durable.
+    def checkpoint(self) -> int:
+        """Pin the current version. Release it, or roll back to it, when done."""
+        ...
+    def release_checkpoint(self, version: int) -> bool: ...
+    def diff_since(self, version: int) -> dict[str, Any]:
+        """`nodes_added`, `nodes_deleted`, `edges_added`, `edges_deleted`,
+        `property_changes` ({kind, id, key, old, new}), `label_changes`
+        ({node, label, added}), `from_version`, `to_version`."""
+        ...
+    def rollback_to(self, version: int) -> dict[str, Any]:
+        """Raises `RollbackConflict`, changing nothing, on a conflict."""
+        ...
+    def branch(self) -> Branch: ...
     def __repr__(self) -> str: ...
