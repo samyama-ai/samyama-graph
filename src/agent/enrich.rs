@@ -597,7 +597,11 @@ pub fn retract(store: &mut GraphStore, node_ids: &[NodeId]) -> RetractReport {
         let edges: Vec<(crate::graph::EdgeId, NodeId)> = store
             .get_outgoing_edges(id)
             .into_iter()
-            .filter(|e| e.properties.contains_key(GENERATED_PROPERTY))
+            .filter(|e| {
+                store
+                    .edge_properties_merged(e.id)
+                    .contains_key(GENERATED_PROPERTY)
+            })
             .map(|e| (e.id, e.target))
             .collect();
         if marker.is_empty() && edges.is_empty() {
