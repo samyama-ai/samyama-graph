@@ -434,6 +434,21 @@ pub enum PlanHint {
     Join { variables: Vec<String> },
 }
 
+impl std::fmt::Display for PlanHint {
+    /// The hint as it is written in the query, so EXPLAIN can name it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlanHint::Index { variable, label, properties } => {
+                write!(f, "USING INDEX {variable}:{}({})", label.as_str(), properties.join(", "))
+            }
+            PlanHint::Scan { variable, label } => {
+                write!(f, "USING SCAN {variable}:{}", label.as_str())
+            }
+            PlanHint::Join { variables } => write!(f, "USING JOIN ON {}", variables.join(", ")),
+        }
+    }
+}
+
 /// Options written as `CYPHER key=value …` before a query (LANG-06, #1616):
 /// which planner plans it, and which of its candidate plans runs.
 ///
