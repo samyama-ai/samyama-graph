@@ -54,7 +54,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::index::{DistanceMetric, StoredVector};
+use super::index::DistanceMetric;
 
 /// The device that scored an exact scan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,7 +117,7 @@ pub(super) fn record(backend: ExactBackend) {
 pub(super) fn gpu_ranks(
     metric: DistanceMetric,
     query: &[f32],
-    rows: &[&StoredVector],
+    rows: &[&[f32]],
     dimensions: usize,
     min_work: usize,
 ) -> Option<Vec<f32>> {
@@ -147,11 +147,11 @@ pub(super) fn gpu_ranks(
     let mut ranks = Vec::with_capacity(rows.len());
     for chunk in rows.chunks(per_chunk) {
         flat.clear();
-        for sv in chunk {
-            if sv.vector.len() != dimensions {
+        for row in chunk {
+            if row.len() != dimensions {
                 return None;
             }
-            flat.extend_from_slice(&sv.vector);
+            flat.extend_from_slice(row);
         }
         // A wgpu validation failure panics rather than returning an error;
         // a query must not take the server down over it, so contain it and
@@ -187,7 +187,7 @@ pub(super) fn gpu_ranks(
 pub(super) fn gpu_ranks(
     _metric: DistanceMetric,
     _query: &[f32],
-    _rows: &[&StoredVector],
+    _rows: &[&[f32]],
     _dimensions: usize,
     _min_work: usize,
 ) -> Option<Vec<f32>> {

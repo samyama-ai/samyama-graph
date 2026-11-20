@@ -655,6 +655,15 @@ paths:
                     Stop once the objective has been evaluated this many times
                     (OPT-11). Checked between iterations, so a run can make up to
                     one iteration's evaluations more. Leave it out for no limit.
+                constraint_handling:
+                  type: string
+                  enum: [penalty, repair, feasibility]
+                  description: >
+                    How a candidate that breaks a constraint is treated (OPT-10):
+                    objective plus penalty, the problem's repair before scoring,
+                    or Deb's feasibility rules. Absent: penalty for a
+                    single-objective solver, feasibility for a multi-objective
+                    one. `repair` on a benchmark with no repair fails the solve.
       responses:
         '200':
           description: The run's id
