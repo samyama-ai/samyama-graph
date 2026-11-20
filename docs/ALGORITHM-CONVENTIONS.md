@@ -380,6 +380,45 @@ drop-in replacement for a from-scratch SGNS-trained node2vec.
 | FastRP | fastRP | Both, symmetrised: successors and predecessors are merged into one neighbour list before propagating | Ignored | Counted twice: a self-loop's target appears in both the out- and in-neighbour list that gets merged | An isolated node's row is the zero vector: nothing propagates into it at any depth | Not applicable: one row per node, no ranking | L2-normalised per row by default (`normalize: true`); deterministic given `seed`, no RNG |
 | node2vec | node2vec | Both, symmetrised, the same way as FastRP, for both the walk and the co-occurrence projection | Ignored | A self-loop is a neighbour like any other and can be walked to and from | An isolated node's walk never leaves it, so it records no co-occurrence pair and its row is the zero vector | Not applicable: one row per node, no ranking | L2-normalised per row; deterministic given `seed`, no RNG. **Not skip-gram-trained (differs)** -- see above |
 
+## Retrieval (GraphRAG)
+
+`algo.graphRag` (also `algo.retrieve`) is GraphRAG retrieval in one call
+(AI-07): a vector search for the nodes nearest the question, then the graph
+around them.
+
+```cypher
+CALL algo.graphRag({query: [0.12, 0.33, 0.05], label: 'Chunk', property: 'embedding', strategy: 'local', k: 5, hops: 2}) YIELD node, score, hops, seed, community, path
+```
+
+| Key | Default | What it does |
+|---|---|---|
+| `query`, `label`, `property` | required | The question's embedding, and the vector index to search: `:label(property)`. The engine does not embed text: embed the question with the model that embedded `property` |
+| `strategy` | `local` | `local`: each seed and the nodes within `hops` of it. `global`: every member of the `communities` communities (Louvain) whose seeds are most similar in total. `drift`: `local`, then the rest of each seed's community |
+| `k` | 5 | Seeds: the `k` nearest nodes (1 to 1,000) |
+| `hops`, `decay` | 2, 0.5 | How far the walk goes (0 to 10), and what each hop multiplies a score by (above 0, at most 1) |
+| `communities` | 3 | How many communities `global` returns |
+| `limit` | 50 | The most rows |
+| `edgeType` | all | Walk, and form communities, over this relationship type only |
+| `timeProperty` with `since` and/or `until` | none | Keep every node, seed or reached, to a window on that property. A node without it is outside. The walk does not pass through a node outside the window. Compared as numbers: an integer or float as it is, a `DateTime` as milliseconds since the epoch, a `Date` as days |
+| `hierarchy` with `under` | none | Take seeds only from the subtree under node `under` in that hierarchy index. The walk may leave the subtree: what is connected to a fact need not be in its branch |
+
+Rows, highest `score` first, then fewer `hops`, then node id:
+
+| Column | Meaning |
+|---|---|
+| `node` | The retrieved node |
+| `score` | `local` and `drift`: the seed's similarity times `decay^hops`; a node reached through its community scores one hop past `hops`. `global`: the community's total seed similarity |
+| `hops`, `path` | Hops from the seed, and the node ids from the seed to here. `null` and `[]` for a node reached through its community |
+| `seed` | The id of the seed it was reached from; `null` in `global` |
+| `community` | Its Louvain community, in `global` and `drift`; `null` in `local` |
+
+A node near two seeds is returned once, for its best score; on a tie, the
+seed nearer the question wins.
+
+| Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
+|---|---|---|---|---|---|---|---|
+| GraphRAG retrieval | graphRag, retrieve | The walk and the communities are undirected: what is connected to a fact does not depend on which way an edge was written | Ignored: relationship weights do not change the walk or the communities | Walked, but they reach nothing new; a self-loop never makes a node its own seed twice | The walk stays in each seed's component; `global` returns only communities that contain a seed | By score, then fewer hops, then node id; a node near several seeds keeps its best score, the earlier (nearer) seed on a tie | Scores are similarities from the vector index's metric times `decay^hops`, not normalised to sum to 1; `global` scores are sums of seed similarities |
+
 ## Not a graph algorithm
 
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |

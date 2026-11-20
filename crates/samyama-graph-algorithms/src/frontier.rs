@@ -347,6 +347,7 @@ pub const BUILT_ON_FRONTIER: &[(&str, &str, &[&str])] = &[
         "negative_sampling.rs",
         &["algo.negativeSampling"],
     ),
+    ("retrieve", "graphrag.rs", &["algo.graphRag", "algo.retrieve"]),
 ];
 
 #[cfg(test)]
@@ -541,6 +542,7 @@ mod tests {
                 "pathfinding.rs" => include_str!("pathfinding.rs"),
                 "pathfinding_extra.rs" => include_str!("pathfinding_extra.rs"),
                 "negative_sampling.rs" => include_str!("negative_sampling.rs"),
+                "graphrag.rs" => include_str!("graphrag.rs"),
                 other => panic!("{other}: add it to this match"),
             }
         };

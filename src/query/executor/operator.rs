@@ -20038,6 +20038,230 @@ impl AlgorithmOperator {
         Ok(())
     }
 
+    /// `algo.graphRag({query, label, property, strategy, ...})`, also
+    /// `algo.retrieve` -- GraphRAG retrieval in one call (AI-07, #1702).
+    ///
+    /// Composes the four things a GraphRAG pipeline used to stitch together
+    /// outside the engine:
+    ///
+    /// 1. **Vector search** for the `k` nodes of `:label` whose `property`
+    ///    is nearest `query` (the seeds), with the index's own similarity;
+    /// 2. **Hierarchy**: `hierarchy` and `under` keep the seeds to the subtree
+    ///    under one node of a hierarchy index;
+    /// 3. **Time**: `timeProperty` with `since` and/or `until` keeps every
+    ///    node -- seed or reached -- to that window, and the walk does not pass
+    ///    through a node outside it;
+    /// 4. **Graph expansion** by `strategy` (`local`, `global`, `drift`; see
+    ///    `samyama_graph_algorithms::graphrag`), over `edgeType` if given.
+    ///
+    /// One row per retrieved node: `node, score, hops, seed, community, path`,
+    /// highest score first. The question arrives as an embedding: the engine
+    /// does not call a model, so the same call gives the same rows.
+    fn execute_graphrag(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        use samyama_graph_algorithms::graphrag::{RetrievalConfig, Seed, Strategy};
+        const DEFAULT_K: i64 = 5;
+        const DEFAULT_HOPS: i64 = 2;
+        const DEFAULT_DECAY: f64 = 0.5;
+        const DEFAULT_COMMUNITIES: i64 = 3;
+        const DEFAULT_LIMIT: i64 = 50;
+        /// Past this the walk covers most of any real graph from every seed;
+        /// a caller asking for more has made a mistake worth reporting.
+        const MAX_HOPS: i64 = 10;
+        /// A seed costs a walk; this bounds the work one call can ask for.
+        const MAX_SEEDS: i64 = 1000;
+        /// Louvain's pass limit, as `algo.louvain` uses it.
+        const LOUVAIN_PASSES: usize = 20;
+        let call = self.name.clone();
+        Self::reject_unknown_config_keys(
+            &self.args,
+            &call,
+            &[
+                "communities", "decay", "edgeType", "hierarchy", "hops", "k", "label", "limit", "property",
+                "query", "since", "strategy", "timeProperty", "under", "until",
+            ],
+        )?;
+        let mut config: std::collections::HashMap<String, PropertyValue> = std::collections::HashMap::new();
+        for arg in &self.args {
+            match arg {
+                Expression::Literal(PropertyValue::Map(m)) => config.extend(m.iter().map(|(k, v)| (k.clone(), v.clone()))),
+                _ => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "{call}: takes one config map, e.g. {{query: [..], label: 'Chunk', property: 'embedding'}}"
+                    )))
+                }
+            }
+        }
+        let bad = |key: &str, want: &str, got: &PropertyValue| {
+            ExecutionError::bad_argument(format!("{call}: `{key}` must be {want}, got {got:?}"))
+        };
+        let string = |key: &str| -> ExecutionResult<Option<String>> {
+            match config.get(key) {
+                None => Ok(None),
+                Some(PropertyValue::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+                Some(other) => Err(bad(key, "a non-empty string", other)),
+            }
+        };
+        let integer = |key: &str, default: i64, min: i64, max: i64| -> ExecutionResult<i64> {
+            match config.get(key) {
+                None => Ok(default),
+                Some(PropertyValue::Integer(i)) if (min..=max).contains(i) => Ok(*i),
+                Some(other) => Err(bad(key, &format!("an integer from {min} to {max}"), other)),
+            }
+        };
+        let number = |key: &str| -> ExecutionResult<Option<f64>> {
+            match config.get(key) {
+                None => Ok(None),
+                Some(PropertyValue::Integer(i)) => Ok(Some(*i as f64)),
+                Some(PropertyValue::Float(f)) if f.is_finite() => Ok(Some(*f)),
+                Some(other) => Err(bad(key, "a finite number", other)),
+            }
+        };
+
+        let query: Vec<f32> = match config.get("query") {
+            Some(PropertyValue::Vector(v)) if !v.is_empty() => v.clone(),
+            Some(PropertyValue::Array(items)) if !items.is_empty() => items
+                .iter()
+                .map(|x| match x {
+                    PropertyValue::Float(f) if f.is_finite() => Ok(*f as f32),
+                    PropertyValue::Integer(i) => Ok(*i as f32),
+                    other => Err(bad("query", "a list of numbers (the question's embedding)", other)),
+                })
+                .collect::<ExecutionResult<_>>()?,
+            Some(other) => return Err(bad("query", "a non-empty list of numbers (the question's embedding)", other)),
+            None => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `query` is required: the question's embedding, as a list of numbers. \
+                     The engine does not embed text; embed the question with the model that \
+                     embedded `property`."
+                )))
+            }
+        };
+        let (Some(label), Some(property)) = (string("label")?, string("property")?) else {
+            return Err(ExecutionError::bad_argument(format!(
+                "{call}: `label` and `property` are required: the vector index to search, \
+                 e.g. {{label: 'Chunk', property: 'embedding'}}"
+            )));
+        };
+        let strategy_name = string("strategy")?.unwrap_or_else(|| Strategy::NAMES[0].to_string());
+        let strategy = Strategy::parse(&strategy_name).ok_or_else(|| {
+            ExecutionError::bad_argument(format!(
+                "{call}: unknown strategy `{strategy_name}`; use one of {}",
+                Strategy::NAMES.map(|s| format!("`{s}`")).join(", ")
+            ))
+        })?;
+        let k = integer("k", DEFAULT_K, 1, MAX_SEEDS)? as usize;
+        let hops = integer("hops", DEFAULT_HOPS, 0, MAX_HOPS)? as usize;
+        let communities = integer("communities", DEFAULT_COMMUNITIES, 1, i64::MAX)? as usize;
+        let limit = integer("limit", DEFAULT_LIMIT, 1, i64::MAX)? as usize;
+        let decay = number("decay")?.unwrap_or(DEFAULT_DECAY);
+        if !(decay > 0.0 && decay <= 1.0) {
+            return Err(ExecutionError::bad_argument(format!(
+                "{call}: `decay` must be above 0 and at most 1, got {decay}"
+            )));
+        }
+        let edge_type = string("edgeType")?;
+
+        // The time window, read off each node. A node without the property,
+        // or with one that is not a time, is outside any window: "facts from
+        // 2024 on" does not include facts with no date.
+        let time_property = string("timeProperty")?;
+        let (since, until) = (number("since")?, number("until")?);
+        if time_property.is_some() != (since.is_some() || until.is_some()) {
+            return Err(ExecutionError::bad_argument(format!(
+                "{call}: `timeProperty` and a bound (`since`, `until` or both) go together: \
+                 one names what to compare, the other what to compare it with"
+            )));
+        }
+        let in_window = |id: NodeId| -> bool {
+            let Some(prop) = &time_property else { return true };
+            let t = match store.node_property(id, prop) {
+                Some(PropertyValue::Integer(i)) => i as f64,
+                Some(PropertyValue::Float(f)) => f,
+                Some(PropertyValue::DateTime(ms)) => ms as f64,
+                Some(PropertyValue::Date(days)) => days as f64,
+                _ => return false,
+            };
+            since.is_none_or(|s| t >= s) && until.is_none_or(|u| t <= u)
+        };
+
+        // Seeds, restricted to a hierarchy subtree when one is named.
+        let hierarchy = string("hierarchy")?;
+        let under = match config.get("under") {
+            None => None,
+            Some(PropertyValue::Integer(i)) if *i >= 0 => Some(NodeId::new(*i as u64)),
+            Some(other) => return Err(bad("under", "a node id", other)),
+        };
+        let seeds = match (&hierarchy, under) {
+            (None, None) => store.vector_search_where(&label, &property, &query, k, None, in_window),
+            (Some(name), Some(root)) => {
+                let entry = store.hierarchy_index.usable_named(name).ok_or_else(|| {
+                    ExecutionError::bad_argument(format!("{call}: no usable hierarchy index named `{name}`"))
+                })?;
+                let guard = entry.read().unwrap_or_else(|e| e.into_inner());
+                let index = guard.index.as_ref().ok_or_else(|| {
+                    ExecutionError::bad_argument(format!("{call}: hierarchy index `{name}` was not built"))
+                })?;
+                let root_idx = index.poset().idx(root).ok_or_else(|| {
+                    ExecutionError::bad_argument(format!(
+                        "{call}: node {} is not in hierarchy `{name}`",
+                        root.as_u64()
+                    ))
+                })?;
+                let candidates: Vec<NodeId> =
+                    index.descendants(root_idx).into_iter().map(|i| index.poset().node_at(i)).collect();
+                store.vector_search_among(&label, &property, &query, k, &candidates, in_window)
+            }
+            _ => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `hierarchy` and `under` go together: the index, and the node whose \
+                     subtree the seeds must come from"
+                )))
+            }
+        }
+        .map_err(|e| ExecutionError::bad_argument(format!("{call}: {e}")))?;
+        let metric = store.vector_index.metric(&label, &property).ok_or_else(|| {
+            ExecutionError::bad_argument(format!("{call}: no vector index on :{label}({property})"))
+        })?;
+
+        let view = self.view(store, None, edge_type.as_deref(), None)?;
+        let seeds: Vec<Seed> = seeds
+            .into_iter()
+            .filter_map(|(id, distance)| {
+                let index = *view.node_to_index.get(&id.as_u64())?;
+                Some(Seed { index, similarity: metric.score(distance) })
+            })
+            .collect();
+        let partition = strategy.needs_communities().then(|| crate::algo::louvain(&view, LOUVAIN_PASSES));
+        let admit = |i: usize| in_window(NodeId::new(view.index_to_node[i]));
+        let hits = samyama_graph_algorithms::graphrag::retrieve(
+            &view,
+            &seeds,
+            partition.as_deref(),
+            &admit,
+            &RetrievalConfig { strategy, hops, decay, communities, limit },
+        );
+
+        let id_of = |i: usize| view.index_to_node[i];
+        let int_or_null =
+            |v: Option<u64>| Value::Property(v.map_or(PropertyValue::Null, |x| PropertyValue::Integer(x as i64)));
+        for hit in hits {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id_of(hit.index));
+            rec.bind("score".to_string(), Value::Property(PropertyValue::Float(hit.score)));
+            rec.bind("hops".to_string(), int_or_null(hit.hops.map(|h| h as u64)));
+            rec.bind("seed".to_string(), int_or_null(hit.seed.map(id_of)));
+            rec.bind("community".to_string(), int_or_null(hit.community.map(|c| c as u64)));
+            rec.bind(
+                "path".to_string(),
+                Value::Property(PropertyValue::Array(
+                    hit.path.iter().map(|&i| PropertyValue::Integer(id_of(i) as i64)).collect(),
+                )),
+            );
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
     /// `algo.negativeSampling({strategy, count, k, seed})` yielding `node1,
     /// node2`: pairs that are not edges, for training link prediction (ML-04,
     /// #1725). See `samyama_graph_algorithms::negative_sampling` for the three
@@ -22112,6 +22336,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
+                "graphrag" | "retrieve" => self.execute_graphrag(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,
@@ -22222,6 +22447,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
+                "graphrag" | "retrieve" => self.execute_graphrag(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
                 "hits" | "hubsandauthorities" => self.execute_hits(store)?,
