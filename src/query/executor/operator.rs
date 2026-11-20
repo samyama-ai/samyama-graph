@@ -75,6 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
+use samyama_optimization::constraints::{Constrained, ConstraintHandling};
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, CMAESSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
 
@@ -6447,6 +6448,105 @@ impl Problem for GraphOptimizationProblem {
 
         penalty
     }
+
+    fn can_repair(&self) -> bool {
+        true
+    }
+
+    fn repair(&self, variables: &Array1<f64>) -> Option<Array1<f64>> {
+        Some(self.repair_point(variables))
+    }
+}
+
+impl GraphOptimizationProblem {
+    /// The repair behind `constraintHandling: 'repair'` (OPT-10, #2266).
+    ///
+    /// Greedy, deterministic, and a no-op on a feasible point:
+    ///
+    /// 1. clamp each variable to `[lower, upper]` (a NaN goes to `lower`);
+    /// 2. short of `minTotal`: raise the cheapest variables first, to `upper`;
+    /// 3. over `budget`: lower the most expensive first, but only by the
+    ///    surplus above `minTotal`;
+    /// 4. still over: move quantity from the most expensive variable to the
+    ///    cheapest one with room, which keeps the total and lowers the cost.
+    ///
+    /// Each limit is aimed at from a hair inside (1e-9 relative): feasibility
+    /// is checked strictly, and a point repaired exactly onto the boundary can
+    /// land 1e-15 outside it by rounding. When the constraints cannot all be
+    /// met within the bounds the result is as close as these steps get, and it
+    /// is reported infeasible like any other.
+    fn repair_point(&self, x: &Array1<f64>) -> Array1<f64> {
+        let (lo, hi) = (self.lower, self.upper);
+        let mut y = x.mapv(|v| if v.is_nan() { lo } else { v.clamp(lo, hi) });
+        let n = self.dim.min(y.len());
+        let costs: Vec<f64> = (0..n).map(|i| self.costs.get(i).copied().unwrap_or(1.0)).collect();
+        let inside = |limit: f64| 1e-9 * limit.abs().max(1.0);
+        let cost_of = |y: &Array1<f64>| (0..n).map(|i| y[i] * costs[i]).sum::<f64>();
+        let by_cost = |descending: bool| {
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| {
+                let o = costs[a].total_cmp(&costs[b]).then(a.cmp(&b));
+                if descending { o.reverse() } else { o }
+            });
+            order
+        };
+
+        if let Some(min_total) = self.min_total {
+            let mut short = min_total + inside(min_total) - y.sum();
+            for i in by_cost(false) {
+                if short <= 0.0 {
+                    break;
+                }
+                let d = (hi - y[i]).min(short).max(0.0);
+                y[i] += d;
+                short -= d;
+            }
+        }
+
+        if let Some(budget) = self.budget {
+            let target = budget - inside(budget);
+            let mut over = cost_of(&y) - target;
+            if over > 0.0 {
+                let mut surplus = self
+                    .min_total
+                    .map_or(f64::INFINITY, |m| (y.sum() - m - inside(m)).max(0.0));
+                for i in by_cost(true) {
+                    if over <= 0.0 || surplus <= 0.0 {
+                        break;
+                    }
+                    if costs[i] <= 0.0 {
+                        continue;
+                    }
+                    let d = (y[i] - lo).min(surplus).min(over / costs[i]).max(0.0);
+                    y[i] -= d;
+                    surplus -= d;
+                    over -= d * costs[i];
+                }
+                // Each step saturates a variable or closes the gap, so 2n
+                // steps are enough; the cap is a guard against rounding.
+                for _ in 0..(2 * n + 2) {
+                    if over <= 0.0 {
+                        break;
+                    }
+                    let from = by_cost(true).into_iter().find(|&i| y[i] > lo);
+                    let to = by_cost(false).into_iter().find(|&j| y[j] < hi);
+                    let (Some(i), Some(j)) = (from, to) else { break };
+                    let saving = costs[i] - costs[j];
+                    if saving <= 0.0 {
+                        break;
+                    }
+                    let d = (y[i] - lo).min(hi - y[j]).min(over / saving).max(0.0);
+                    if d <= 0.0 {
+                        break;
+                    }
+                    y[i] -= d;
+                    y[j] += d;
+                    over -= d * saving;
+                }
+            }
+        }
+        y
+    }
 }
 
 impl MultiObjectiveProblem for GraphOptimizationProblem {
@@ -6466,12 +6566,27 @@ impl MultiObjectiveProblem for GraphOptimizationProblem {
         results
     }
 
+    /// The budget and minimum-total violation, as one constraint (OPT-10).
+    /// Without it the multi-objective solvers ran with no constraint at all:
+    /// a budget was only checked after the run, to report `feasible`.
+    fn penalties(&self, variables: &Array1<f64>) -> Vec<f64> {
+        vec![Problem::penalty(self, variables)]
+    }
+
     fn dim(&self) -> usize { self.dim }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (
             Array1::from_elem(self.dim, self.lower),
             Array1::from_elem(self.dim, self.upper)
         )
+    }
+
+    fn can_repair(&self) -> bool {
+        true
+    }
+
+    fn repair(&self, variables: &Array1<f64>) -> Option<Array1<f64>> {
+        Some(self.repair_point(variables))
     }
 }
 
@@ -21569,6 +21684,40 @@ impl AlgorithmOperator {
         Ok(Some(number))
     }
 
+    /// `constraintHandling` from an `or.solve` config (OPT-10, #2266):
+    /// `penalty`, `repair` or `feasibility` (Deb's rules).
+    ///
+    /// The default is what each kind of solver did before: `penalty` for a
+    /// single-objective solver, whose fitness has always been objective plus
+    /// penalty, and `feasibility` for a multi-objective one, whose constrained
+    /// dominance is Deb's rules -- now given the budget and minimum, which it
+    /// was not before.
+    fn or_solve_constraint_handling(
+        config: &HashMap<String, PropertyValue>,
+        is_multi_objective: bool,
+    ) -> ExecutionResult<ConstraintHandling> {
+        match config
+            .get("constraintHandling")
+            .or_else(|| config.get("constraint_handling"))
+        {
+            None => Ok(if is_multi_objective {
+                ConstraintHandling::FeasibilityRules
+            } else {
+                ConstraintHandling::Penalty
+            }),
+            Some(PropertyValue::String(name)) => ConstraintHandling::from_name(name).ok_or_else(|| {
+                ExecutionError::bad_argument(format!(
+                    "or.solve: unknown constraintHandling `{name}`; use one of {}",
+                    ConstraintHandling::NAMES.join(", ")
+                ))
+            }),
+            Some(other) => Err(ExecutionError::bad_argument(format!(
+                "or.solve: `constraintHandling` must be one of {}, got {other:?}",
+                ConstraintHandling::NAMES.join(", ")
+            ))),
+        }
+    }
+
     /// Bind the four result-envelope columns every `or.solve` row carries
     /// (OPT-09, #1776), so the single- and multi-objective branches cannot
     /// drift apart on their names:
@@ -21609,7 +21758,8 @@ impl AlgorithmOperator {
         // reported success. Both spellings are accepted now, and anything else
         // is refused (#1341).
         Self::reject_unknown_config_keys(&self.args, "or.solve", &[
-            "algorithm", "bestKnown", "best_known", "budget", "costProperties", "costProperty",
+            "algorithm", "bestKnown", "best_known", "budget", "constraintHandling",
+            "constraint_handling", "costProperties", "costProperty",
             "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
             "max_iterations",
             "minTotal", "min", "min_total", "populationSize", "population_size",
@@ -21631,14 +21781,26 @@ impl AlgorithmOperator {
         let property = config_map.get("property").and_then(|v| v.as_string())
             .ok_or_else(|| ExecutionError::RuntimeError("Missing 'property' in config".to_string()))?;
         
-        let cfg_f = |a: &str, b: &str| {
-            config_map.get(a).or_else(|| config_map.get(b)).and_then(|v| v.as_float())
+        // A number, whole or not. `as_float` is `Some` for a `Float` only, so
+        // `{budget: 10}` used to read as no budget at all and `{upperBound:
+        // 10}` as the default 100 -- a constraint the caller wrote, silently
+        // dropped (OPT-10, #2266). Anything present and not a number is
+        // refused for the same reason.
+        let cfg_f = |a: &str, b: &str| -> ExecutionResult<Option<f64>> {
+            match config_map.get(a).map(|v| (a, v)).or_else(|| config_map.get(b).map(|v| (b, v))) {
+                None => Ok(None),
+                Some((_, PropertyValue::Float(f))) => Ok(Some(*f)),
+                Some((_, PropertyValue::Integer(i))) => Ok(Some(*i as f64)),
+                Some((key, other)) => Err(ExecutionError::bad_argument(format!(
+                    "or.solve: `{key}` must be a number, got {other:?}"
+                ))),
+            }
         };
         let cfg_i = |a: &str, b: &str| {
             config_map.get(a).or_else(|| config_map.get(b)).and_then(|v| v.as_integer())
         };
-        let min_val = cfg_f("lowerBound", "min").unwrap_or(0.0);
-        let max_val = cfg_f("upperBound", "max").unwrap_or(100.0);
+        let min_val = cfg_f("lowerBound", "min")?.unwrap_or(0.0);
+        let max_val = cfg_f("upperBound", "max")?.unwrap_or(100.0);
         // The solvers draw their starting population with
         // `gen_range(lower..upper)`, which panics on an empty or inverted
         // range, so `{lowerBound: 5, upperBound: 5}` died with "cannot sample
@@ -21667,12 +21829,13 @@ impl AlgorithmOperator {
             }
         }
 
-        let budget = config_map.get("budget").and_then(|v| v.as_float());
-        let min_total = cfg_f("minTotal", "min_total");
+        let budget = cfg_f("budget", "budget")?;
+        let min_total = cfg_f("minTotal", "min_total")?;
 
         let best_known = Self::or_solve_best_known(config_map)?;
         let is_multi_objective =
             Self::MULTI_OBJECTIVE_SOLVERS.contains(&algorithm) || cost_props.len() > 1;
+        let constraint_handling = Self::or_solve_constraint_handling(config_map, is_multi_objective)?;
         // A gap is a distance between two numbers; a Pareto front has a vector
         // per point and no single best known value. Ignoring the key would
         // report `gap: null` for a value the caller did supply. Checked before
@@ -21769,6 +21932,11 @@ impl AlgorithmOperator {
             lower: min_val,
             upper: max_val,
         };
+        // The constraint strategy (OPT-10, #2266), applied around the problem
+        // so every solver gets it. `resolve` below turns a solver's answer into
+        // the point actually evaluated: the repaired one under `repair`.
+        let problem = Constrained::new(problem, constraint_handling)
+            .map_err(|e| ExecutionError::bad_argument(format!("or.solve: {e}")))?;
 
         let solver_config = SolverConfig {
             population_size: pop_size,
@@ -21796,9 +21964,11 @@ impl AlgorithmOperator {
             };
             let total_time_ms = duration_ms(started.elapsed());
 
-            // Write back first individual from Pareto Front
-            if let Some(best) = res.pareto_front.first() {
-                for (i, &val) in best.variables.iter().enumerate() {
+            // Write back first individual from Pareto Front: the point it was
+            // scored at, which `repair` may have moved.
+            let resolved = res.pareto_front.first().map(|best| problem.resolve_multi(&best.variables));
+            if let Some(best) = &resolved {
+                for (i, &val) in best.iter().enumerate() {
                     let node_id = node_ids[i];
                     store
                         .set_node_property(
@@ -21825,14 +21995,20 @@ impl AlgorithmOperator {
             // breaks the budget, and reading it would report every point
             // feasible. `objective` is the raw objective vector, which here is
             // `fitness` itself: no penalty is added to it.
-            let (objective, feasible) = match res.pareto_front.first() {
+            // `objective` is the raw objective vector of the point written
+            // back: under `penalty` the solver's `fitness` has the penalty
+            // folded into every objective, so it is recomputed here without.
+            let (objective, feasible) = match &resolved {
                 Some(best) => (
                     Value::Property(PropertyValue::Array(
-                        best.fitness.iter().map(|&f| PropertyValue::Float(f)).collect(),
+                        MultiObjectiveProblem::objectives(problem.inner(), best)
+                            .into_iter()
+                            .map(PropertyValue::Float)
+                            .collect(),
                     )),
                     Value::Property(PropertyValue::Boolean(is_feasible(Problem::penalty(
-                        &problem,
-                        &best.variables,
+                        problem.inner(),
+                        best,
                     )))),
                 ),
                 None => (Value::Null, Value::Null),
@@ -21893,8 +22069,10 @@ impl AlgorithmOperator {
             };
             let total_time_ms = duration_ms(started.elapsed());
 
-            // 4. Write back results
-            for (i, &val) in result.best_variables.iter().enumerate() {
+            // 4. Write back results: the point the answer was scored at, which
+            // `repair` may have moved (OPT-10).
+            let best_variables = problem.resolve(&result.best_variables);
+            for (i, &val) in best_variables.iter().enumerate() {
                 let node_id = node_ids[i];
                 store
                     .set_node_property(
@@ -21936,8 +22114,8 @@ impl AlgorithmOperator {
             // The result envelope (OPT-09, #1776). `fitness` is objective plus
             // penalty, so on its own it cannot say whether the answer obeys the
             // budget and minimum: these columns separate the two.
-            let objective = problem.objective(&result.best_variables);
-            let feasible = is_feasible(problem.penalty(&result.best_variables));
+            let objective = Problem::objective(problem.inner(), &best_variables);
+            let feasible = is_feasible(Problem::penalty(problem.inner(), &best_variables));
             let gap = match best_known {
                 Some(best) => Value::Property(PropertyValue::Float(gap_to_best_known(objective, best))),
                 None => Value::Null,
