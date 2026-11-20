@@ -4271,6 +4271,9 @@ impl QueryPlanner {
                 Some((scope, subtree)) => (Some(scope), Some(subtree)),
                 None => (None, None),
             };
+            // The width each strategy is priced at is the one the search
+            // would use: the query's, else the index's, else `max(2k, 64)`,
+            // as `VectorIndex::search_ef` picks it (#1999).
             let plan = if let Some(subtree) = subtree {
                 let filter_selectivity = vector_filter
                     .as_ref()
@@ -4285,7 +4288,7 @@ impl QueryPlanner {
                         ));
                     }
                     Some(crate::vector::strategy::FilterPlan::estimate_enumerated(
-                        index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, subtree, filter_selectivity,
+                        index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or((2 * k).max(64)), params.m, subtree, filter_selectivity,
                     ))
                 })
             } else {
@@ -4300,7 +4303,7 @@ impl QueryPlanner {
                         ));
                     }
                     Some(crate::vector::strategy::FilterPlan::estimate(
-                        index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, selectivity,
+                        index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or((2 * k).max(64)), params.m, selectivity,
                     ))
                 })
             };
