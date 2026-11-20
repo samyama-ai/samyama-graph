@@ -325,6 +325,14 @@ harness = false
 name = "vector_cost_profile"
 harness = false
 
+# Modern-embedding scale benchmark (#1984): VectorDBBench's Cohere/OpenAI
+# cases, load/build time, recall@100/@10, p99, max QPS, $ per million queries
+# and the NDS-05 line. Its arithmetic is in benches/vector_scale_common,
+# tested by tests/vector_scale.rs.
+[[bench]]
+name = "vector_scale_benchmark"
+harness = false
+
 [[bench]]
 name = "vector_distance"
 harness = false
