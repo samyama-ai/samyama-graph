@@ -282,6 +282,11 @@ fn show_and_analyze_statements_set_their_flags() {
     assert!(ok("SHOW INDEXES").show_indexes);
     assert!(ok("SHOW INDEX").show_indexes);
     assert!(ok("ANALYZE").analyze);
+    assert_eq!(ok("ANALYZE").analyze_label, None);
+    let q = ok("ANALYZE :Person");
+    assert!(q.analyze);
+    assert_eq!(q.analyze_label, Some(Label::new("Person")));
+    assert_eq!(ok("analyze :`Research Paper`").analyze_label, Some(Label::new("Research Paper")));
     assert!(ok("SHOW HIERARCHY INDEXES").show_hierarchy_indexes);
     assert!(ok("SHOW CONSTRAINTS").show_constraints);
 }
