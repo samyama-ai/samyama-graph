@@ -8,9 +8,9 @@
 //!
 //! `OPTIONS {quantization: "fp16"}` accepted and ignored would be worse than
 //! the refusal it replaced: the caller would believe their vectors were half
-//! the size. So the index holds `f16` in the HNSW graph **and** in the copy
-//! kept for persistence. `vector_bytes()` reports both, and the case below
-//! asserts the ratio rather than trusting the type.
+//! the size. So the index holds `f16` in the HNSW graph, which since #1973 is
+//! the only copy of the vectors. `vector_bytes()` reports it, and the case
+//! below asserts the ratio rather than trusting the type.
 //!
 //! # Why recall is compared, not asserted
 //!

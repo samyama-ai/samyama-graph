@@ -641,6 +641,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             }
             Rule::analyze_stmt => {
                 query.analyze = true;
+                query.analyze_label = inner
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::label)
+                    .map(|p| Label::new(unescape_name(p.as_str())));
             }
             Rule::show_hierarchy_indexes_stmt => {
                 query.show_hierarchy_indexes = true;
