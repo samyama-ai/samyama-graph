@@ -184,6 +184,9 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
         Optimization,
         &["path", "cost", "resource"],
     ),
+    // Structure-aware (#2037): graphs whose nodes have 3D or geographic positions.
+    read("algo.structural.astar", &[], Path, &["path", "hops", "length", "direct", "stretch", "expanded", "expandedUnguided"]),
+    read("algo.structural.stress", &[], Structure, &["source", "target", "distance", "pathLength", "hops", "stretch"]),
 ];
 
 /// How an argument is passed: by position, or as a key of the config map.
@@ -476,6 +479,20 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         LABEL,
         EDGE_TYPE,
     ]),
+    ("algo.structural.astar", &[
+        SOURCE,
+        TARGET,
+        opt("structure", T::String),
+        key("cost", T::String, D::String("length")),
+        EDGE_TYPE,
+        key("undirected", T::Boolean, D::Boolean(true)),
+    ]),
+    ("algo.structural.stress", &[
+        opt("structure", T::String),
+        opt("radius", T::Float),
+        EDGE_TYPE,
+        key("limit", T::Integer, D::Integer(100)),
+    ]),
 ];
 
 /// What each algorithm computes, one sentence, by catalogue name (#2013).
@@ -555,6 +572,8 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.solve", "Optimises a numeric property on each node of a label with a metaheuristic solver (Jaya by default), each value within the bounds, minimising the sum of value times its cost property."),
     ("algo.negativeSampling", "Node pairs that are not edges, for training link prediction (random, degree-matched or k-hop)."),
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
+    ("algo.structural.astar", "The shortest path between two positioned nodes, by length or by hops, searched in order of the straight-line distance to the target."),
+    ("algo.structural.stress", "Pairs of positioned nodes within a radius that no relationship joins, with the shortest path between them and its stretch over the straight line."),
 ];
 
 impl AlgorithmEntry {

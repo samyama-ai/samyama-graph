@@ -4,6 +4,8 @@
 //! Algorithms are implemented in `samyama-graph-algorithms` crate.
 //! This module provides the integration/adapter layer.
 
+pub mod structural;
+
 use crate::graph::{GraphStore, EdgeType, Label, PropertyValue};
 pub use samyama_graph_algorithms::GraphView;
 use samyama_graph_algorithms::NodeId as AlgoNodeId;
