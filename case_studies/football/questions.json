@@ -1,0 +1,544 @@
+[
+  {
+    "id": "fb_tournament_count",
+    "difficulty": "easy",
+    "question": "How many World Cup tournaments does the graph cover?",
+    "paraphrases": [
+      "How many World Cups are in the graph, men's and women's together?"
+    ],
+    "cypher": "MATCH (t:Tournament) RETURN count(t) AS tournaments"
+  },
+  {
+    "id": "fb_womens_tournament_count",
+    "difficulty": "easy",
+    "question": "How many of the tournaments are Women's World Cups?",
+    "cypher": "MATCH (t:Tournament) WHERE t.name CONTAINS \"Women's\" RETURN count(t) AS womens_world_cups"
+  },
+  {
+    "id": "fb_team_count",
+    "difficulty": "easy",
+    "question": "How many national teams are in the graph?",
+    "cypher": "MATCH (t:Team) RETURN count(t) AS teams"
+  },
+  {
+    "id": "fb_match_count",
+    "difficulty": "easy",
+    "question": "How many World Cup matches does the graph hold?",
+    "cypher": "MATCH (m:Match) RETURN count(m) AS matches"
+  },
+  {
+    "id": "fb_own_goal_count",
+    "difficulty": "easy",
+    "question": "How many own goals have been scored at the World Cup?",
+    "cypher": "MATCH (g:Goal) WHERE g.own_goal = true RETURN count(g) AS own_goals"
+  },
+  {
+    "id": "fb_stadium_count",
+    "difficulty": "easy",
+    "question": "How many stadiums have hosted World Cup matches?",
+    "cypher": "MATCH (s:Stadium) RETURN count(s) AS stadiums"
+  },
+  {
+    "id": "fb_manager_count",
+    "difficulty": "easy",
+    "question": "How many managers are in the graph?",
+    "cypher": "MATCH (m:Manager) RETURN count(m) AS managers"
+  },
+  {
+    "id": "fb_players_by_position",
+    "difficulty": "easy",
+    "question": "How many players are there in each playing position?",
+    "paraphrases": [
+      "Break the players down by position."
+    ],
+    "cypher": "MATCH (p:Player) RETURN p.position AS position, count(p) AS players"
+  },
+  {
+    "id": "fb_largest_stadium",
+    "difficulty": "easy",
+    "question": "Which World Cup stadium has the largest capacity, and how big is it?",
+    "cypher": "MATCH (s:Stadium) RETURN s.name AS stadium, s.city AS city, s.capacity AS capacity ORDER BY capacity DESC, stadium LIMIT 1"
+  },
+  {
+    "id": "fb_tournament_winner",
+    "difficulty": "easy",
+    "question": "Who won the {year} World Cup?",
+    "paraphrases": [
+      "Which team were champions in {year}?"
+    ],
+    "cypher": "MATCH (t:Tournament {year: $year}) RETURN t.winner AS winner",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 1986
+      }
+    ]
+  },
+  {
+    "id": "fb_tournament_host",
+    "difficulty": "easy",
+    "question": "Which country hosted the {year} World Cup?",
+    "cypher": "MATCH (t:Tournament {year: $year}) RETURN t.host_country AS host",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 1970
+      }
+    ]
+  },
+  {
+    "id": "fb_tournament_team_count",
+    "difficulty": "easy",
+    "question": "How many teams took part in the {year} World Cup?",
+    "cypher": "MATCH (t:Tournament {year: $year}) RETURN t.count_teams AS teams",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2015
+      }
+    ]
+  },
+  {
+    "id": "fb_confederation_team_count",
+    "difficulty": "easy",
+    "question": "How many of the teams belong to the {confederation}?",
+    "cypher": "MATCH (t:Team {confederation: $confederation}) RETURN count(t) AS teams",
+    "params": [
+      {
+        "name": "confederation",
+        "type": "string",
+        "sample": "Asian Football Confederation",
+        "enum_values": [
+          "Union of European Football Associations",
+          "Confederation of African Football",
+          "Asian Football Confederation",
+          "Confederation of North, Central American and Caribbean Association Football",
+          "South American Football Confederation",
+          "Oceania Football Confederation"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "fb_team_code",
+    "difficulty": "easy",
+    "question": "What is the three-letter country code of {team}?",
+    "cypher": "MATCH (t:Team {name: $team}) RETURN t.code AS code",
+    "params": [
+      {
+        "name": "team",
+        "type": "string",
+        "sample": "Netherlands"
+      }
+    ]
+  },
+  {
+    "id": "fb_unanswerable_attendance",
+    "difficulty": "easy",
+    "question": "Which World Cup match drew the biggest crowd?",
+    "unanswerable": true,
+    "cypher": "MATCH (m:Match) WHERE m.attendance IS NOT NULL RETURN m.name AS match, m.date AS date, m.attendance AS crowd ORDER BY crowd DESC LIMIT 1"
+  },
+  {
+    "id": "fb_titles_by_team",
+    "difficulty": "medium",
+    "question": "How many World Cups has each nation won, counting men's and women's titles together, most titles first (ties alphabetically)?",
+    "paraphrases": [
+      "Which countries have won the World Cup, and how many times?"
+    ],
+    "cypher": "MATCH (t:Tournament) RETURN t.winner AS team, count(t) AS titles ORDER BY titles DESC, team"
+  },
+  {
+    "id": "fb_womens_champions",
+    "difficulty": "medium",
+    "question": "Which teams have won the Women's World Cup, and how many times each (most first, ties alphabetically)?",
+    "cypher": "MATCH (t:Tournament) WHERE t.name CONTAINS \"Women's\" RETURN t.winner AS team, count(t) AS titles ORDER BY titles DESC, team"
+  },
+  {
+    "id": "fb_scorers_12_plus",
+    "difficulty": "medium",
+    "question": "Which players have scored at least 12 World Cup goals, not counting own goals? List them by goals, then by name.",
+    "paraphrases": [
+      "Who are the all-time World Cup top scorers with 12 or more goals?"
+    ],
+    "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player) WHERE g.own_goal = false WITH p, count(g) AS goals WHERE goals >= 12 RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, goals ORDER BY goals DESC, player"
+  },
+  {
+    "id": "fb_player_goals",
+    "difficulty": "medium",
+    "question": "How many World Cup goals did {player} score?",
+    "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player) WHERE g.own_goal = false AND CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END = $player RETURN count(g) AS goals",
+    "params": [
+      {
+        "name": "player",
+        "type": "string",
+        "sample": "Miroslav Klose"
+      }
+    ]
+  },
+  {
+    "id": "fb_penalty_scorers",
+    "difficulty": "medium",
+    "question": "Which players have scored four or more penalties at the World Cup? List them by penalties, then by name.",
+    "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player) WHERE g.penalty = true WITH p, count(g) AS penalties WHERE penalties >= 4 RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, penalties ORDER BY penalties DESC, player"
+  },
+  {
+    "id": "fb_highest_scoring_match",
+    "difficulty": "medium",
+    "question": "Which World Cup match had the most goals in total?",
+    "paraphrases": [
+      "What is the highest-scoring World Cup game ever?"
+    ],
+    "cypher": "MATCH (m:Match) RETURN m.name AS match, m.date AS date, m.home_score AS home_goals, m.away_score AS away_goals, m.home_score + m.away_score AS total_goals ORDER BY total_goals DESC, date LIMIT 1"
+  },
+  {
+    "id": "fb_biggest_wins",
+    "difficulty": "medium",
+    "question": "Which matches were won by a margin of nine goals or more? Biggest margin first, then by date.",
+    "cypher": "MATCH (m:Match) WITH m, abs(m.home_score - m.away_score) AS margin WHERE margin >= 9 RETURN m.name AS match, m.date AS date, m.home_score AS home_goals, m.away_score AS away_goals, margin ORDER BY margin DESC, date"
+  },
+  {
+    "id": "fb_team_match_count",
+    "difficulty": "medium",
+    "question": "How many World Cup matches has {team} played, men's and women's combined?",
+    "cypher": "MATCH (m:Match)-[:HOME_TEAM|AWAY_TEAM]->(t:Team {name: $team}) RETURN count(m) AS matches",
+    "params": [
+      {
+        "name": "team",
+        "type": "string",
+        "sample": "Mexico"
+      }
+    ]
+  },
+  {
+    "id": "fb_team_wins",
+    "difficulty": "medium",
+    "question": "How many World Cup matches has {team} won, counting penalty-shootout wins as wins?",
+    "cypher": "MATCH (m:Match)-[r:HOME_TEAM|AWAY_TEAM]->(t:Team {name: $team}) WHERE ((type(r) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(r) = 'AWAY_TEAM' AND m.result = 'away team win')) RETURN count(m) AS wins",
+    "params": [
+      {
+        "name": "team",
+        "type": "string",
+        "sample": "Italy"
+      }
+    ]
+  },
+  {
+    "id": "fb_team_tournament_count",
+    "difficulty": "hard",
+    "question": "In how many different World Cups has {team} played a match?",
+    "cypher": "MATCH (t:Team {name: $team})<-[:HOME_TEAM|AWAY_TEAM]-(m:Match)-[:IN_TOURNAMENT]->(tr:Tournament) RETURN count(DISTINCT tr) AS tournaments",
+    "params": [
+      {
+        "name": "team",
+        "type": "string",
+        "sample": "Mexico"
+      }
+    ]
+  },
+  {
+    "id": "fb_stadiums_in_country",
+    "difficulty": "medium",
+    "question": "How many World Cup stadiums are in {country}?",
+    "cypher": "MATCH (s:Stadium {country: $country}) RETURN count(s) AS stadiums",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "Germany"
+      }
+    ]
+  },
+  {
+    "id": "fb_matches_at_stadium",
+    "difficulty": "medium",
+    "question": "How many World Cup matches have been played at {stadium}?",
+    "cypher": "MATCH (m:Match)-[:PLAYED_AT]->(s:Stadium {name: $stadium}) RETURN count(m) AS matches",
+    "params": [
+      {
+        "name": "stadium",
+        "type": "string",
+        "sample": "Estadio Azteca"
+      }
+    ]
+  },
+  {
+    "id": "fb_shared_stadium_names",
+    "difficulty": "medium",
+    "question": "Which stadium names appear on more than one stadium record, and how many records each? List alphabetically by stadium.",
+    "cypher": "MATCH (s:Stadium) WITH s.name AS stadium, count(s) AS records WHERE records > 1 RETURN stadium, records ORDER BY stadium"
+  },
+  {
+    "id": "fb_busiest_stadiums",
+    "difficulty": "medium",
+    "question": "Which stadiums have hosted at least 14 World Cup matches? Most matches first, then by name.",
+    "cypher": "MATCH (m:Match)-[:PLAYED_AT]->(s:Stadium) WITH s, count(m) AS matches WHERE matches >= 14 RETURN s.name AS stadium, s.city AS city, matches ORDER BY matches DESC, stadium"
+  },
+  {
+    "id": "fb_six_tournament_players",
+    "difficulty": "medium",
+    "question": "Which players have appeared at six or more World Cups?",
+    "cypher": "MATCH (p:Player) WHERE p.count_tournaments >= 6 RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, p.count_tournaments AS tournaments"
+  },
+  {
+    "id": "fb_managers_from_country",
+    "difficulty": "medium",
+    "question": "How many managers in the graph come from {country}?",
+    "cypher": "MATCH (m:Manager {country: $country}) RETURN count(m) AS managers",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "Italy"
+      }
+    ]
+  },
+  {
+    "id": "fb_extra_time_goals",
+    "difficulty": "medium",
+    "question": "How many goals were scored in extra time?",
+    "cypher": "MATCH (g:Goal) WHERE g.period STARTS WITH 'extra time' RETURN count(g) AS goals"
+  },
+  {
+    "id": "fb_semi_final_count",
+    "difficulty": "medium",
+    "question": "How many semi-final matches have been played in total?",
+    "cypher": "MATCH (m:Match) WHERE m.stage IN ['semi-final', 'semi-finals'] RETURN count(m) AS semi_finals"
+  },
+  {
+    "id": "fb_host_won",
+    "difficulty": "medium",
+    "question": "In which World Cups did the host country also win the tournament? List them by year.",
+    "paraphrases": [
+      "When did a host nation win its own World Cup?"
+    ],
+    "cypher": "MATCH (t:Tournament) WHERE t.winner = t.host_country RETURN t.year AS year, t.winner AS team ORDER BY year"
+  },
+  {
+    "id": "fb_first_minute_scorers",
+    "difficulty": "medium",
+    "question": "Which players scored a goal in the first minute of a World Cup match, excluding own goals?",
+    "cypher": "MATCH (g:Goal {minute: 1})-[:SCORED_BY]->(p:Player) WHERE g.own_goal = false RETURN DISTINCT CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player"
+  },
+  {
+    "id": "fb_avg_goals_per_match",
+    "difficulty": "medium",
+    "question": "What is the average number of goals per World Cup match, to two decimal places?",
+    "cypher": "MATCH (m:Match) RETURN round(100.0 * avg(m.home_score + m.away_score)) / 100.0 AS avg_goals"
+  },
+  {
+    "id": "fb_oldest_player",
+    "difficulty": "medium",
+    "question": "Who is the earliest-born player in the graph, among players with a known birth date?",
+    "cypher": "MATCH (p:Player) WHERE p.birth_date <> 'not available' RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, p.birth_date AS born ORDER BY born LIMIT 1"
+  },
+  {
+    "id": "fb_teams_per_region",
+    "difficulty": "medium",
+    "question": "How many teams come from each region of the world? Most teams first, ties alphabetically.",
+    "cypher": "MATCH (t:Team)-[:FROM]->(c:Country) RETURN c.name AS region, count(t) AS teams ORDER BY teams DESC, region"
+  },
+  {
+    "id": "fb_final_score",
+    "difficulty": "medium",
+    "question": "What was the score of the {year} World Cup final?",
+    "cypher": "MATCH (m:Match {stage: 'final'})-[:IN_TOURNAMENT]->(t:Tournament {year: $year}) RETURN m.name AS final, m.home_score AS home_goals, m.away_score AS away_goals",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 1986
+      }
+    ]
+  },
+  {
+    "id": "fb_penalty_shootouts",
+    "difficulty": "medium",
+    "question": "How many World Cup matches were level on goals but still had a winner, meaning they were decided by a penalty shootout?",
+    "cypher": "MATCH (m:Match) WHERE m.home_score = m.away_score AND m.result <> 'draw' RETURN count(m) AS shootouts"
+  },
+  {
+    "id": "fb_unanswerable_manager",
+    "difficulty": "medium",
+    "question": "Who managed {team} at the {year} World Cup?",
+    "unanswerable": true,
+    "cypher": "MATCH (mg:Manager)-[:MANAGED]->(t:Team {name: $team}) MATCH (t)<-[:HOME_TEAM|AWAY_TEAM]-(:Match)-[:IN_TOURNAMENT]->(:Tournament {year: $year}) RETURN DISTINCT mg.given_name AS given_name, mg.family_name AS family_name",
+    "params": [
+      {
+        "name": "team",
+        "type": "string",
+        "sample": "France"
+      },
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2018
+      }
+    ]
+  },
+  {
+    "id": "fb_unanswerable_referee",
+    "difficulty": "medium",
+    "question": "Who refereed the {year} World Cup final?",
+    "unanswerable": true,
+    "cypher": "MATCH (m:Match {stage: 'final'})-[:IN_TOURNAMENT]->(t:Tournament {year: $year}) WHERE m.referee IS NOT NULL RETURN m.referee AS referee",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2014
+      }
+    ]
+  },
+  {
+    "id": "fb_tournament_top_scorer",
+    "difficulty": "hard",
+    "question": "Who was the top scorer at the {year} World Cup, and how many goals did they score? Include everyone tied for the lead.",
+    "paraphrases": [
+      "Who won the golden boot in {year}?"
+    ],
+    "cypher": "MATCH (g:Goal)-[:SCORED_IN]->(m:Match)-[:IN_TOURNAMENT]->(t:Tournament {year: $year}), (g)-[:SCORED_BY]->(p:Player) WHERE g.own_goal = false WITH p, count(g) AS goals WITH collect({player: CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END, goals: goals}) AS rows, max(goals) AS top UNWIND rows AS r WITH r, top WHERE r.goals = top RETURN r.player AS player, r.goals AS goals",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2014
+      }
+    ]
+  },
+  {
+    "id": "fb_head_to_head",
+    "difficulty": "hard",
+    "question": "How many times have {team_a} and {team_b} met at the World Cup, and how many of those matches did each side win (shootouts included) or draw?",
+    "cypher": "MATCH (a:Team {name: $team_a})<-[ra:HOME_TEAM|AWAY_TEAM]-(m:Match)-[rb:HOME_TEAM|AWAY_TEAM]->(b:Team {name: $team_b}) RETURN count(m) AS played, sum(CASE WHEN (type(ra) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(ra) = 'AWAY_TEAM' AND m.result = 'away team win') THEN 1 ELSE 0 END) AS a_won, sum(CASE WHEN (type(rb) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(rb) = 'AWAY_TEAM' AND m.result = 'away team win') THEN 1 ELSE 0 END) AS b_won, sum(CASE WHEN m.result = 'draw' THEN 1 ELSE 0 END) AS drawn",
+    "params": [
+      {
+        "name": "team_a",
+        "type": "string",
+        "sample": "Brazil"
+      },
+      {
+        "name": "team_b",
+        "type": "string",
+        "sample": "Sweden"
+      }
+    ]
+  },
+  {
+    "id": "fb_team_goals_for_against",
+    "difficulty": "hard",
+    "question": "How many World Cup goals has {team} scored and how many has it conceded?",
+    "cypher": "MATCH (m:Match)-[r:HOME_TEAM|AWAY_TEAM]->(t:Team {name: $team}) RETURN sum(CASE WHEN type(r) = 'HOME_TEAM' THEN m.home_score ELSE m.away_score END) AS scored, sum(CASE WHEN type(r) = 'HOME_TEAM' THEN m.away_score ELSE m.home_score END) AS conceded",
+    "params": [
+      {
+        "name": "team",
+        "type": "string",
+        "sample": "Brazil"
+      }
+    ]
+  },
+  {
+    "id": "fb_player_goals_by_tournament",
+    "difficulty": "hard",
+    "question": "In which World Cups did {player} score, and how many goals at each? List by year.",
+    "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player), (g)-[:SCORED_IN]->(:Match)-[:IN_TOURNAMENT]->(t:Tournament) WHERE g.own_goal = false AND CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END = $player RETURN t.year AS year, count(g) AS goals ORDER BY year",
+    "params": [
+      {
+        "name": "player",
+        "type": "string",
+        "sample": "Miroslav Klose"
+      }
+    ]
+  },
+  {
+    "id": "fb_player_scoring_cities",
+    "difficulty": "hard",
+    "question": "In which cities did {player} score World Cup goals, and how many in each? Most goals first, ties alphabetically.",
+    "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player), (g)-[:SCORED_IN]->(:Match)-[:PLAYED_AT]->(s:Stadium) WHERE g.own_goal = false AND CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END = $player RETURN s.city AS city, count(g) AS goals ORDER BY goals DESC, city",
+    "params": [
+      {
+        "name": "player",
+        "type": "string",
+        "sample": "Pelé"
+      }
+    ]
+  },
+  {
+    "id": "fb_highest_avg_goals_tournaments",
+    "difficulty": "hard",
+    "question": "Which three World Cups had the highest average number of goals per match, to two decimal places?",
+    "cypher": "MATCH (m:Match)-[:IN_TOURNAMENT]->(t:Tournament) WITH t, avg(m.home_score + m.away_score) AS avg_goals RETURN t.name AS tournament, round(100.0 * avg_goals) / 100.0 AS goals_per_match ORDER BY goals_per_match DESC, tournament LIMIT 3"
+  },
+  {
+    "id": "fb_stadiums_most_goals",
+    "difficulty": "hard",
+    "question": "At which five stadiums have the most World Cup goals been scored? Ties broken by stadium name.",
+    "cypher": "MATCH (g:Goal)-[:SCORED_IN]->(:Match)-[:PLAYED_AT]->(s:Stadium) RETURN s.name AS stadium, s.city AS city, count(g) AS goals ORDER BY goals DESC, stadium LIMIT 5"
+  },
+  {
+    "id": "fb_final_appearances",
+    "difficulty": "hard",
+    "question": "Which teams have played in a World Cup final (men's or women's), and how many finals each? Most finals first, ties alphabetically.",
+    "paraphrases": [
+      "Which nations have reached the most World Cup finals?"
+    ],
+    "cypher": "MATCH (m:Match {stage: 'final'})-[:HOME_TEAM|AWAY_TEAM]->(t:Team) RETURN t.name AS team, count(m) AS finals ORDER BY finals DESC, team"
+  },
+  {
+    "id": "fb_multiple_hat_tricks",
+    "difficulty": "hard",
+    "question": "Which players have scored three or more goals in a single World Cup match more than once?",
+    "paraphrases": [
+      "Who has more than one World Cup hat-trick?"
+    ],
+    "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player), (g)-[:SCORED_IN]->(m:Match) WHERE g.own_goal = false WITH p, m, count(g) AS goals WHERE goals >= 3 WITH p, count(m) AS hat_tricks WHERE hat_tricks >= 2 RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, hat_tricks"
+  },
+  {
+    "id": "fb_confederation_wins",
+    "difficulty": "hard",
+    "question": "How many World Cup matches have teams from each confederation won, shootouts included, listing a confederation with no wins as zero? Most wins first.",
+    "cypher": "MATCH (t:Team) OPTIONAL MATCH (m:Match)-[r:HOME_TEAM|AWAY_TEAM]->(t) WHERE ((type(r) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(r) = 'AWAY_TEAM' AND m.result = 'away team win')) RETURN t.confederation AS confederation, count(m) AS wins ORDER BY wins DESC, confederation"
+  },
+  {
+    "id": "fb_shootout_winners",
+    "difficulty": "hard",
+    "question": "Which teams have won at least two World Cup penalty shootouts (matches level on goals that still had a winner)? Most shootout wins first, ties alphabetically.",
+    "cypher": "MATCH (m:Match)-[r:HOME_TEAM|AWAY_TEAM]->(t:Team) WHERE m.home_score = m.away_score AND ((type(r) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(r) = 'AWAY_TEAM' AND m.result = 'away team win')) WITH t, count(m) AS shootout_wins WHERE shootout_wins >= 2 RETURN t.name AS team, shootout_wins ORDER BY shootout_wins DESC, team"
+  },
+  {
+    "id": "fb_host_nation_wins",
+    "difficulty": "hard",
+    "question": "How many matches did the host nation win at the {year} World Cup, shootouts included?",
+    "cypher": "MATCH (t:Tournament {year: $year})<-[:IN_TOURNAMENT]-(m:Match)-[r:HOME_TEAM|AWAY_TEAM]->(team:Team) WHERE team.name = t.host_country AND ((type(r) = 'HOME_TEAM' AND m.result = 'home team win') OR (type(r) = 'AWAY_TEAM' AND m.result = 'away team win')) RETURN team.name AS host, count(m) AS wins",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2006
+      }
+    ]
+  },
+  {
+    "id": "fb_womens_top_scorers",
+    "difficulty": "hard",
+    "question": "Who has scored at least ten goals at Women's World Cups, not counting own goals? List by goals, then by name.",
+    "cypher": "MATCH (g:Goal)-[:SCORED_BY]->(p:Player), (g)-[:SCORED_IN]->(:Match)-[:IN_TOURNAMENT]->(t:Tournament) WHERE g.own_goal = false AND t.name CONTAINS \"Women's\" WITH p, count(g) AS goals WHERE goals >= 10 RETURN CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player, goals ORDER BY goals DESC, player"
+  },
+  {
+    "id": "fb_unanswerable_sent_off",
+    "difficulty": "hard",
+    "question": "Which players were sent off at the {year} World Cup?",
+    "unanswerable": true,
+    "cypher": "MATCH (p:Player)-[:SENT_OFF_IN]->(:Match)-[:IN_TOURNAMENT]->(:Tournament {year: $year}) RETURN DISTINCT CASE WHEN p.given_name = 'not applicable' THEN p.family_name ELSE p.given_name + ' ' + p.family_name END AS player",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2006
+      }
+    ]
+  }
+]

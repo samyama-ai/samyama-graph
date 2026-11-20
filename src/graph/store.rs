@@ -1088,8 +1088,9 @@ pub struct MemoryReport {
 }
 
 impl MemoryReport {
-    /// Everything the walk attributes. Deliberately not called `total`: the vector,
-    /// property and hierarchy index managers are behind `Arc` and are not walked, so
+    /// Everything the walk attributes. Deliberately not called `total`: the
+    /// indexes (vector and hierarchy included) are counted by
+    /// `GraphStore::index_memory`, not here, and allocator slack by nothing, so
     /// this is a floor on the graph's footprint and not the process's.
     pub fn attributed(&self) -> usize {
         self.node_columns
@@ -1421,6 +1422,10 @@ pub struct GraphStore {
     /// here counts, so a mutator added later makes a projection look stale,
     /// never fresh: the safe direction.
     data_changes: std::sync::atomic::AtomicU64,
+    /// The last content hash computed and the `data_changes` it was computed
+    /// at (ML-08, #1747). A hash is one pass over the whole graph, so an
+    /// export reuses it until the data changes.
+    content_hash_memo: std::sync::Mutex<Option<(u64, String)>>,
     /// Where this graph's data came from, from the `.sgsnap` headers it was
     /// imported from or a converter that built it (#1911). Written back into
     /// the header of every export.
@@ -1516,6 +1521,7 @@ impl GraphStore {
             statistics_cache: std::sync::RwLock::new(None),
             epoch: std::sync::atomic::AtomicU64::new(0),
             data_changes: std::sync::atomic::AtomicU64::new(0),
+            content_hash_memo: std::sync::Mutex::new(None),
             snapshot_sources: Vec::new(),
             snapshot_sources_epoch: 0,
             snapshot_sources_stale: false,
@@ -1741,9 +1747,9 @@ impl GraphStore {
     /// walked, so this is O(nodes + edges) and is a diagnostic rather than
     /// something to call per query.
     ///
-    /// Heap only. The `Arc`-held index managers report their own sizes if they can;
-    /// what is not attributed here is named in `unattributed_note` rather than
-    /// silently folded into another line.
+    /// Heap only, and the graph only. The `Arc`-held index managers report their
+    /// own sizes through [`GraphStore::index_memory`] rather than being folded
+    /// into a line here, so the two never count the same bytes.
     /// Resident bytes of every index the store holds, one row each, largest
     /// first (COST-06, NDS-14).
     ///
@@ -5016,6 +5022,11 @@ NodeDeleted { id, .. } => {
     /// How many times data may have changed: the epoch, less housekeeping.
     /// Equal readings mean no node, relationship, label or property changed in
     /// between. See `data_changes`.
+    /// The memo `snapshot::content_hash::cached_content_hash` keeps.
+    pub(crate) fn content_hash_memo(&self) -> &std::sync::Mutex<Option<(u64, String)>> {
+        &self.content_hash_memo
+    }
+
     pub fn data_changes(&self) -> u64 {
         self.data_changes.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -6808,6 +6819,9 @@ NodeDeleted { id, .. } => {
             IndexDefinition::VectorParams { label, property, .. } => {
                 (5u8, label.clone(), property.clone(), String::new())
             }
+            IndexDefinition::VectorKind { label, property, .. } => {
+                (6u8, label.clone(), property.clone(), String::new())
+            }
         });
         IndexCatalog { definitions }
     }
@@ -6986,6 +7000,8 @@ NodeDeleted { id, .. } => {
         // Applied after every index is declared, so a record that comes before
         // its index's declaration still finds it (#1971).
         let mut vector_params = Vec::new();
+        // And its kind (#1975).
+        let mut vector_kinds = Vec::new();
 
         for def in &catalog.definitions {
             match def {
@@ -7015,6 +7031,9 @@ NodeDeleted { id, .. } => {
                 IndexDefinition::Point { name, label, property } => {
                     self.create_point_index(name, label, property);
                     report.point += 1;
+                }
+                IndexDefinition::VectorKind { label, property, kind } => {
+                    vector_kinds.push((label, property, *kind));
                 }
                 IndexDefinition::VectorParams { label, property, m, ef_construction, ef } => {
                     vector_params.push((
@@ -7061,6 +7080,19 @@ NodeDeleted { id, .. } => {
                 }
                 Err(e) => {
                     tracing::warn!("could not restore HNSW parameters on {label}.{property}: {e}");
+                    report.failed += 1;
+                }
+            }
+        }
+        for (label, property, kind) in vector_kinds {
+            match self.vector_index.set_kind(label, property, kind) {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::warn!("vector index kind for {label}.{property}, which has no vector index");
+                    report.failed += 1;
+                }
+                Err(e) => {
+                    tracing::warn!("could not restore the vector index kind on {label}.{property}: {e}");
                     report.failed += 1;
                 }
             }
@@ -7241,7 +7273,7 @@ NodeDeleted { id, .. } => {
         quantization: crate::vector::index::Quantization,
         params: crate::vector::HnswParams,
     ) -> VectorResult<()> {
-        self.vector_index.create_index_with_params(
+        self.create_vector_index_with_kind(
             name,
             label,
             property_key,
@@ -7249,6 +7281,32 @@ NodeDeleted { id, .. } => {
             metric,
             quantization,
             params,
+            crate::vector::IndexKind::Hnsw,
+        )
+    }
+
+    /// Create a named vector index of the given kind (#1975).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_vector_index_with_kind(
+        &self,
+        name: Option<&str>,
+        label: &str,
+        property_key: &str,
+        dimensions: usize,
+        metric: DistanceMetric,
+        quantization: crate::vector::index::Quantization,
+        params: crate::vector::HnswParams,
+        kind: crate::vector::IndexKind,
+    ) -> VectorResult<()> {
+        self.vector_index.create_index_with_kind(
+            name,
+            label,
+            property_key,
+            dimensions,
+            metric,
+            quantization,
+            params,
+            kind,
         )?;
         self.mark_index_catalog_changed();
         Ok(())
