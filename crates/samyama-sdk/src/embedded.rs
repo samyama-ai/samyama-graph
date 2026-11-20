@@ -297,6 +297,53 @@ impl EmbeddedClient {
             .find_node_by_unique(&samyama::graph::Label::new(label), property, &value)
             .map_err(|e| SamyamaError::QueryError(e.to_string()))
     }
+
+    /// Pin the graph's current version and return it (#2093).
+    ///
+    /// O(1): nothing is copied. Every write after it can be read back with
+    /// [`Self::diff_since`] and undone with [`Self::rollback_to`]. Hold it no
+    /// longer than needed: while it is pinned the history after it is kept
+    /// and deleted ids are not reused. Checkpoints are not durable.
+    ///
+    /// ```
+    /// # use samyama_sdk::{EmbeddedClient, SamyamaClient};
+    /// # #[tokio::main] async fn main() -> samyama_sdk::SamyamaResult<()> {
+    /// let client = EmbeddedClient::new();
+    /// let v = client.checkpoint().await?;
+    /// client.query("default", "CREATE (:Scratch)").await?;
+    /// assert_eq!(client.diff_since(v).await?.nodes_added.len(), 1);
+    /// client.rollback_to(v).await?;
+    /// assert_eq!(client.status().await?.storage.nodes, 0);
+    /// # Ok(()) }
+    /// ```
+    pub async fn checkpoint(&self) -> SamyamaResult<u64> {
+        self.store.write().await.checkpoint().map_err(|e| SamyamaError::QueryError(e.to_string()))
+    }
+
+    /// Release a checkpoint, keeping every change made since. Returns whether
+    /// it was pinned.
+    pub async fn release_checkpoint(&self, version: u64) -> bool {
+        self.store.write().await.release_checkpoint(version)
+    }
+
+    /// What changed since checkpoint `version` (#2093).
+    pub async fn diff_since(&self, version: u64) -> SamyamaResult<samyama::graph::GraphDiff> {
+        self.store.read().await.diff_since(version).map_err(|e| SamyamaError::QueryError(e.to_string()))
+    }
+
+    /// Put the graph back as it was at checkpoint `version`, and release it
+    /// (#2093). Refused with [`SamyamaError::RollbackConflict`], changing
+    /// nothing, if another writer's committed transaction changed an entity
+    /// the rollback would undo.
+    ///
+    /// The embedded store is in memory, so this persists nothing; a server
+    /// with persistence goes through `PersistenceManager::rollback_to`.
+    pub async fn rollback_to(&self, version: u64) -> SamyamaResult<samyama::graph::RollbackStats> {
+        self.store.write().await.rollback_to(version).map_err(|e| match e {
+            samyama::graph::GraphError::RollbackConflict(c) => SamyamaError::RollbackConflict(c),
+            e => SamyamaError::QueryError(e.to_string()),
+        })
+    }
 }
 
 impl Default for EmbeddedClient {
@@ -575,6 +622,39 @@ impl SamyamaClient for EmbeddedClient {
 mod tests {
     use super::*;
     use samyama::LLMProvider;
+
+    #[tokio::test]
+    async fn test_embedded_checkpoint_diff_and_rollback() {
+        let client = EmbeddedClient::new();
+        client.query("default", r#"CREATE (:Person {name: "Alice", age: 30})"#).await.unwrap();
+
+        let v = client.checkpoint().await.unwrap();
+        client.query("default", r#"MATCH (n:Person {name: "Alice"}) SET n.age = 31"#).await.unwrap();
+        client.query("default", r#"CREATE (:Person {name: "Bob"})"#).await.unwrap();
+
+        let diff = client.diff_since(v).await.unwrap();
+        assert_eq!(diff.from_version, v);
+        assert_eq!(diff.nodes_added.len(), 1);
+        assert!(diff.nodes_deleted.is_empty());
+        assert_eq!(diff.property_changes.len(), 1);
+        let change = &diff.property_changes[0];
+        assert_eq!(change.key, "age");
+        assert_eq!(change.old, Some(samyama::graph::PropertyValue::Integer(30)));
+        assert_eq!(change.new, Some(samyama::graph::PropertyValue::Integer(31)));
+
+        let stats = client.rollback_to(v).await.unwrap();
+        assert_eq!(stats.nodes_removed, 1);
+        assert_eq!(stats.properties_reverted, 1);
+        assert!(stats.failures.is_empty(), "{:?}", stats.failures);
+
+        let result = client.query_readonly("default", "MATCH (n:Person) RETURN n.name, n.age").await.unwrap();
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0][1].as_i64(), Some(30));
+
+        // Rolled back to, so released.
+        assert!(!client.release_checkpoint(v).await);
+        assert!(matches!(client.diff_since(v).await, Err(SamyamaError::QueryError(_))));
+    }
 
     #[tokio::test]
     async fn test_embedded_ping() {
