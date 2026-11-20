@@ -34,6 +34,18 @@
 //! was replaced — the statistics' own subject, so a reader can see at a glance
 //! whether they describe the graph they think they do.
 //!
+//! # `ANALYZE :Label`
+//!
+//! Recomputes exactly what `ANALYZE` does -- the store caches one set of
+//! statistics for the whole graph, so there is no per-label refresh to be had,
+//! and pretending otherwise would be a claim the code does not back. What the
+//! label changes is the row: it reports the part of the statistics that
+//! describes that label -- how many nodes carry it and how many of its
+//! properties have selectivity statistics -- which is what a reader looking at
+//! one bad estimate wants to see. A label no node carries reports zero rather
+//! than an error: statistics about an absent label are a legitimate answer,
+//! and the planner estimates from the same zero.
+//!
 //! # Why this is a read
 //!
 //! It touches a cache, not the graph. `invalidate_statistics_cache` and
@@ -41,7 +53,7 @@
 //! so `ANALYZE` runs on the read executor. Reporting it as a write would make
 //! it unavailable to exactly the person diagnosing a slow read.
 
-use crate::graph::{GraphStore, PropertyValue};
+use crate::graph::{GraphStore, Label, PropertyValue};
 
 use super::operator::{OperatorDescription, PhysicalOperator};
 use super::record::{Record, Value};
@@ -58,15 +70,43 @@ pub fn analyze_columns() -> Vec<String> {
     ]
 }
 
+/// Columns `ANALYZE :Label` returns.
+pub fn analyze_label_columns() -> Vec<String> {
+    vec![
+        "label".to_string(),
+        "nodes".to_string(),
+        "properties".to_string(),
+        "cache_was_stale".to_string(),
+    ]
+}
+
+/// The columns of `ANALYZE`, or of `ANALYZE :Label` when a label is given.
+pub fn columns_for(label: Option<&Label>) -> Vec<String> {
+    match label {
+        Some(_) => analyze_label_columns(),
+        None => analyze_columns(),
+    }
+}
+
 /// Recomputes [`GraphStatistics`] and reports what it computed them over.
 #[derive(Debug, Default)]
 pub struct AnalyzeOperator {
     done: bool,
+    /// `ANALYZE :Label`: report this label's part of the statistics.
+    label: Option<Label>,
 }
 
 impl AnalyzeOperator {
     pub fn new() -> Self {
-        Self { done: false }
+        Self {
+            done: false,
+            label: None,
+        }
+    }
+
+    /// `ANALYZE :Label` -- the same recomputation, reported for one label.
+    pub fn for_label(label: Option<Label>) -> Self {
+        Self { done: false, label }
     }
 }
 
@@ -89,6 +129,31 @@ impl PhysicalOperator for AnalyzeOperator {
         let stats = store.statistics();
 
         let mut record = Record::new();
+        if let Some(label) = &self.label {
+            let nodes = stats.label_counts.get(label).copied().unwrap_or(0);
+            let properties = stats
+                .property_stats
+                .keys()
+                .filter(|(l, _)| l == label)
+                .count();
+            record.bind(
+                "label".to_string(),
+                Value::Property(PropertyValue::String(label.as_str().to_string())),
+            );
+            record.bind(
+                "nodes".to_string(),
+                Value::Property(PropertyValue::Integer(nodes as i64)),
+            );
+            record.bind(
+                "properties".to_string(),
+                Value::Property(PropertyValue::Integer(properties as i64)),
+            );
+            record.bind(
+                "cache_was_stale".to_string(),
+                Value::Property(PropertyValue::Boolean(was_cached)),
+            );
+            return Ok(Some(record));
+        }
         record.bind(
             "nodes".to_string(),
             Value::Property(PropertyValue::Integer(stats.total_nodes as i64)),
@@ -120,9 +185,13 @@ impl PhysicalOperator for AnalyzeOperator {
     }
 
     fn describe(&self) -> OperatorDescription {
+        let details = match &self.label {
+            Some(l) => format!("recompute planner statistics, report :{}", l.as_str()),
+            None => "recompute planner statistics".to_string(),
+        };
         OperatorDescription {
             name: "Analyze".to_string(),
-            details: "recompute planner statistics".to_string(),
+            details,
             children: Vec::new(),
         }
     }

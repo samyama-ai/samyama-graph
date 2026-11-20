@@ -75,6 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
+use samyama_optimization::constraints::{Constrained, ConstraintHandling};
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, CMAESSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
 
@@ -6447,6 +6448,105 @@ impl Problem for GraphOptimizationProblem {
 
         penalty
     }
+
+    fn can_repair(&self) -> bool {
+        true
+    }
+
+    fn repair(&self, variables: &Array1<f64>) -> Option<Array1<f64>> {
+        Some(self.repair_point(variables))
+    }
+}
+
+impl GraphOptimizationProblem {
+    /// The repair behind `constraintHandling: 'repair'` (OPT-10, #2266).
+    ///
+    /// Greedy, deterministic, and a no-op on a feasible point:
+    ///
+    /// 1. clamp each variable to `[lower, upper]` (a NaN goes to `lower`);
+    /// 2. short of `minTotal`: raise the cheapest variables first, to `upper`;
+    /// 3. over `budget`: lower the most expensive first, but only by the
+    ///    surplus above `minTotal`;
+    /// 4. still over: move quantity from the most expensive variable to the
+    ///    cheapest one with room, which keeps the total and lowers the cost.
+    ///
+    /// Each limit is aimed at from a hair inside (1e-9 relative): feasibility
+    /// is checked strictly, and a point repaired exactly onto the boundary can
+    /// land 1e-15 outside it by rounding. When the constraints cannot all be
+    /// met within the bounds the result is as close as these steps get, and it
+    /// is reported infeasible like any other.
+    fn repair_point(&self, x: &Array1<f64>) -> Array1<f64> {
+        let (lo, hi) = (self.lower, self.upper);
+        let mut y = x.mapv(|v| if v.is_nan() { lo } else { v.clamp(lo, hi) });
+        let n = self.dim.min(y.len());
+        let costs: Vec<f64> = (0..n).map(|i| self.costs.get(i).copied().unwrap_or(1.0)).collect();
+        let inside = |limit: f64| 1e-9 * limit.abs().max(1.0);
+        let cost_of = |y: &Array1<f64>| (0..n).map(|i| y[i] * costs[i]).sum::<f64>();
+        let by_cost = |descending: bool| {
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| {
+                let o = costs[a].total_cmp(&costs[b]).then(a.cmp(&b));
+                if descending { o.reverse() } else { o }
+            });
+            order
+        };
+
+        if let Some(min_total) = self.min_total {
+            let mut short = min_total + inside(min_total) - y.sum();
+            for i in by_cost(false) {
+                if short <= 0.0 {
+                    break;
+                }
+                let d = (hi - y[i]).min(short).max(0.0);
+                y[i] += d;
+                short -= d;
+            }
+        }
+
+        if let Some(budget) = self.budget {
+            let target = budget - inside(budget);
+            let mut over = cost_of(&y) - target;
+            if over > 0.0 {
+                let mut surplus = self
+                    .min_total
+                    .map_or(f64::INFINITY, |m| (y.sum() - m - inside(m)).max(0.0));
+                for i in by_cost(true) {
+                    if over <= 0.0 || surplus <= 0.0 {
+                        break;
+                    }
+                    if costs[i] <= 0.0 {
+                        continue;
+                    }
+                    let d = (y[i] - lo).min(surplus).min(over / costs[i]).max(0.0);
+                    y[i] -= d;
+                    surplus -= d;
+                    over -= d * costs[i];
+                }
+                // Each step saturates a variable or closes the gap, so 2n
+                // steps are enough; the cap is a guard against rounding.
+                for _ in 0..(2 * n + 2) {
+                    if over <= 0.0 {
+                        break;
+                    }
+                    let from = by_cost(true).into_iter().find(|&i| y[i] > lo);
+                    let to = by_cost(false).into_iter().find(|&j| y[j] < hi);
+                    let (Some(i), Some(j)) = (from, to) else { break };
+                    let saving = costs[i] - costs[j];
+                    if saving <= 0.0 {
+                        break;
+                    }
+                    let d = (y[i] - lo).min(hi - y[j]).min(over / saving).max(0.0);
+                    if d <= 0.0 {
+                        break;
+                    }
+                    y[i] -= d;
+                    y[j] += d;
+                    over -= d * saving;
+                }
+            }
+        }
+        y
+    }
 }
 
 impl MultiObjectiveProblem for GraphOptimizationProblem {
@@ -6466,12 +6566,27 @@ impl MultiObjectiveProblem for GraphOptimizationProblem {
         results
     }
 
+    /// The budget and minimum-total violation, as one constraint (OPT-10).
+    /// Without it the multi-objective solvers ran with no constraint at all:
+    /// a budget was only checked after the run, to report `feasible`.
+    fn penalties(&self, variables: &Array1<f64>) -> Vec<f64> {
+        vec![Problem::penalty(self, variables)]
+    }
+
     fn dim(&self) -> usize { self.dim }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (
             Array1::from_elem(self.dim, self.lower),
             Array1::from_elem(self.dim, self.upper)
         )
+    }
+
+    fn can_repair(&self) -> bool {
+        true
+    }
+
+    fn repair(&self, variables: &Array1<f64>) -> Option<Array1<f64>> {
+        Some(self.repair_point(variables))
     }
 }
 
@@ -18524,6 +18639,10 @@ impl AlgorithmOperator {
         ("symptomexplanation", "it reads each relationship's time, which a projection does not keep"),
         ("pca", "it reads node properties, which a projection does not keep"),
         ("or.solve", "it optimises over node properties, not over a graph view"),
+        ("split", "it can read node properties (time, source), which a projection does not keep"),
+        ("traintestsplit", "it can read node properties (time, source), which a projection does not keep"),
+        ("splitleakage", "it reads the stored split from node properties, which a projection does not keep"),
+        ("leakagecheck", "it reads the stored split from node properties, which a projection does not keep"),
         ("or.constrainedshortestpath", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
         ("or.shortestpathwithconstraints", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
     ];
@@ -18692,6 +18811,7 @@ impl AlgorithmOperator {
         (&["effectivesize"], "value"),
         (&["constraint", "burtconstraint"], "value"),
         (&["bellmanford"], "distance"),
+        (&["split", "traintestsplit"], "split"),
     ];
 
     /// Whether this algorithm can run on a named projection: not one of
@@ -19492,6 +19612,499 @@ impl AlgorithmOperator {
             bind(&mut rec, "node2", p.b);
             rec.bind("score".to_string(), Value::Property(PropertyValue::Float(p.score)));
             self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// The config keys every literal map argument holds, merged.
+    fn config_map(&self) -> std::collections::HashMap<String, PropertyValue> {
+        let mut out = std::collections::HashMap::new();
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                out.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        out
+    }
+
+    /// A string config value, or `None` when absent; anything else is refused.
+    fn config_string(
+        cfg: &std::collections::HashMap<String, PropertyValue>,
+        call: &str,
+        key: &str,
+    ) -> ExecutionResult<Option<String>> {
+        match cfg.get(key) {
+            None | Some(PropertyValue::Null) => Ok(None),
+            Some(PropertyValue::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+            Some(other) => Err(ExecutionError::bad_argument(format!(
+                "{call}: `{key}` must be a non-empty string, got {other:?}"
+            ))),
+        }
+    }
+
+    /// `strategy`, required and one of the known ones. `random` is a split
+    /// (the negative control) but has no boundary for the leakage check to test.
+    fn split_strategy(
+        cfg: &std::collections::HashMap<String, PropertyValue>,
+        call: &str,
+        allow_random: bool,
+    ) -> ExecutionResult<String> {
+        let known: &[&str] = if allow_random {
+            &["entity", "community", "time", "source", "random"]
+        } else {
+            &["entity", "community", "time", "source"]
+        };
+        let strategy = Self::config_string(cfg, call, "strategy")?
+            .map(|s| s.to_ascii_lowercase())
+            .ok_or_else(|| {
+                ExecutionError::bad_argument(format!(
+                    "{call}: `strategy` is required: one of {}",
+                    known.join(", ")
+                ))
+            })?;
+        if !known.contains(&strategy.as_str()) {
+            return Err(ExecutionError::bad_argument(format!(
+                "{call}: unknown strategy `{strategy}`; expected one of {}{}",
+                known.join(", "),
+                if strategy == "random" {
+                    ". A random split keeps nothing together, so there is no boundary to \
+                     check it against: check it with the strategy it should have respected \
+                     (entity, community, time or source) to measure the leak it makes"
+                } else {
+                    ""
+                }
+            )));
+        }
+        Ok(strategy)
+    }
+
+    /// A sortable time from a property: a number, or a date/datetime as epoch
+    /// milliseconds. `true` marks a temporal value, so the two are not mixed.
+    /// A time of day has no date and so no place on a timeline; it is refused.
+    fn split_time_key(value: &PropertyValue) -> Option<(bool, f64)> {
+        match value {
+            PropertyValue::Integer(i) => Some((false, *i as f64)),
+            PropertyValue::Float(f) if !f.is_nan() => Some((false, *f)),
+            PropertyValue::Date(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::LocalDateTime { .. }
+            | PropertyValue::ZonedDateTime { .. } => {
+                value.as_epoch_millis().map(|ms| (true, ms as f64))
+            }
+            _ => None,
+        }
+    }
+
+    /// `property` read from every node in the view, refusing loudly when any
+    /// node lacks it: a node with no timestamp or source cannot be placed, and
+    /// dropping it silently would make the split smaller than the caller thinks.
+    fn split_property_values(
+        store: &GraphStore,
+        view: &crate::algo::GraphView,
+        call: &str,
+        strategy: &str,
+        property: &str,
+    ) -> ExecutionResult<Vec<(u64, PropertyValue)>> {
+        let mut ids = view.index_to_node.clone();
+        ids.sort_unstable();
+        let mut out = Vec::with_capacity(ids.len());
+        let mut missing = Vec::new();
+        for id in ids {
+            match store.node_property(NodeId::new(id), property) {
+                Some(v) if !matches!(v, PropertyValue::Null) => out.push((id, v)),
+                _ => missing.push(id),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(ExecutionError::bad_argument(format!(
+                "{call}: {strategy} reads `{property}` from every node, and {} of {} \
+                 node(s) have none (first: {:?}). Narrow the nodes with `label`, or set the \
+                 property, so none is left out without anyone noticing",
+                missing.len(),
+                missing.len() + out.len(),
+                &missing[..missing.len().min(5)]
+            )));
+        }
+        Ok(out)
+    }
+
+    /// The times of every node, all numbers or all dates.
+    fn split_times(
+        values: &[(u64, PropertyValue)],
+        call: &str,
+        property: &str,
+    ) -> ExecutionResult<Vec<(u64, f64)>> {
+        let mut kind = None;
+        let mut out = Vec::with_capacity(values.len());
+        for (id, v) in values {
+            let Some((temporal, t)) = Self::split_time_key(v) else {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `{property}` on node {id} is {v:?}; a time split needs a number \
+                     or a date/datetime on every node"
+                )));
+            };
+            if *kind.get_or_insert(temporal) != temporal {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `{property}` mixes numbers and dates (node {id}), which have no \
+                     common order"
+                )));
+            }
+            out.push((*id, t));
+        }
+        Ok(out)
+    }
+
+    /// A group key for a source value, keeping types apart: `1` and `'1'`
+    /// are different sources.
+    fn split_group_key(v: &PropertyValue) -> String {
+        format!("{v:?}")
+    }
+
+    /// `algo.split({strategy, ...})` -- a train/validation/test split that
+    /// keeps whole groups on one side of the boundary (ML-05, #1730).
+    ///
+    /// One row per node: `node`, `split` (`train`/`val`/`test`, or
+    /// `train`/`test` for two ratios) and `group` -- the entity component,
+    /// community, source value or time that decided it (null for `random`).
+    /// `writeProperty` stores `split` on each node, which is what
+    /// `algo.splitLeakage` reads back.
+    fn execute_split(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const CALL: &str = "algo.split";
+        Self::reject_unknown_config_keys(
+            &self.args,
+            CALL,
+            &[
+                "edgeType", "label", "property", "ratios", "seed", "strategy",
+            ],
+        )?;
+        let cfg = self.config_map();
+        let strategy = Self::split_strategy(&cfg, CALL, true)?;
+        let ratios: Vec<f64> = match cfg.get("ratios") {
+            None => vec![0.8, 0.1, 0.1],
+            Some(v) => {
+                let items = v.as_list_items().unwrap_or_default();
+                let nums: Vec<f64> = items
+                    .iter()
+                    .filter_map(|x| match x {
+                        PropertyValue::Integer(i) => Some(*i as f64),
+                        PropertyValue::Float(f) => Some(*f),
+                        _ => None,
+                    })
+                    .collect();
+                let sum: f64 = nums.iter().sum();
+                if !(2..=3).contains(&items.len())
+                    || nums.len() != items.len()
+                    || nums.iter().any(|r| !r.is_finite() || *r < 0.0)
+                    || (sum - 1.0).abs() > 1e-6
+                    || nums[0] <= 0.0
+                {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "{CALL}: `ratios` must be [train, test] or [train, val, test]: \
+                         non-negative numbers summing to 1, with train above 0; got {v:?}"
+                    )));
+                }
+                nums
+            }
+        };
+        let seed = match cfg.get("seed") {
+            None => 42u64,
+            Some(PropertyValue::Integer(n)) => *n as u64,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `seed` must be an integer, got {other:?}"
+                )))
+            }
+        };
+        let label = Self::config_string(&cfg, CALL, "label")?;
+        let edge_type = Self::config_string(&cfg, CALL, "edgeType")?;
+        let property = Self::config_string(&cfg, CALL, "property")?;
+        if strategy == "entity" && edge_type.is_none() {
+            return Err(ExecutionError::bad_argument(format!(
+                "{CALL}: strategy `entity` needs `edgeType`, the relationship that links two \
+                 records of one entity (SAME_AS, say). Without it every relationship would \
+                 count as \"same entity\" and the split would keep whole connected components \
+                 together"
+            )));
+        }
+        let needs_property = strategy == "time" || strategy == "source";
+        if needs_property != property.is_some() {
+            return Err(ExecutionError::bad_argument(if needs_property {
+                format!("{CALL}: strategy `{strategy}` needs `property`, the node property holding each record's {}",
+                    if strategy == "time" { "timestamp" } else { "source" })
+            } else {
+                format!("{CALL}: strategy `{strategy}` does not read `property`; only time and source do")
+            }));
+        }
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
+
+        // Groups, each sorted, ordered by their smallest node so the seed alone
+        // decides placement; and each node's `group` value.
+        let mut group_value: std::collections::HashMap<u64, PropertyValue> = Default::default();
+        let grouped = |mut groups: Vec<Vec<u64>>| {
+            for g in &mut groups {
+                g.sort_unstable();
+            }
+            groups.sort_unstable_by_key(|g| g[0]);
+            groups
+        };
+        let assigned: Vec<(u64, usize)> = match strategy.as_str() {
+            "random" => {
+                let groups = grouped(view.index_to_node.iter().map(|&n| vec![n]).collect());
+                crate::algo::assign_groups(&groups, &ratios, seed)
+            }
+            "entity" => {
+                let wcc = crate::algo::weakly_connected_components(&view);
+                let groups = grouped(wcc.components.into_values().collect());
+                for (i, g) in groups.iter().enumerate() {
+                    for &n in g {
+                        group_value.insert(n, PropertyValue::Integer(i as i64));
+                    }
+                }
+                crate::algo::assign_groups(&groups, &ratios, seed)
+            }
+            "community" => {
+                let comms = crate::algo::louvain(&view, 20);
+                let mut by: std::collections::BTreeMap<usize, Vec<u64>> = Default::default();
+                for (n, c) in crate::algo::with_ids(&view, &comms) {
+                    group_value.insert(n, PropertyValue::Integer(c as i64));
+                    by.entry(c).or_default().push(n);
+                }
+                crate::algo::assign_groups(&grouped(by.into_values().collect()), &ratios, seed)
+            }
+            "source" => {
+                let property = property.as_deref().unwrap_or_default();
+                let values = Self::split_property_values(
+                    store,
+                    &view,
+                    CALL,
+                    &format!("strategy `{strategy}`"),
+                    property,
+                )?;
+                let mut by: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
+                for (n, v) in values {
+                    by.entry(Self::split_group_key(&v)).or_default().push(n);
+                    group_value.insert(n, v);
+                }
+                crate::algo::assign_groups(&grouped(by.into_values().collect()), &ratios, seed)
+            }
+            _ => {
+                // time
+                let property = property.as_deref().unwrap_or_default();
+                let values = Self::split_property_values(
+                    store,
+                    &view,
+                    CALL,
+                    &format!("strategy `{strategy}`"),
+                    property,
+                )?;
+                let times = Self::split_times(&values, CALL, property)?;
+                group_value.extend(values);
+                crate::algo::time_split(&times, &ratios)
+            }
+        };
+
+        let names = crate::algo::split_names(ratios.len());
+        let mut assigned = assigned;
+        assigned.sort_unstable();
+        for (id, s) in assigned {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            rec.bind(
+                "split".to_string(),
+                Value::Property(PropertyValue::String(names[s].to_string())),
+            );
+            rec.bind(
+                "group".to_string(),
+                Value::Property(group_value.remove(&id).unwrap_or(PropertyValue::Null)),
+            );
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.splitLeakage({strategy, splitProperty, ...})` -- every leak across
+    /// a stored split's boundary (ML-05, #1730). No rows means a clean split.
+    ///
+    /// Reads the split from `splitProperty` (default `split`), so it checks a
+    /// split made anywhere -- `algo.split` with `writeProperty`, or a naive
+    /// `SET n.split = CASE WHEN rand() < 0.8 ...`, which is the negative
+    /// control. One row per leak: `node1, node2, split1, split2, reason`.
+    ///
+    /// * entity: two nodes within `hops` (default 3) over `edgeType`, in
+    ///   different splits. Walked hop by hop, not read from components.
+    /// * community: a Louvain community, recomputed on the graph as it is now,
+    ///   found in two splits -- one row per pair of splits, with its two
+    ///   smallest nodes and the count on each side in `reason`.
+    /// * source: likewise, for a value of `property`.
+    /// * time: a node whose time is after the earliest time of a later split,
+    ///   paired with that earliest node.
+    fn execute_split_leakage(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const CALL: &str = "algo.splitLeakage";
+        Self::reject_unknown_config_keys(
+            &self.args,
+            CALL,
+            &[
+                "edgeType",
+                "hops",
+                "label",
+                "property",
+                "splitProperty",
+                "strategy",
+            ],
+        )?;
+        let cfg = self.config_map();
+        let strategy = Self::split_strategy(&cfg, CALL, false)?;
+        let label = Self::config_string(&cfg, CALL, "label")?;
+        let edge_type = Self::config_string(&cfg, CALL, "edgeType")?;
+        let property = Self::config_string(&cfg, CALL, "property")?;
+        let split_property = Self::config_string(&cfg, CALL, "splitProperty")?
+            .unwrap_or_else(|| "split".to_string());
+        let hops = match cfg.get("hops") {
+            None => 3usize,
+            Some(PropertyValue::Integer(n)) if *n >= 1 => *n as usize,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `hops` must be an integer of at least 1, got {other:?}"
+                )))
+            }
+        };
+        if strategy == "entity" && edge_type.is_none() {
+            return Err(ExecutionError::bad_argument(format!(
+                "{CALL}: strategy `entity` needs `edgeType`, the relationship that links two \
+                 records of one entity (SAME_AS, say)"
+            )));
+        }
+        let needs_property = strategy == "time" || strategy == "source";
+        if needs_property != property.is_some() {
+            return Err(ExecutionError::bad_argument(if needs_property {
+                format!("{CALL}: strategy `{strategy}` needs `property`")
+            } else {
+                format!("{CALL}: strategy `{strategy}` does not read `property`; only time and source do")
+            }));
+        }
+        if strategy != "entity" && cfg.contains_key("hops") {
+            return Err(ExecutionError::bad_argument(format!(
+                "{CALL}: `hops` bounds the entity walk; strategy `{strategy}` does not read it"
+            )));
+        }
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
+
+        // The stored split of every node, refused when absent or not a split name.
+        let names = crate::algo::split_names(3);
+        let membership =
+            Self::split_property_values(store, &view, CALL, "split membership", &split_property)?;
+        let mut split_of = std::collections::HashMap::with_capacity(membership.len());
+        for (id, v) in &membership {
+            let s = match v {
+                PropertyValue::String(s) => names.iter().position(|n| n == s),
+                _ => None,
+            };
+            let Some(s) = s else {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `{split_property}` on node {id} is {v:?}; expected one of {}",
+                    names.join(", ")
+                )));
+            };
+            split_of.insert(*id, s);
+        }
+
+        let push = |this: &mut Self, a: u64, b: u64, sa: usize, sb: usize, reason: String| {
+            let mut rec = Record::new();
+            this.bind_node(store, &mut rec, "node1", a);
+            this.bind_node(store, &mut rec, "node2", b);
+            rec.bind(
+                "split1".to_string(),
+                Value::Property(PropertyValue::String(names[sa].to_string())),
+            );
+            rec.bind(
+                "split2".to_string(),
+                Value::Property(PropertyValue::String(names[sb].to_string())),
+            );
+            rec.bind(
+                "reason".to_string(),
+                Value::Property(PropertyValue::String(reason)),
+            );
+            this.results.push(rec);
+        };
+        match strategy.as_str() {
+            "entity" => {
+                let edge = edge_type.as_deref().unwrap_or_default();
+                for (a, b, d) in crate::algo::entity_leaks(&view, &split_of, hops) {
+                    push(
+                        self,
+                        a,
+                        b,
+                        split_of[&a],
+                        split_of[&b],
+                        format!("same entity: {d} {edge} hop(s) apart"),
+                    );
+                }
+            }
+            "community" | "source" => {
+                let keys: Vec<(u64, String)> = if strategy == "community" {
+                    let comms = crate::algo::louvain(&view, 20);
+                    crate::algo::with_ids(&view, &comms)
+                        .into_iter()
+                        .map(|(n, c)| (n, c.to_string()))
+                        .collect()
+                } else {
+                    let property = property.as_deref().unwrap_or_default();
+                    Self::split_property_values(
+                        store,
+                        &view,
+                        CALL,
+                        &format!("strategy `{strategy}`"),
+                        property,
+                    )?
+                    .iter()
+                    .map(|(n, v)| (*n, Self::split_group_key(v)))
+                    .collect()
+                };
+                for l in crate::algo::group_leaks(&keys, &split_of) {
+                    let what = if strategy == "community" {
+                        format!("community {}", l.key)
+                    } else {
+                        format!("source {}", l.key)
+                    };
+                    push(
+                        self,
+                        l.node_a,
+                        l.node_b,
+                        l.split_a,
+                        l.split_b,
+                        format!(
+                            "{what} is on both sides: {} node(s) in {}, {} in {}",
+                            l.count_a, names[l.split_a], l.count_b, names[l.split_b]
+                        ),
+                    );
+                }
+            }
+            _ => {
+                let property = property.as_deref().unwrap_or_default();
+                let values = Self::split_property_values(
+                    store,
+                    &view,
+                    CALL,
+                    &format!("strategy `{strategy}`"),
+                    property,
+                )?;
+                let times = Self::split_times(&values, CALL, property)?;
+                let time_of: std::collections::HashMap<u64, &PropertyValue> =
+                    values.iter().map(|(n, v)| (*n, v)).collect();
+                for (late, early, sl, se) in crate::algo::time_leaks(&times, &split_of, 3) {
+                    push(
+                        self,
+                        late,
+                        early,
+                        sl,
+                        se,
+                        format!(
+                            "{} {} is after {}'s earliest {}",
+                            names[sl], time_of[&late], names[se], time_of[&early]
+                        ),
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -21206,6 +21819,40 @@ impl AlgorithmOperator {
         Ok(Some(number))
     }
 
+    /// `constraintHandling` from an `or.solve` config (OPT-10, #2266):
+    /// `penalty`, `repair` or `feasibility` (Deb's rules).
+    ///
+    /// The default is what each kind of solver did before: `penalty` for a
+    /// single-objective solver, whose fitness has always been objective plus
+    /// penalty, and `feasibility` for a multi-objective one, whose constrained
+    /// dominance is Deb's rules -- now given the budget and minimum, which it
+    /// was not before.
+    fn or_solve_constraint_handling(
+        config: &HashMap<String, PropertyValue>,
+        is_multi_objective: bool,
+    ) -> ExecutionResult<ConstraintHandling> {
+        match config
+            .get("constraintHandling")
+            .or_else(|| config.get("constraint_handling"))
+        {
+            None => Ok(if is_multi_objective {
+                ConstraintHandling::FeasibilityRules
+            } else {
+                ConstraintHandling::Penalty
+            }),
+            Some(PropertyValue::String(name)) => ConstraintHandling::from_name(name).ok_or_else(|| {
+                ExecutionError::bad_argument(format!(
+                    "or.solve: unknown constraintHandling `{name}`; use one of {}",
+                    ConstraintHandling::NAMES.join(", ")
+                ))
+            }),
+            Some(other) => Err(ExecutionError::bad_argument(format!(
+                "or.solve: `constraintHandling` must be one of {}, got {other:?}",
+                ConstraintHandling::NAMES.join(", ")
+            ))),
+        }
+    }
+
     /// Bind the four result-envelope columns every `or.solve` row carries
     /// (OPT-09, #1776), so the single- and multi-objective branches cannot
     /// drift apart on their names:
@@ -21246,7 +21893,8 @@ impl AlgorithmOperator {
         // reported success. Both spellings are accepted now, and anything else
         // is refused (#1341).
         Self::reject_unknown_config_keys(&self.args, "or.solve", &[
-            "algorithm", "bestKnown", "best_known", "budget", "costProperties", "costProperty",
+            "algorithm", "bestKnown", "best_known", "budget", "constraintHandling",
+            "constraint_handling", "costProperties", "costProperty",
             "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
             "max_iterations",
             "minTotal", "min", "min_total", "populationSize", "population_size",
@@ -21268,14 +21916,26 @@ impl AlgorithmOperator {
         let property = config_map.get("property").and_then(|v| v.as_string())
             .ok_or_else(|| ExecutionError::RuntimeError("Missing 'property' in config".to_string()))?;
         
-        let cfg_f = |a: &str, b: &str| {
-            config_map.get(a).or_else(|| config_map.get(b)).and_then(|v| v.as_float())
+        // A number, whole or not. `as_float` is `Some` for a `Float` only, so
+        // `{budget: 10}` used to read as no budget at all and `{upperBound:
+        // 10}` as the default 100 -- a constraint the caller wrote, silently
+        // dropped (OPT-10, #2266). Anything present and not a number is
+        // refused for the same reason.
+        let cfg_f = |a: &str, b: &str| -> ExecutionResult<Option<f64>> {
+            match config_map.get(a).map(|v| (a, v)).or_else(|| config_map.get(b).map(|v| (b, v))) {
+                None => Ok(None),
+                Some((_, PropertyValue::Float(f))) => Ok(Some(*f)),
+                Some((_, PropertyValue::Integer(i))) => Ok(Some(*i as f64)),
+                Some((key, other)) => Err(ExecutionError::bad_argument(format!(
+                    "or.solve: `{key}` must be a number, got {other:?}"
+                ))),
+            }
         };
         let cfg_i = |a: &str, b: &str| {
             config_map.get(a).or_else(|| config_map.get(b)).and_then(|v| v.as_integer())
         };
-        let min_val = cfg_f("lowerBound", "min").unwrap_or(0.0);
-        let max_val = cfg_f("upperBound", "max").unwrap_or(100.0);
+        let min_val = cfg_f("lowerBound", "min")?.unwrap_or(0.0);
+        let max_val = cfg_f("upperBound", "max")?.unwrap_or(100.0);
         // The solvers draw their starting population with
         // `gen_range(lower..upper)`, which panics on an empty or inverted
         // range, so `{lowerBound: 5, upperBound: 5}` died with "cannot sample
@@ -21304,12 +21964,13 @@ impl AlgorithmOperator {
             }
         }
 
-        let budget = config_map.get("budget").and_then(|v| v.as_float());
-        let min_total = cfg_f("minTotal", "min_total");
+        let budget = cfg_f("budget", "budget")?;
+        let min_total = cfg_f("minTotal", "min_total")?;
 
         let best_known = Self::or_solve_best_known(config_map)?;
         let is_multi_objective =
             Self::MULTI_OBJECTIVE_SOLVERS.contains(&algorithm) || cost_props.len() > 1;
+        let constraint_handling = Self::or_solve_constraint_handling(config_map, is_multi_objective)?;
         // A gap is a distance between two numbers; a Pareto front has a vector
         // per point and no single best known value. Ignoring the key would
         // report `gap: null` for a value the caller did supply. Checked before
@@ -21406,6 +22067,11 @@ impl AlgorithmOperator {
             lower: min_val,
             upper: max_val,
         };
+        // The constraint strategy (OPT-10, #2266), applied around the problem
+        // so every solver gets it. `resolve` below turns a solver's answer into
+        // the point actually evaluated: the repaired one under `repair`.
+        let problem = Constrained::new(problem, constraint_handling)
+            .map_err(|e| ExecutionError::bad_argument(format!("or.solve: {e}")))?;
 
         let solver_config = SolverConfig {
             population_size: pop_size,
@@ -21433,9 +22099,11 @@ impl AlgorithmOperator {
             };
             let total_time_ms = duration_ms(started.elapsed());
 
-            // Write back first individual from Pareto Front
-            if let Some(best) = res.pareto_front.first() {
-                for (i, &val) in best.variables.iter().enumerate() {
+            // Write back first individual from Pareto Front: the point it was
+            // scored at, which `repair` may have moved.
+            let resolved = res.pareto_front.first().map(|best| problem.resolve_multi(&best.variables));
+            if let Some(best) = &resolved {
+                for (i, &val) in best.iter().enumerate() {
                     let node_id = node_ids[i];
                     store
                         .set_node_property(
@@ -21462,14 +22130,20 @@ impl AlgorithmOperator {
             // breaks the budget, and reading it would report every point
             // feasible. `objective` is the raw objective vector, which here is
             // `fitness` itself: no penalty is added to it.
-            let (objective, feasible) = match res.pareto_front.first() {
+            // `objective` is the raw objective vector of the point written
+            // back: under `penalty` the solver's `fitness` has the penalty
+            // folded into every objective, so it is recomputed here without.
+            let (objective, feasible) = match &resolved {
                 Some(best) => (
                     Value::Property(PropertyValue::Array(
-                        best.fitness.iter().map(|&f| PropertyValue::Float(f)).collect(),
+                        MultiObjectiveProblem::objectives(problem.inner(), best)
+                            .into_iter()
+                            .map(PropertyValue::Float)
+                            .collect(),
                     )),
                     Value::Property(PropertyValue::Boolean(is_feasible(Problem::penalty(
-                        &problem,
-                        &best.variables,
+                        problem.inner(),
+                        best,
                     )))),
                 ),
                 None => (Value::Null, Value::Null),
@@ -21530,8 +22204,10 @@ impl AlgorithmOperator {
             };
             let total_time_ms = duration_ms(started.elapsed());
 
-            // 4. Write back results
-            for (i, &val) in result.best_variables.iter().enumerate() {
+            // 4. Write back results: the point the answer was scored at, which
+            // `repair` may have moved (OPT-10).
+            let best_variables = problem.resolve(&result.best_variables);
+            for (i, &val) in best_variables.iter().enumerate() {
                 let node_id = node_ids[i];
                 store
                     .set_node_property(
@@ -21573,8 +22249,8 @@ impl AlgorithmOperator {
             // The result envelope (OPT-09, #1776). `fitness` is objective plus
             // penalty, so on its own it cannot say whether the answer obeys the
             // budget and minimum: these columns separate the two.
-            let objective = problem.objective(&result.best_variables);
-            let feasible = is_feasible(problem.penalty(&result.best_variables));
+            let objective = Problem::objective(problem.inner(), &best_variables);
+            let feasible = is_feasible(Problem::penalty(problem.inner(), &best_variables));
             let gap = match best_known {
                 Some(best) => Value::Property(PropertyValue::Float(gap_to_best_known(objective, best))),
                 None => Value::Null,
@@ -21960,6 +22636,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "effectivesize" => self.execute_structural_holes(store, true)?,
                 "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
                 "reciprocity" => self.execute_reciprocity(store)?,
+                "split" | "traintestsplit" => self.execute_split(store)?,
+                "splitleakage" | "leakagecheck" => self.execute_split_leakage(store)?,
                 // An embedding reaches here only with `write: false` (#1736):
                 // without it the refusal above has already fired.
                 "fastrp" | "node2vec" => self.execute_embedding_stream(store)?,
@@ -22070,6 +22748,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "effectivesize" => self.execute_structural_holes(store, true)?,
                 "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
                 "reciprocity" => self.execute_reciprocity(store)?,
+                "split" | "traintestsplit" => self.execute_split(store)?,
+                "splitleakage" | "leakagecheck" => self.execute_split_leakage(store)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             // Before the write-back, so a call refused here writes nothing.
