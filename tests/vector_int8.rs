@@ -220,3 +220,41 @@ fn an_int8_ivf_index_finds_a_vector_it_holds_and_keeps_one_copy() {
         DIM * Quantization::Int8.bytes_per_value() + Quantization::Int8.bytes_per_vector_overhead();
     assert_eq!(index.vector_bytes(), vectors.len() * per_vector);
 }
+
+#[test]
+fn a_large_int8_index_reads_its_codes_back_from_the_graph() {
+    // Past the exact-scan size, so the graph answers. An int8 index keeps no
+    // copy beside the graph (#1973): a stored vector queried with itself is
+    // found by its codes read back from the graph point, and a rebuild
+    // re-inserts the codes it reads from there.
+    let vectors = corpus(400, 13);
+    let mut index = VectorIndex::with_quantization(DIM, DistanceMetric::Cosine, Quantization::Int8);
+    for (i, v) in vectors.iter().enumerate() {
+        index.add(NodeId(i as u64), v).expect("add");
+    }
+    for (i, v) in vectors.iter().enumerate().step_by(10) {
+        let got = index.search(v, 3).expect("search");
+        assert_eq!(got[0].0, NodeId(i as u64), "vector {i} did not find itself");
+    }
+    // Give the first 50 nodes new vectors, then rebuild from the graph.
+    let replaced = corpus(50, 17);
+    for (i, v) in replaced.iter().enumerate() {
+        index.add(NodeId(i as u64), v).expect("add");
+    }
+    index.compact();
+    assert_eq!(index.superseded(), 0);
+    assert_eq!(index.len(), vectors.len());
+    assert_eq!(index.vector_bytes(), vectors.len() * (DIM + 4));
+    for (i, v) in replaced.iter().enumerate().step_by(5) {
+        let got = index.search(v, 3).expect("search");
+        assert_eq!(
+            got[0].0,
+            NodeId(i as u64),
+            "replaced vector {i} after the rebuild"
+        );
+    }
+    for (i, v) in vectors.iter().enumerate().skip(50).step_by(10) {
+        let got = index.search(v, 3).expect("search");
+        assert_eq!(got[0].0, NodeId(i as u64), "vector {i} after the rebuild");
+    }
+}
