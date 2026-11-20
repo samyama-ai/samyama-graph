@@ -491,8 +491,10 @@ fn garbage_collection_keeps_what_a_pinned_checkpoint_needs() {
 
     let stats = store.rollback_to(v).unwrap();
     assert!(stats.failures.is_empty(), "{:?}", stats.failures);
+    // Through the reader's path: `get_node` is the arena node, without the
+    // properties that live in columns.
     assert_eq!(
-        store.get_node(n).unwrap().properties.get("p"),
+        store.node_properties_full(n).get("p"),
         Some(&PropertyValue::Integer(1))
     );
     // Restored with the value it had at the checkpoint, not the one it was
