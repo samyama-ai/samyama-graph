@@ -57,6 +57,172 @@ pyo3::create_exception!(
     "A request stopped by its `CancelToken` before it finished (API-06, #1741)."
 );
 
+pyo3::create_exception!(
+    samyama,
+    RollbackConflict,
+    pyo3::exceptions::PyException,
+    "A rollback refused because another writer committed changes to the same \
+     entities since the checkpoint (#2093). `checkpoint`, `entities` and `diff` \
+     say which, and the graph is unchanged."
+);
+
+/// The client of a checkpoint method; a remote client is refused (#2093).
+fn embedded_for_checkpoint<'a>(inner: &'a ClientInner, method: &str) -> PyResult<&'a EmbeddedClient> {
+    match inner {
+        ClientInner::Embedded(c) => Ok(c),
+        ClientInner::Remote(_) => Err(PyRuntimeError::new_err(format!(
+            "{method} is only available in embedded mode (SamyamaClient.embedded()): \
+             checkpoints live in the process that holds the graph, and the server does \
+             not expose them over HTTP yet"
+        ))),
+    }
+}
+
+fn entity_json(entity: &samyama_sdk::EntityRef) -> serde_json::Value {
+    match entity {
+        samyama_sdk::EntityRef::Node(id) => serde_json::json!({"kind": "node", "id": id.as_u64()}),
+        samyama_sdk::EntityRef::Edge(id) => serde_json::json!({"kind": "edge", "id": id.as_u64()}),
+    }
+}
+
+/// A diff as plain JSON: ids as integers, values as the query results render
+/// them, an absent property as `None`.
+fn diff_json(diff: &samyama_sdk::GraphDiff) -> serde_json::Value {
+    let value = |v: &Option<samyama_sdk::PropertyValue>| v.as_ref().map(|v| v.to_json()).unwrap_or(serde_json::Value::Null);
+    serde_json::json!({
+        "from_version": diff.from_version,
+        "to_version": diff.to_version,
+        "nodes_added": diff.nodes_added.iter().map(|id| id.as_u64()).collect::<Vec<_>>(),
+        "nodes_deleted": diff.nodes_deleted.iter().map(|id| id.as_u64()).collect::<Vec<_>>(),
+        "edges_added": diff.edges_added.iter().map(|id| id.as_u64()).collect::<Vec<_>>(),
+        "edges_deleted": diff.edges_deleted.iter().map(|id| id.as_u64()).collect::<Vec<_>>(),
+        "property_changes": diff.property_changes.iter().map(|c| {
+            let mut entity = entity_json(&c.entity);
+            entity["key"] = serde_json::json!(c.key);
+            entity["old"] = value(&c.old);
+            entity["new"] = value(&c.new);
+            entity
+        }).collect::<Vec<_>>(),
+        "label_changes": diff.label_changes.iter().map(|c| serde_json::json!({
+            "node": c.node.as_u64(),
+            "label": c.label.as_str(),
+            "added": c.added,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn rollback_stats_json(stats: &samyama_sdk::RollbackStats) -> serde_json::Value {
+    serde_json::json!({
+        "checkpoint": stats.checkpoint,
+        "version": stats.version,
+        "nodes_removed": stats.nodes_removed,
+        "nodes_restored": stats.nodes_restored,
+        "edges_removed": stats.edges_removed,
+        "edges_restored": stats.edges_restored,
+        "properties_reverted": stats.properties_reverted,
+        "labels_reverted": stats.labels_reverted,
+        "failures": stats.failures,
+    })
+}
+
+/// `diff_since` on the embedded client, as a dict.
+fn diff_since_py(py: Python<'_>, client: &EmbeddedClient, version: u64) -> PyResult<Py<PyAny>> {
+    let diff = wait(py, None, client.diff_since(version))?
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    json_to_py(py, &diff_json(&diff))
+}
+
+/// `rollback_to` on the embedded client, as a dict; a conflict raises
+/// `RollbackConflict` carrying the entities and the diff.
+fn rollback_to_py(py: Python<'_>, client: &EmbeddedClient, version: u64) -> PyResult<Py<PyAny>> {
+    match wait(py, None, client.rollback_to(version))? {
+        Ok(stats) => json_to_py(py, &rollback_stats_json(&stats)),
+        Err(samyama_sdk::SamyamaError::RollbackConflict(conflict)) => {
+            let err = RollbackConflict::new_err(conflict.to_string());
+            let value = err.value(py);
+            value.setattr("checkpoint", conflict.checkpoint)?;
+            let entities: Vec<serde_json::Value> = conflict.entities.iter().map(entity_json).collect();
+            value.setattr("entities", json_to_py(py, &serde_json::Value::Array(entities))?)?;
+            value.setattr("diff", json_to_py(py, &diff_json(&conflict.diff))?)?;
+            Err(err)
+        }
+        Err(e) => Err(PyValueError::new_err(e.to_string())),
+    }
+}
+
+/// A checkpoint as a `with` block (#2093): `with client.branch() as b:`.
+///
+/// Leaving the block rolls the graph back to the checkpoint, unless
+/// `b.commit()` was called, which keeps every change and releases it. An
+/// exception in the block is never suppressed; the rollback runs first.
+#[pyclass]
+struct Branch {
+    inner: Arc<ClientInner>,
+    version: u64,
+    open: bool,
+}
+
+#[pymethods]
+impl Branch {
+    /// The checkpoint's version.
+    #[getter]
+    fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Whether the branch is still open: neither committed nor rolled back.
+    #[getter]
+    fn open(&self) -> bool {
+        self.open
+    }
+
+    /// What changed since the branch began, as `SamyamaClient.diff_since`.
+    fn diff(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let client = embedded_for_checkpoint(&self.inner, "Branch.diff")?;
+        diff_since_py(py, client, self.version)
+    }
+
+    /// Keep every change and release the checkpoint.
+    fn commit(&mut self, py: Python<'_>) -> PyResult<()> {
+        if !self.open {
+            return Err(PyRuntimeError::new_err("the branch is already closed"));
+        }
+        let client = embedded_for_checkpoint(&self.inner, "Branch.commit")?;
+        wait(py, None, client.release_checkpoint(self.version))?;
+        self.open = false;
+        Ok(())
+    }
+
+    /// Undo every change since the branch began, now. Returns what was done,
+    /// as `SamyamaClient.rollback_to`.
+    fn rollback(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if !self.open {
+            return Err(PyRuntimeError::new_err("the branch is already closed"));
+        }
+        let client = embedded_for_checkpoint(&self.inner, "Branch.rollback")?;
+        let stats = rollback_to_py(py, client, self.version)?;
+        self.open = false;
+        Ok(stats)
+    }
+
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    #[pyo3(signature = (*_exc))]
+    fn __exit__(&mut self, py: Python<'_>, _exc: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<bool> {
+        if self.open {
+            self.rollback(py)?;
+        }
+        Ok(false)
+    }
+
+    fn __repr__(&self) -> String {
+        let state = if self.open { "open" } else { "closed" };
+        format!("Branch(version={}, {state})", self.version)
+    }
+}
+
 /// Stops a request in flight (API-06, #1741).
 ///
 /// Pass one as `cancel=` to `query`, `query_readonly`, `query_stream` or
@@ -1058,6 +1224,47 @@ impl SamyamaClient {
         Ok(results.into_iter().map(|(nid, dist)| (nid.0, dist)).collect())
     }
 
+    /// Pin the graph's current version and return it (#2093). Every change
+    /// after it can be listed with `diff_since` and undone with `rollback_to`.
+    /// Release it with `release_checkpoint` when done: while it is pinned the
+    /// history after it is kept. Checkpoints are not durable. Embedded only.
+    fn checkpoint(&self, py: Python<'_>) -> PyResult<u64> {
+        let client = embedded_for_checkpoint(&self.inner, "checkpoint")?;
+        wait(py, None, client.checkpoint())?.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
+    /// Release a checkpoint, keeping every change since. Returns whether it
+    /// was pinned.
+    fn release_checkpoint(&self, py: Python<'_>, version: u64) -> PyResult<bool> {
+        let client = embedded_for_checkpoint(&self.inner, "release_checkpoint")?;
+        wait(py, None, client.release_checkpoint(version))
+    }
+
+    /// What changed since checkpoint `version`, as a dict: `nodes_added`,
+    /// `nodes_deleted`, `edges_added`, `edges_deleted` (ids),
+    /// `property_changes` (`{kind, id, key, old, new}`, `None` for an absent
+    /// key), `label_changes` (`{node, label, added}`), `from_version` and
+    /// `to_version`. A checkpoint not pinned raises `ValueError`.
+    fn diff_since(&self, py: Python<'_>, version: u64) -> PyResult<Py<PyAny>> {
+        let client = embedded_for_checkpoint(&self.inner, "diff_since")?;
+        diff_since_py(py, client, version)
+    }
+
+    /// Put the graph back as it was at checkpoint `version` and release it.
+    /// Returns what was done as a dict. Raises `RollbackConflict`, changing
+    /// nothing, if another writer committed changes to the same entities.
+    fn rollback_to(&self, py: Python<'_>, version: u64) -> PyResult<Py<PyAny>> {
+        let client = embedded_for_checkpoint(&self.inner, "rollback_to")?;
+        rollback_to_py(py, client, version)
+    }
+
+    /// Take a checkpoint for a `with` block, which rolls back on leaving it
+    /// unless `commit()` was called (#2093).
+    fn branch(&self, py: Python<'_>) -> PyResult<Branch> {
+        let version = self.checkpoint(py)?;
+        Ok(Branch { inner: self.inner.clone(), version, open: true })
+    }
+
     fn __repr__(&self) -> String {
         match &*self.inner {
             ClientInner::Embedded(_) => "SamyamaClient(mode='embedded')".to_string(),
@@ -1079,5 +1286,7 @@ fn samyama(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "RequestTimeoutError",
         m.py().get_type::<RequestTimeoutError>(),
     )?;
+    m.add_class::<Branch>()?;
+    m.add("RollbackConflict", m.py().get_type::<RollbackConflict>())?;
     Ok(())
 }
