@@ -182,8 +182,12 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
         for inner in pair.into_inner() {
             match inner.as_rule() {
                 Rule::explain_clause => {
-                    query.explain = true;
-                    query.profile = inner.as_str().to_uppercase().starts_with("PROFILE");
+                    // As `parse_query` sets them: PROFILE is not also EXPLAIN.
+                    // Both flags set made the executor's EXPLAIN branch answer
+                    // a PROFILE without running it.
+                    let profile = inner.as_str().to_uppercase().starts_with("PROFILE");
+                    query.profile = profile;
+                    query.explain = !profile;
                     query.plan_json = inner.into_inner().any(|p| p.as_rule() == Rule::explain_format);
                 }
                 Rule::cypher_options => parse_cypher_options(inner, &mut query.plan_options)?,
@@ -637,6 +641,10 @@ fn parse_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> Pars
             }
             Rule::analyze_stmt => {
                 query.analyze = true;
+                query.analyze_label = inner
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::label)
+                    .map(|p| Label::new(unescape_name(p.as_str())));
             }
             Rule::show_hierarchy_indexes_stmt => {
                 query.show_hierarchy_indexes = true;

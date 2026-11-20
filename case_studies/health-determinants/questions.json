@@ -1,0 +1,599 @@
+[
+  {
+    "id": "hd_country_count",
+    "difficulty": "easy",
+    "question": "How many countries and territories does the graph cover?",
+    "paraphrases": [
+      "How many countries are in the health determinants graph?"
+    ],
+    "cypher": "MATCH (c:Country) RETURN count(c) AS countries"
+  },
+  {
+    "id": "hd_region_sizes",
+    "difficulty": "easy",
+    "question": "How many countries are in each world region?",
+    "cypher": "MATCH (c:Country)-[:IN_REGION]->(r:Region) RETURN r.name AS region, count(c) AS countries ORDER BY countries DESC, region"
+  },
+  {
+    "id": "hd_income_groups",
+    "difficulty": "easy",
+    "question": "How many countries are in each World Bank income group?",
+    "paraphrases": [
+      "Break the countries down by income level."
+    ],
+    "cypher": "MATCH (c:Country) RETURN c.income_level AS income_group, count(c) AS countries ORDER BY countries DESC, income_group"
+  },
+  {
+    "id": "hd_country_income",
+    "difficulty": "easy",
+    "question": "Which income group is {country} in?",
+    "cypher": "MATCH (c:Country {name: $country}) RETURN c.income_level AS income_group",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "Kenya"
+      }
+    ]
+  },
+  {
+    "id": "hd_country_region_by_iso",
+    "difficulty": "easy",
+    "question": "Which country has the ISO code {iso}, and which world region is it in?",
+    "cypher": "MATCH (c:Country {iso_code: $iso})-[:IN_REGION]->(r:Region) RETURN c.name AS country, r.name AS region",
+    "params": [
+      {
+        "name": "iso",
+        "type": "string",
+        "sample": "BRA"
+      }
+    ]
+  },
+  {
+    "id": "hd_country_iso",
+    "difficulty": "easy",
+    "question": "What is the ISO code of {country}?",
+    "cypher": "MATCH (c:Country {name: $country}) RETURN c.iso_code AS iso_code",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "Germany"
+      }
+    ]
+  },
+  {
+    "id": "hd_region_members",
+    "difficulty": "easy",
+    "question": "Which countries are in the {region} region?",
+    "cypher": "MATCH (c:Country)-[:IN_REGION]->(r:Region {name: $region}) RETURN c.name AS country ORDER BY country",
+    "params": [
+      {
+        "name": "region",
+        "type": "string",
+        "sample": "South Asia",
+        "enum_values": [
+          "East Asia & Pacific",
+          "Europe & Central Asia",
+          "Latin America & Caribbean",
+          "Middle East, North Africa, Afghanistan & Pakistan",
+          "North America",
+          "South Asia",
+          "Sub-Saharan Africa"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "hd_unclassified_income",
+    "difficulty": "easy",
+    "question": "Which countries have no World Bank income classification?",
+    "paraphrases": [
+      "Which countries are listed as 'Not classified' for income?"
+    ],
+    "cypher": "MATCH (c:Country) WHERE c.income_level = 'Not classified' RETURN c.name AS country ORDER BY country"
+  },
+  {
+    "id": "hd_population_year",
+    "difficulty": "easy",
+    "question": "What was the population of {country} in {year}?",
+    "cypher": "MATCH (c:Country {name: $country})-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE d.indicator_code = 'SP.POP.TOTL' AND d.year = $year RETURN d.value AS population",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "Nigeria"
+      },
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2020
+      }
+    ]
+  },
+  {
+    "id": "hd_records_per_theme",
+    "difficulty": "easy",
+    "question": "How many data points does the graph hold for each theme (socioeconomic, environmental, water, nutrition and demographic)?",
+    "cypher": "MATCH (x) WHERE x:SocioeconomicIndicator OR x:EnvironmentalFactor OR x:WaterResource OR x:NutritionIndicator OR x:DemographicProfile RETURN labels(x)[0] AS theme, count(x) AS records ORDER BY records DESC"
+  },
+  {
+    "id": "hd_environment_indicators",
+    "difficulty": "easy",
+    "question": "Which environmental indicators does the graph track?",
+    "cypher": "MATCH (e:EnvironmentalFactor) RETURN DISTINCT e.indicator_name AS indicator ORDER BY indicator"
+  },
+  {
+    "id": "hd_nutrition_indicators",
+    "difficulty": "easy",
+    "question": "Which nutrition indicators does the graph track?",
+    "cypher": "MATCH (n:NutritionIndicator) RETURN DISTINCT n.indicator_name AS indicator ORDER BY indicator"
+  },
+  {
+    "id": "hd_pm25_country_year",
+    "difficulty": "easy",
+    "question": "What was {country}'s mean annual exposure to PM2.5 air pollution in {year}, in micrograms per cubic metre?",
+    "cypher": "MATCH (c:Country {name: $country})-[:ENVIRONMENT_OF]->(e:EnvironmentalFactor) WHERE e.indicator_code = 'EN.ATM.PM25.MC.M3' AND e.year = $year RETURN e.value AS pm25",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "India"
+      },
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2019
+      }
+    ]
+  },
+  {
+    "id": "hd_pm25_years",
+    "difficulty": "easy",
+    "question": "What are the first and last years covered by the mean PM2.5 exposure figures?",
+    "cypher": "MATCH (e:EnvironmentalFactor) WHERE e.indicator_code = 'EN.ATM.PM25.MC.M3' RETURN min(e.year) AS first_year, max(e.year) AS last_year"
+  },
+  {
+    "id": "hd_income_region_count",
+    "difficulty": "easy",
+    "question": "How many {income} countries are there in {region}?",
+    "cypher": "MATCH (c:Country {income_level: $income})-[:IN_REGION]->(r:Region {name: $region}) RETURN count(c) AS countries",
+    "params": [
+      {
+        "name": "income",
+        "type": "string",
+        "sample": "High income",
+        "enum_values": [
+          "High income",
+          "Upper middle income",
+          "Lower middle income",
+          "Low income",
+          "Not classified"
+        ]
+      },
+      {
+        "name": "region",
+        "type": "string",
+        "sample": "Europe & Central Asia",
+        "enum_values": [
+          "East Asia & Pacific",
+          "Europe & Central Asia",
+          "Latin America & Caribbean",
+          "Middle East, North Africa, Afghanistan & Pakistan",
+          "North America",
+          "South Asia",
+          "Sub-Saharan Africa"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "hd_unanswerable_capital",
+    "difficulty": "easy",
+    "question": "What is the capital city of each country?",
+    "cypher": "MATCH (c:Country) WHERE c.capital IS NOT NULL RETURN c.name AS country, c.capital AS capital ORDER BY country",
+    "unanswerable": true
+  },
+  {
+    "id": "hd_unanswerable_co2",
+    "difficulty": "easy",
+    "question": "What were each country's carbon dioxide emissions per person in 2020?",
+    "cypher": "MATCH (c:Country)-[:ENVIRONMENT_OF]->(e:EnvironmentalFactor) WHERE e.indicator_name CONTAINS 'CO2' AND e.year = 2020 RETURN c.name AS country, e.value AS co2 ORDER BY country",
+    "unanswerable": true
+  },
+  {
+    "id": "hd_most_populous_2024",
+    "difficulty": "medium",
+    "question": "Which ten countries had the largest populations in 2024?",
+    "paraphrases": [
+      "List the ten most populous countries in 2024."
+    ],
+    "cypher": "MATCH (c:Country)-[:DEMOGRAPHIC_OF]->(x:DemographicProfile) WHERE x.indicator_code = 'SP.POP.TOTL' AND x.year = 2024 RETURN c.name AS country, x.value AS population ORDER BY population DESC, country LIMIT 10"
+  },
+  {
+    "id": "hd_highest_pm25",
+    "difficulty": "medium",
+    "question": "Which ten countries had the highest mean annual PM2.5 exposure in {year}?",
+    "paraphrases": [
+      "Where was fine-particle air pollution worst in {year}?"
+    ],
+    "cypher": "MATCH (c:Country)-[:ENVIRONMENT_OF]->(x:EnvironmentalFactor) WHERE x.indicator_code = 'EN.ATM.PM25.MC.M3' AND x.year = $year RETURN c.name AS country, x.value AS pm25 ORDER BY pm25 DESC, country LIMIT 10",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2020
+      }
+    ]
+  },
+  {
+    "id": "hd_lowest_life_exp_2023",
+    "difficulty": "medium",
+    "question": "Which ten countries had the lowest life expectancy at birth in 2023?",
+    "cypher": "MATCH (c:Country)-[:DEMOGRAPHIC_OF]->(x:DemographicProfile) WHERE x.indicator_code = 'SP.DYN.LE00.IN' AND x.year = 2023 RETURN c.name AS country, x.value AS life_expectancy ORDER BY life_expectancy ASC, country LIMIT 10"
+  },
+  {
+    "id": "hd_highest_gni",
+    "difficulty": "medium",
+    "question": "Which ten countries had the highest GNI per capita (Atlas method, current US$) in {year}?",
+    "cypher": "MATCH (c:Country)-[:HAS_INDICATOR]->(x:SocioeconomicIndicator) WHERE x.indicator_code = 'NY.GNP.PCAP.CD' AND x.year = $year RETURN c.name AS country, x.value AS gni_per_capita ORDER BY gni_per_capita DESC, country LIMIT 10",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2023
+      }
+    ]
+  },
+  {
+    "id": "hd_health_spend_share",
+    "difficulty": "medium",
+    "question": "Which ten countries spent the largest share of GDP on health in {year}?",
+    "cypher": "MATCH (c:Country)-[:HAS_INDICATOR]->(x:SocioeconomicIndicator) WHERE x.indicator_code = 'SH.XPD.CHEX.GD.ZS' AND x.year = $year RETURN c.name AS country, x.value AS health_pct_gdp ORDER BY health_pct_gdp DESC, country LIMIT 10",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2022
+      }
+    ]
+  },
+  {
+    "id": "hd_youth_unemployment_2024",
+    "difficulty": "medium",
+    "question": "Which ten countries had the highest youth unemployment rate (ages 15-24) in 2024?",
+    "cypher": "MATCH (c:Country)-[:HAS_INDICATOR]->(x:SocioeconomicIndicator) WHERE x.indicator_code = 'SL.UEM.1524.ZS' AND x.year = 2024 RETURN c.name AS country, x.value AS youth_unemployment ORDER BY youth_unemployment DESC, country LIMIT 10"
+  },
+  {
+    "id": "hd_high_inflation",
+    "difficulty": "medium",
+    "question": "Which countries had consumer price inflation above {threshold}% in {year}?",
+    "cypher": "MATCH (c:Country)-[:HAS_INDICATOR]->(s:SocioeconomicIndicator) WHERE s.indicator_code = 'FP.CPI.TOTL.ZG' AND s.year = $year AND s.value > $threshold RETURN c.name AS country, s.value AS inflation ORDER BY inflation DESC, country",
+    "params": [
+      {
+        "name": "threshold",
+        "type": "float",
+        "sample": 20.0
+      },
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2023
+      }
+    ]
+  },
+  {
+    "id": "hd_undernourishment_top_2022",
+    "difficulty": "medium",
+    "question": "Which ten countries had the highest prevalence of undernourishment in 2022?",
+    "cypher": "MATCH (c:Country)-[:NUTRITION_STATUS]->(x:NutritionIndicator) WHERE x.indicator_code = 'SN.ITK.DEFC.ZS' AND x.year = 2022 RETURN c.name AS country, x.value AS undernourished_pct ORDER BY undernourished_pct DESC, country LIMIT 10"
+  },
+  {
+    "id": "hd_most_forested_2020",
+    "difficulty": "medium",
+    "question": "Which ten countries had the largest share of their land under forest in 2020?",
+    "cypher": "MATCH (c:Country)-[:ENVIRONMENT_OF]->(x:EnvironmentalFactor) WHERE x.indicator_code = 'AG.LND.FRST.ZS' AND x.year = 2020 RETURN c.name AS country, x.value AS forest_pct ORDER BY forest_pct DESC, country LIMIT 10"
+  },
+  {
+    "id": "hd_renewable_leaders",
+    "difficulty": "medium",
+    "question": "Which ten countries got the largest share of their final energy consumption from renewables in {year}?",
+    "cypher": "MATCH (c:Country)-[:ENVIRONMENT_OF]->(x:EnvironmentalFactor) WHERE x.indicator_code = 'EG.FEC.RNEW.ZS' AND x.year = $year RETURN c.name AS country, x.value AS renewable_pct ORDER BY renewable_pct DESC, country LIMIT 10",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2021
+      }
+    ]
+  },
+  {
+    "id": "hd_basic_sanitation_lowest_2022",
+    "difficulty": "medium",
+    "question": "Which ten countries had the lowest share of people using at least basic sanitation services in 2022?",
+    "cypher": "MATCH (c:Country)-[:WATER_RESOURCE_OF]->(x:WaterResource) WHERE x.indicator_code = 'SH.STA.BASS.ZS' AND x.year = 2022 RETURN c.name AS country, x.value AS basic_sanitation_pct ORDER BY basic_sanitation_pct ASC, country LIMIT 10"
+  },
+  {
+    "id": "hd_water_stress",
+    "difficulty": "medium",
+    "question": "Which countries withdrew more freshwater in {year} than their internal renewable freshwater resources (over 100%)?",
+    "cypher": "MATCH (c:Country)-[:WATER_RESOURCE_OF]->(w:WaterResource) WHERE w.indicator_code = 'ER.H2O.FWTL.ZS' AND w.year = $year AND w.value > 100 RETURN c.name AS country, w.value AS withdrawal_pct ORDER BY withdrawal_pct DESC, country",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2020
+      }
+    ]
+  },
+  {
+    "id": "hd_life_exp_by_income_2023",
+    "difficulty": "medium",
+    "question": "What was the average life expectancy at birth in 2023 in each income group, to one decimal place?",
+    "cypher": "MATCH (c:Country)-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE d.indicator_code = 'SP.DYN.LE00.IN' AND d.year = 2023 RETURN c.income_level AS income_group, round(avg(d.value), 1) AS avg_life_expectancy ORDER BY avg_life_expectancy DESC, income_group"
+  },
+  {
+    "id": "hd_country_theme_counts",
+    "difficulty": "medium",
+    "question": "How many data points does the graph hold for {country} in each theme?",
+    "cypher": "MATCH (c:Country {name: $country})-[]->(x) WHERE NOT x:Region RETURN labels(x)[0] AS theme, count(x) AS records ORDER BY records DESC, theme",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "Kenya"
+      }
+    ]
+  },
+  {
+    "id": "hd_shrinking_population_2023",
+    "difficulty": "medium",
+    "question": "Which countries had negative population growth in 2023?",
+    "paraphrases": [
+      "Whose population shrank in 2023?"
+    ],
+    "cypher": "MATCH (c:Country)-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE d.indicator_code = 'SP.POP.GROW' AND d.year = 2023 AND d.value < 0 RETURN c.name AS country, d.value AS growth_pct ORDER BY growth_pct ASC, country"
+  },
+  {
+    "id": "hd_oldest_populations_2024",
+    "difficulty": "medium",
+    "question": "Which ten countries had the largest share of people aged 65 and above in 2024?",
+    "cypher": "MATCH (c:Country)-[:DEMOGRAPHIC_OF]->(x:DemographicProfile) WHERE x.indicator_code = 'SP.POP.65UP.TO.ZS' AND x.year = 2024 RETURN c.name AS country, x.value AS aged_65_plus_pct ORDER BY aged_65_plus_pct DESC, country LIMIT 10"
+  },
+  {
+    "id": "hd_net_migration_top_2024",
+    "difficulty": "medium",
+    "question": "Which ten countries had the highest net migration in 2024?",
+    "cypher": "MATCH (c:Country)-[:DEMOGRAPHIC_OF]->(x:DemographicProfile) WHERE x.indicator_code = 'SM.POP.NETM' AND x.year = 2024 RETURN c.name AS country, x.value AS net_migration ORDER BY net_migration DESC, country LIMIT 10"
+  },
+  {
+    "id": "hd_urban_change",
+    "difficulty": "medium",
+    "question": "What share of {country}'s population lived in urban areas in 1990, and in 2024?",
+    "cypher": "MATCH (c:Country {name: $country})-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE d.indicator_code = 'SP.URB.TOTL.IN.ZS' AND d.year IN [1990, 2024] RETURN d.year AS year, d.value AS urban_pct ORDER BY year",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "China"
+      }
+    ]
+  },
+  {
+    "id": "hd_poverty_series",
+    "difficulty": "medium",
+    "question": "In which years was the share of {country}'s population living on less than $3.00 a day (2021 PPP) recorded, and what was it each time?",
+    "cypher": "MATCH (c:Country {name: $country})-[:HAS_INDICATOR]->(s:SocioeconomicIndicator) WHERE s.indicator_code = 'SI.POV.DDAY' RETURN s.year AS year, s.value AS poverty_pct ORDER BY year",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "India"
+      }
+    ]
+  },
+  {
+    "id": "hd_stunting_coverage",
+    "difficulty": "medium",
+    "question": "How many countries have at least one record of child stunting prevalence?",
+    "cypher": "MATCH (c:Country)-[:NUTRITION_STATUS]->(n:NutritionIndicator) WHERE n.indicator_code = 'SH.STA.STNT.ZS' RETURN count(DISTINCT c) AS countries"
+  },
+  {
+    "id": "hd_infant_mortality_change",
+    "difficulty": "medium",
+    "question": "What was {country}'s infant mortality rate in 1990 and in 2023?",
+    "cypher": "MATCH (c:Country {name: $country})-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE d.indicator_code = 'SP.DYN.IMRT.IN' AND d.year IN [1990, 2023] RETURN d.year AS year, d.value AS infant_mortality ORDER BY year",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "Bangladesh"
+      }
+    ]
+  },
+  {
+    "id": "hd_neonatal_highest_2023",
+    "difficulty": "medium",
+    "question": "Which ten countries had the highest neonatal mortality rate in 2023?",
+    "cypher": "MATCH (c:Country)-[:DEMOGRAPHIC_OF]->(x:DemographicProfile) WHERE x.indicator_code = 'SH.DYN.NMRT' AND x.year = 2023 RETURN c.name AS country, x.value AS neonatal_mortality ORDER BY neonatal_mortality DESC, country LIMIT 10"
+  },
+  {
+    "id": "hd_climate_exposure",
+    "difficulty": "medium",
+    "question": "Which ten countries had the largest share of their population affected by droughts, floods and extreme temperatures (the 1990-2009 average)?",
+    "cypher": "MATCH (c:Country)-[:ENVIRONMENT_OF]->(e:EnvironmentalFactor) WHERE e.indicator_code = 'EN.CLC.MDAT.ZS' RETURN c.name AS country, e.value AS affected_pct ORDER BY affected_pct DESC, country LIMIT 10"
+  },
+  {
+    "id": "hd_handwashing_lowest_2022",
+    "difficulty": "medium",
+    "question": "Which ten countries had the lowest share of people with basic handwashing facilities (soap and water) in 2022?",
+    "cypher": "MATCH (c:Country)-[:WATER_RESOURCE_OF]->(x:WaterResource) WHERE x.indicator_code = 'SH.STA.HYGN.ZS' AND x.year = 2022 RETURN c.name AS country, x.value AS handwashing_pct ORDER BY handwashing_pct ASC, country LIMIT 10"
+  },
+  {
+    "id": "hd_life_exp_80_count_2023",
+    "difficulty": "medium",
+    "question": "How many countries had a life expectancy at birth of 80 years or more in 2023?",
+    "cypher": "MATCH (c:Country)-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE d.indicator_code = 'SP.DYN.LE00.IN' AND d.year = 2023 AND d.value >= 80 RETURN count(c) AS countries"
+  },
+  {
+    "id": "hd_region_income_mix",
+    "difficulty": "medium",
+    "question": "How many countries of each income group are in {region}?",
+    "cypher": "MATCH (c:Country)-[:IN_REGION]->(r:Region {name: $region}) RETURN c.income_level AS income_group, count(c) AS countries ORDER BY countries DESC, income_group",
+    "params": [
+      {
+        "name": "region",
+        "type": "string",
+        "sample": "Sub-Saharan Africa",
+        "enum_values": [
+          "East Asia & Pacific",
+          "Europe & Central Asia",
+          "Latin America & Caribbean",
+          "Middle East, North Africa, Afghanistan & Pakistan",
+          "North America",
+          "South Asia",
+          "Sub-Saharan Africa"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "hd_unanswerable_adult_obesity",
+    "difficulty": "medium",
+    "question": "What share of adults were obese in each country in 2016?",
+    "cypher": "MATCH (c:Country)-[:NUTRITION_STATUS]->(n:NutritionIndicator) WHERE toLower(n.indicator_name) CONTAINS 'obes' AND n.year = 2016 RETURN c.name AS country, n.value AS obese_pct ORDER BY country",
+    "unanswerable": true
+  },
+  {
+    "id": "hd_unanswerable_population_2030",
+    "difficulty": "medium",
+    "question": "What will {country}'s population be in 2030?",
+    "cypher": "MATCH (c:Country {name: $country})-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE d.indicator_code = 'SP.POP.TOTL' AND d.year = 2030 RETURN d.value AS population",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "India"
+      }
+    ],
+    "unanswerable": true
+  },
+  {
+    "id": "hd_region_life_exp_2023",
+    "difficulty": "hard",
+    "question": "What was the average life expectancy at birth in each world region in 2023, to one decimal place?",
+    "cypher": "MATCH (r:Region)<-[:IN_REGION]-(c:Country)-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE d.indicator_code = 'SP.DYN.LE00.IN' AND d.year = 2023 RETURN r.name AS region, round(avg(d.value), 1) AS avg_life_expectancy ORDER BY avg_life_expectancy DESC, region"
+  },
+  {
+    "id": "hd_region_pm25",
+    "difficulty": "hard",
+    "question": "Rank the world regions by their countries' average mean PM2.5 exposure in {year}, to one decimal place.",
+    "cypher": "MATCH (r:Region)<-[:IN_REGION]-(c:Country)-[:ENVIRONMENT_OF]->(e:EnvironmentalFactor) WHERE e.indicator_code = 'EN.ATM.PM25.MC.M3' AND e.year = $year RETURN r.name AS region, round(avg(e.value), 1) AS avg_pm25 ORDER BY avg_pm25 DESC, region",
+    "params": [
+      {
+        "name": "year",
+        "type": "int",
+        "sample": 2019
+      }
+    ]
+  },
+  {
+    "id": "hd_deaths_exceed_births_2023",
+    "difficulty": "hard",
+    "question": "In which countries was the crude death rate higher than the crude birth rate in 2023?",
+    "paraphrases": [
+      "Which countries had more deaths than births per 1,000 people in 2023?"
+    ],
+    "cypher": "MATCH (c:Country)-[:DEMOGRAPHIC_OF]->(b:DemographicProfile), (c)-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE b.indicator_code = 'SP.DYN.CBRT.IN' AND b.year = 2023 AND d.indicator_code = 'SP.DYN.CDRT.IN' AND d.year = 2023 AND d.value > b.value RETURN c.name AS country, b.value AS birth_rate, d.value AS death_rate ORDER BY country"
+  },
+  {
+    "id": "hd_life_exp_gain_2000_2023",
+    "difficulty": "hard",
+    "question": "Which ten countries gained the most years of life expectancy at birth between 2000 and 2023?",
+    "cypher": "MATCH (c:Country)-[:DEMOGRAPHIC_OF]->(a:DemographicProfile), (c)-[:DEMOGRAPHIC_OF]->(b:DemographicProfile) WHERE a.indicator_code = 'SP.DYN.LE00.IN' AND a.year = 2000 AND b.indicator_code = 'SP.DYN.LE00.IN' AND b.year = 2023 RETURN c.name AS country, round(b.value - a.value, 2) AS gain_years ORDER BY gain_years DESC, country LIMIT 10"
+  },
+  {
+    "id": "hd_region_population_2024",
+    "difficulty": "hard",
+    "question": "What was the total population of each world region in 2024?",
+    "cypher": "MATCH (r:Region)<-[:IN_REGION]-(c:Country)-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE d.indicator_code = 'SP.POP.TOTL' AND d.year = 2024 RETURN r.name AS region, sum(d.value) AS population ORDER BY population DESC, region"
+  },
+  {
+    "id": "hd_richest_in_region",
+    "difficulty": "hard",
+    "question": "Which five countries in {region} had the highest GNI per capita in 2023?",
+    "cypher": "MATCH (r:Region {name: $region})<-[:IN_REGION]-(c:Country)-[:HAS_INDICATOR]->(s:SocioeconomicIndicator) WHERE s.indicator_code = 'NY.GNP.PCAP.CD' AND s.year = 2023 RETURN c.name AS country, s.value AS gni_per_capita ORDER BY gni_per_capita DESC, country LIMIT 5",
+    "params": [
+      {
+        "name": "region",
+        "type": "string",
+        "sample": "Latin America & Caribbean",
+        "enum_values": [
+          "East Asia & Pacific",
+          "Europe & Central Asia",
+          "Latin America & Caribbean",
+          "Middle East, North Africa, Afghanistan & Pakistan",
+          "North America",
+          "South Asia",
+          "Sub-Saharan Africa"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "hd_health_spend_and_life_exp_2021",
+    "difficulty": "hard",
+    "question": "For the countries that spent more than 12% of GDP on health in 2021, what was their life expectancy at birth that year?",
+    "cypher": "MATCH (c:Country)-[:HAS_INDICATOR]->(s:SocioeconomicIndicator), (c)-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE s.indicator_code = 'SH.XPD.CHEX.GD.ZS' AND s.year = 2021 AND s.value > 12 AND d.indicator_code = 'SP.DYN.LE00.IN' AND d.year = 2021 RETURN c.name AS country, s.value AS health_pct_gdp, d.value AS life_expectancy ORDER BY health_pct_gdp DESC, country"
+  },
+  {
+    "id": "hd_low_income_basic_water_2022",
+    "difficulty": "hard",
+    "question": "Among low-income countries, which five had the lowest share of people using at least basic drinking water services in 2022, and which region is each in?",
+    "cypher": "MATCH (r:Region)<-[:IN_REGION]-(c:Country {income_level: 'Low income'})-[:WATER_RESOURCE_OF]->(w:WaterResource) WHERE w.indicator_code = 'SH.H2O.BASW.ZS' AND w.year = 2022 RETURN c.name AS country, r.name AS region, w.value AS basic_water_pct ORDER BY basic_water_pct ASC, country LIMIT 5"
+  },
+  {
+    "id": "hd_country_profile_2020",
+    "difficulty": "hard",
+    "question": "For {country} in 2020, what were its population, life expectancy at birth, GNI per capita and mean PM2.5 exposure?",
+    "cypher": "MATCH (c:Country {name: $country})-[:DEMOGRAPHIC_OF]->(p:DemographicProfile), (c)-[:DEMOGRAPHIC_OF]->(l:DemographicProfile), (c)-[:HAS_INDICATOR]->(g:SocioeconomicIndicator), (c)-[:ENVIRONMENT_OF]->(e:EnvironmentalFactor) WHERE p.indicator_code = 'SP.POP.TOTL' AND p.year = 2020 AND l.indicator_code = 'SP.DYN.LE00.IN' AND l.year = 2020 AND g.indicator_code = 'NY.GNP.PCAP.CD' AND g.year = 2020 AND e.indicator_code = 'EN.ATM.PM25.MC.M3' AND e.year = 2020 RETURN p.value AS population, l.value AS life_expectancy, g.value AS gni_per_capita, e.value AS pm25",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "Brazil"
+      }
+    ]
+  },
+  {
+    "id": "hd_population_share_in_region_2024",
+    "difficulty": "hard",
+    "question": "Which region is {country} in, and what percentage of that region's 2024 population lived in {country}, to one decimal place?",
+    "cypher": "MATCH (c:Country {name: $country})-[:IN_REGION]->(r:Region) MATCH (r)<-[:IN_REGION]-(o:Country)-[:DEMOGRAPHIC_OF]->(d:DemographicProfile) WHERE d.indicator_code = 'SP.POP.TOTL' AND d.year = 2024 WITH c, r, sum(d.value) AS region_pop MATCH (c)-[:DEMOGRAPHIC_OF]->(p:DemographicProfile) WHERE p.indicator_code = 'SP.POP.TOTL' AND p.year = 2024 RETURN r.name AS region, round(100.0 * p.value / region_pop, 1) AS share_pct",
+    "params": [
+      {
+        "name": "country",
+        "type": "string",
+        "sample": "India"
+      }
+    ]
+  },
+  {
+    "id": "hd_gni_growth_2000_2023",
+    "difficulty": "hard",
+    "question": "Which ten countries saw GNI per capita grow by the largest multiple between 2000 and 2023?",
+    "cypher": "MATCH (c:Country)-[:HAS_INDICATOR]->(a:SocioeconomicIndicator), (c)-[:HAS_INDICATOR]->(b:SocioeconomicIndicator) WHERE a.indicator_code = 'NY.GNP.PCAP.CD' AND a.year = 2000 AND b.indicator_code = 'NY.GNP.PCAP.CD' AND b.year = 2023 AND a.value > 0 RETURN c.name AS country, round(b.value / a.value, 2) AS growth_multiple ORDER BY growth_multiple DESC, country LIMIT 10"
+  },
+  {
+    "id": "hd_region_sanitation_2022",
+    "difficulty": "hard",
+    "question": "Rank the world regions by the average share of their countries' people using at least basic sanitation in 2022, lowest first, to one decimal place.",
+    "cypher": "MATCH (r:Region)<-[:IN_REGION]-(c:Country)-[:WATER_RESOURCE_OF]->(w:WaterResource) WHERE w.indicator_code = 'SH.STA.BASS.ZS' AND w.year = 2022 RETURN r.name AS region, round(avg(w.value), 1) AS avg_basic_sanitation_pct ORDER BY avg_basic_sanitation_pct ASC, region"
+  },
+  {
+    "id": "hd_hunger_and_water_2022",
+    "difficulty": "hard",
+    "question": "Which countries had more than 20% of their population undernourished and less than 70% using at least basic drinking water in 2022?",
+    "cypher": "MATCH (c:Country)-[:NUTRITION_STATUS]->(n:NutritionIndicator), (c)-[:WATER_RESOURCE_OF]->(w:WaterResource) WHERE n.indicator_code = 'SN.ITK.DEFC.ZS' AND n.year = 2022 AND n.value > 20 AND w.indicator_code = 'SH.H2O.BASW.ZS' AND w.year = 2022 AND w.value < 70 RETURN c.name AS country, n.value AS undernourished_pct, w.value AS basic_water_pct ORDER BY country"
+  }
+]

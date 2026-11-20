@@ -117,12 +117,39 @@ with the key bound as a parameter; the server uses the index the constraint
 created, but the client does not check that the constraint exists. Both return
 an error if two nodes hold the key.
 
+## Evaluate an agent on a snapshot
+
+`SamyamaEnv` runs scored episodes against a pinned `.sgsnap`: `reset` hands
+the agent a task and a fresh copy of the graph, `step` runs one Cypher
+statement (500 ms budget) or takes the final answer, and the answer is scored
+with a reward in `[0, 1]`.
+
+```rust,no_run
+use samyama_sdk::env::{Action, SamyamaEnv};
+
+# fn main() -> Result<(), samyama_sdk::env::EnvError> {
+let mut env = SamyamaEnv::open("cricket.sgsnap", "tasks.jsonl", 42)?;
+let task = env.reset(None)?;                       // task.prompt, task.schema
+env.step(Action::Query("MATCH (p:Player) RETURN p.name LIMIT 5".into()))?;
+let done = env.step(Action::Answer(vec!["V Kohli".into()]))?;
+println!("reward {}", done.reward);                // F1 against the answer key
+# Ok(()) }
+```
+
+A read task's answer key comes from an oracle query run against a copy of the
+snapshot the agent never touches, so writing to its own graph cannot change
+what it is scored against. A write task is scored by postcondition queries on
+the graph the agent leaves. An episode that changed the graph is undone at the
+next `reset`, and the same seed draws the same tasks, so a run repeats exactly.
+The tasks file format is in the `env` module documentation.
+
 ## Checked, not just written
 
 Every Rust block in this README is compiled as a program of its own that
 depends on `samyama-sdk` the way yours does, and every embedded one is run, on
 each `cargo test --workspace` (`ReadmeDoctests` in `src/lib.rs`). The remote
-block is compiled but not run, since it needs a server.
+block and the agent-evaluation block are compiled but not run, since one needs
+a server and the other a snapshot file.
 
 - `tests/embedded_opens_no_socket.rs` runs writes, reads, a key lookup,
   PageRank and a vector search through `EmbeddedClient` and checks that the

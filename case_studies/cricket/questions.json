@@ -1,0 +1,506 @@
+[
+  {
+    "id": "ck_match_count",
+    "difficulty": "easy",
+    "question": "How many matches does the cricket graph hold?",
+    "paraphrases": [
+      "How many cricket matches are in the graph?"
+    ],
+    "cypher": "MATCH (m:Match) RETURN count(m) AS matches"
+  },
+  {
+    "id": "ck_player_count",
+    "difficulty": "easy",
+    "question": "How many players are in the graph?",
+    "cypher": "MATCH (p:Player) RETURN count(p) AS players"
+  },
+  {
+    "id": "ck_matches_by_format",
+    "difficulty": "easy",
+    "question": "How many matches were played in each format?",
+    "paraphrases": [
+      "Break the matches down by match type."
+    ],
+    "cypher": "MATCH (m:Match) RETURN m.match_type AS format, count(*) AS matches ORDER BY matches DESC"
+  },
+  {
+    "id": "ck_womens_matches",
+    "difficulty": "easy",
+    "question": "How many women's matches does the graph hold?",
+    "cypher": "MATCH (m:Match {gender: 'female'}) RETURN count(m) AS matches"
+  },
+  {
+    "id": "ck_date_range",
+    "difficulty": "easy",
+    "question": "What are the dates of the earliest and the latest match?",
+    "paraphrases": [
+      "Which period does the cricket data cover?"
+    ],
+    "cypher": "MATCH (m:Match) RETURN min(m.date) AS first_match, max(m.date) AS last_match"
+  },
+  {
+    "id": "ck_season_count",
+    "difficulty": "easy",
+    "question": "How many seasons does the graph cover?",
+    "cypher": "MATCH (s:Season) RETURN count(s) AS seasons"
+  },
+  {
+    "id": "ck_result_kinds",
+    "difficulty": "easy",
+    "question": "How many matches ended in a draw, a tie or no result?",
+    "cypher": "MATCH (m:Match) WHERE m.winner IN ['draw', 'tie', 'no result'] RETURN m.winner AS result, count(*) AS matches ORDER BY matches DESC"
+  },
+  {
+    "id": "ck_toss_decisions",
+    "difficulty": "easy",
+    "question": "How often did the side that won the toss choose to bat, and how often to field?",
+    "cypher": "MATCH (:Team)-[w:WON_TOSS]->(:Match) RETURN w.decision AS decision, count(*) AS tosses ORDER BY tosses DESC"
+  },
+  {
+    "id": "ck_tournament_matches",
+    "difficulty": "easy",
+    "question": "How many matches were played in the {tournament}?",
+    "cypher": "MATCH (m:Match)-[:PART_OF]->(t:Tournament {name: $tournament}) RETURN count(m) AS matches",
+    "params": [
+      {
+        "name": "tournament",
+        "type": "string",
+        "sample": "Indian Premier League"
+      }
+    ]
+  },
+  {
+    "id": "ck_team_matches",
+    "difficulty": "easy",
+    "question": "How many matches has {team} played?",
+    "cypher": "MATCH (t:Team {name: $team})-[:COMPETED_IN]->(m:Match) RETURN count(m) AS matches",
+    "params": [
+      {
+        "name": "team",
+        "type": "string",
+        "sample": "India"
+      }
+    ]
+  },
+  {
+    "id": "ck_player_of_match_awards",
+    "difficulty": "easy",
+    "question": "How many player-of-the-match awards has {player} won?",
+    "cypher": "MATCH (p:Player {name: $player})-[:PLAYER_OF_MATCH]->(m:Match) RETURN count(m) AS awards",
+    "params": [
+      {
+        "name": "player",
+        "type": "string",
+        "sample": "V Kohli"
+      }
+    ]
+  },
+  {
+    "id": "ck_matches_in_city",
+    "difficulty": "easy",
+    "question": "How many matches were played in {city}?",
+    "cypher": "MATCH (m:Match)-[:HOSTED_AT]->(v:Venue {city: $city}) RETURN count(m) AS matches",
+    "params": [
+      {
+        "name": "city",
+        "type": "string",
+        "sample": "Kolkata"
+      }
+    ]
+  },
+  {
+    "id": "ck_dismissal_kinds",
+    "difficulty": "easy",
+    "question": "How are batsmen most often dismissed?",
+    "paraphrases": [
+      "What are the most common ways of getting out?"
+    ],
+    "cypher": "MATCH (:Player)-[d:DISMISSED]->(:Player) RETURN d.kind AS how_out, count(*) AS dismissals ORDER BY dismissals DESC"
+  },
+  {
+    "id": "ck_top_run_scorers",
+    "difficulty": "medium",
+    "question": "Who are the ten highest run-scorers across all formats?",
+    "cypher": "MATCH (p:Player)-[b:BATTED_IN]->(:Match) RETURN p.name AS player, sum(b.runs) AS runs ORDER BY runs DESC LIMIT 10"
+  },
+  {
+    "id": "ck_top_run_scorers_in_format",
+    "difficulty": "medium",
+    "question": "Who are the ten highest run-scorers in {format} cricket?",
+    "cypher": "MATCH (p:Player)-[b:BATTED_IN]->(m:Match {match_type: $format}) RETURN p.name AS player, sum(b.runs) AS runs ORDER BY runs DESC LIMIT 10",
+    "params": [
+      {
+        "name": "format",
+        "type": "string",
+        "sample": "Test",
+        "enum_values": [
+          "T20",
+          "ODI",
+          "Test",
+          "IT20",
+          "MDM",
+          "ODM"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "ck_top_wicket_takers_in_format",
+    "difficulty": "medium",
+    "question": "Who took the most wickets in {format} cricket?",
+    "cypher": "MATCH (p:Player)-[b:BOWLED_IN]->(m:Match {match_type: $format}) RETURN p.name AS player, sum(b.wickets) AS wickets ORDER BY wickets DESC LIMIT 10",
+    "params": [
+      {
+        "name": "format",
+        "type": "string",
+        "sample": "ODI",
+        "enum_values": [
+          "T20",
+          "ODI",
+          "Test",
+          "IT20",
+          "MDM",
+          "ODM"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "ck_highest_innings",
+    "difficulty": "medium",
+    "question": "What are the five highest individual innings in the graph?",
+    "paraphrases": [
+      "Which are the biggest individual scores?"
+    ],
+    "cypher": "MATCH (p:Player)-[b:BATTED_IN]->(m:Match) RETURN p.name AS player, b.runs AS runs, b.balls AS balls, m.match_type AS format, m.date AS date ORDER BY runs DESC LIMIT 5"
+  },
+  {
+    "id": "ck_most_sixes",
+    "difficulty": "medium",
+    "question": "Who has hit the most sixes?",
+    "cypher": "MATCH (p:Player)-[b:BATTED_IN]->(:Match) RETURN p.name AS player, sum(b.sixes) AS sixes ORDER BY sixes DESC LIMIT 10"
+  },
+  {
+    "id": "ck_most_fours_in_format",
+    "difficulty": "medium",
+    "question": "Who has hit the most fours in {format} cricket?",
+    "cypher": "MATCH (p:Player)-[b:BATTED_IN]->(m:Match {match_type: $format}) RETURN p.name AS player, sum(b.fours) AS fours ORDER BY fours DESC LIMIT 10",
+    "params": [
+      {
+        "name": "format",
+        "type": "string",
+        "sample": "T20",
+        "enum_values": [
+          "T20",
+          "ODI",
+          "Test",
+          "IT20",
+          "MDM",
+          "ODM"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "ck_player_centuries",
+    "difficulty": "medium",
+    "question": "How many centuries has {player} scored?",
+    "paraphrases": [
+      "How many hundreds does {player} have?"
+    ],
+    "cypher": "MATCH (p:Player {name: $player})-[b:BATTED_IN]->(:Match) WHERE b.runs >= 100 RETURN count(*) AS centuries",
+    "params": [
+      {
+        "name": "player",
+        "type": "string",
+        "sample": "V Kohli"
+      }
+    ]
+  },
+  {
+    "id": "ck_most_centuries",
+    "difficulty": "medium",
+    "question": "Who has scored the most centuries?",
+    "cypher": "MATCH (p:Player)-[b:BATTED_IN]->(:Match) WHERE b.runs >= 100 RETURN p.name AS player, count(*) AS centuries ORDER BY centuries DESC LIMIT 10"
+  },
+  {
+    "id": "ck_most_maidens",
+    "difficulty": "medium",
+    "question": "Which bowlers have bowled the most maiden overs?",
+    "cypher": "MATCH (p:Player)-[b:BOWLED_IN]->(:Match) RETURN p.name AS player, sum(b.maidens) AS maidens ORDER BY maidens DESC LIMIT 10"
+  },
+  {
+    "id": "ck_ten_wicket_innings",
+    "difficulty": "medium",
+    "question": "Which bowlers took all ten wickets in an innings?",
+    "cypher": "MATCH (p:Player)-[b:BOWLED_IN]->(m:Match) WHERE b.wickets = 10 RETURN p.name AS player, m.match_type AS format, m.date AS date ORDER BY date"
+  },
+  {
+    "id": "ck_team_wins",
+    "difficulty": "medium",
+    "question": "How many matches has {team} won?",
+    "cypher": "MATCH (t:Team {name: $team})-[:WON]->(m:Match) RETURN count(m) AS wins",
+    "params": [
+      {
+        "name": "team",
+        "type": "string",
+        "sample": "Australia"
+      }
+    ]
+  },
+  {
+    "id": "ck_team_win_rate",
+    "difficulty": "medium",
+    "question": "What share of its matches has {team} won?",
+    "cypher": "MATCH (t:Team {name: $team})-[:COMPETED_IN]->(m:Match) OPTIONAL MATCH (t)-[w:WON]->(m) RETURN count(m) AS played, count(w) AS won, round(100.0 * count(w) / count(m), 1) AS win_pct",
+    "params": [
+      {
+        "name": "team",
+        "type": "string",
+        "sample": "England"
+      }
+    ]
+  },
+  {
+    "id": "ck_toss_winner_won",
+    "difficulty": "medium",
+    "question": "In how many decided matches did the side that won the toss also win the match?",
+    "paraphrases": [
+      "Does winning the toss help win the match?"
+    ],
+    "cypher": "MATCH (t:Team)-[:WON_TOSS]->(m:Match) WHERE m.winner IN ['draw', 'tie', 'no result'] = false RETURN count(m) AS decided, sum(CASE WHEN m.winner = t.name THEN 1 ELSE 0 END) AS toss_winner_won"
+  },
+  {
+    "id": "ck_most_catches",
+    "difficulty": "medium",
+    "question": "Which fielders took part in the most catches?",
+    "cypher": "MATCH (f:Player)-[d:FIELDED_DISMISSAL]->(:Player) WHERE d.kind = 'caught' RETURN f.name AS fielder, count(*) AS catches ORDER BY catches DESC LIMIT 10"
+  },
+  {
+    "id": "ck_most_stumpings",
+    "difficulty": "medium",
+    "question": "Which wicket-keepers made the most stumpings?",
+    "cypher": "MATCH (k:Player)-[d:FIELDED_DISMISSAL]->(:Player) WHERE d.kind = 'stumped' RETURN k.name AS keeper, count(*) AS stumpings ORDER BY stumpings DESC LIMIT 10"
+  },
+  {
+    "id": "ck_most_run_outs",
+    "difficulty": "medium",
+    "question": "Which fielders were involved in the most run-outs?",
+    "cypher": "MATCH (f:Player)-[d:FIELDED_DISMISSAL]->(:Player) WHERE d.kind = 'run out' RETURN f.name AS fielder, count(*) AS run_outs ORDER BY run_outs DESC LIMIT 10"
+  },
+  {
+    "id": "ck_matches_in_season",
+    "difficulty": "medium",
+    "question": "How many matches were played in the {season} season?",
+    "cypher": "MATCH (m:Match)-[:IN_SEASON]->(s:Season {year: $season}) RETURN count(m) AS matches",
+    "params": [
+      {
+        "name": "season",
+        "type": "string",
+        "sample": "2019"
+      }
+    ]
+  },
+  {
+    "id": "ck_biggest_wins_by_runs",
+    "difficulty": "medium",
+    "question": "Which were the five biggest wins by runs?",
+    "cypher": "MATCH (t:Team)-[:WON]->(m:Match) WHERE m.win_by_runs IS NOT NULL RETURN t.name AS winner, m.win_by_runs AS margin_runs, m.match_type AS format, m.date AS date ORDER BY margin_runs DESC LIMIT 5"
+  },
+  {
+    "id": "ck_player_teams",
+    "difficulty": "medium",
+    "question": "Which teams has {player} played for?",
+    "cypher": "MATCH (p:Player {name: $player})-[:PLAYED_FOR]->(t:Team) RETURN t.name AS team ORDER BY team",
+    "params": [
+      {
+        "name": "player",
+        "type": "string",
+        "sample": "MS Dhoni"
+      }
+    ]
+  },
+  {
+    "id": "ck_venue_matches_any_name",
+    "difficulty": "medium",
+    "question": "How many matches has {venue} hosted, counting every name it is recorded under?",
+    "paraphrases": [
+      "How many games have been played at {venue}?"
+    ],
+    "cypher": "MATCH (m:Match)-[:HOSTED_AT]->(v:Venue) WHERE v.name = $venue OR v.name STARTS WITH $venue + ', ' RETURN count(m) AS matches",
+    "params": [
+      {
+        "name": "venue",
+        "type": "string",
+        "sample": "Eden Gardens"
+      }
+    ]
+  },
+  {
+    "id": "ck_busiest_cities",
+    "difficulty": "medium",
+    "question": "Which cities have hosted the most matches?",
+    "cypher": "MATCH (m:Match)-[:HOSTED_AT]->(v:Venue) WHERE v.city IS NOT NULL RETURN v.city AS city, count(m) AS matches ORDER BY matches DESC LIMIT 10"
+  },
+  {
+    "id": "ck_venues_recorded_twice",
+    "difficulty": "medium",
+    "question": "Data check: how many grounds are recorded under two names, once with the city appended?",
+    "paraphrases": [
+      "How many venues appear twice in the graph?"
+    ],
+    "cypher": "MATCH (a:Venue), (b:Venue) WHERE b.name = a.name + ', ' + a.city RETURN count(*) AS doubled_venues"
+  },
+  {
+    "id": "ck_rivalry",
+    "difficulty": "hard",
+    "question": "How many times did {bowler} dismiss {batsman}?",
+    "cypher": "MATCH (b:Player {name: $bowler})-[d:DISMISSED]->(x:Player {name: $batsman}) RETURN count(d) AS dismissals",
+    "params": [
+      {
+        "name": "bowler",
+        "type": "string",
+        "sample": "JM Anderson"
+      },
+      {
+        "name": "batsman",
+        "type": "string",
+        "sample": "V Kohli"
+      }
+    ]
+  },
+  {
+    "id": "ck_head_to_head",
+    "difficulty": "hard",
+    "question": "How many matches have {team_a} and {team_b} played against each other, and how many did each win?",
+    "cypher": "MATCH (a:Team {name: $team_a})-[:COMPETED_IN]->(m:Match)<-[:COMPETED_IN]-(b:Team {name: $team_b}) RETURN count(m) AS played, sum(CASE WHEN m.winner = a.name THEN 1 ELSE 0 END) AS a_won, sum(CASE WHEN m.winner = b.name THEN 1 ELSE 0 END) AS b_won",
+    "params": [
+      {
+        "name": "team_a",
+        "type": "string",
+        "sample": "India"
+      },
+      {
+        "name": "team_b",
+        "type": "string",
+        "sample": "Australia"
+      }
+    ]
+  },
+  {
+    "id": "ck_t20_strike_rate",
+    "difficulty": "hard",
+    "question": "Among batters who faced at least 2,000 balls in T20 cricket, who scored fastest?",
+    "paraphrases": [
+      "Who has the best T20 strike rate (minimum 2,000 balls)?"
+    ],
+    "cypher": "MATCH (p:Player)-[b:BATTED_IN]->(m:Match {match_type: 'T20'}) WITH p, sum(b.runs) AS runs, sum(b.balls) AS balls WHERE balls >= 2000 RETURN p.name AS player, runs, balls, round(100.0 * runs / balls, 1) AS strike_rate ORDER BY strike_rate DESC LIMIT 10"
+  },
+  {
+    "id": "ck_most_distinct_victims",
+    "difficulty": "hard",
+    "question": "Which bowlers have dismissed the most different batsmen?",
+    "cypher": "MATCH (b:Player)-[:DISMISSED]->(x:Player) RETURN b.name AS bowler, count(DISTINCT x) AS distinct_batsmen ORDER BY distinct_batsmen DESC LIMIT 10"
+  },
+  {
+    "id": "ck_player_best_venues",
+    "difficulty": "hard",
+    "question": "At which grounds has {player} scored the most runs?",
+    "cypher": "MATCH (p:Player {name: $player})-[b:BATTED_IN]->(m:Match)-[:HOSTED_AT]->(v:Venue) RETURN v.name AS venue, sum(b.runs) AS runs ORDER BY runs DESC LIMIT 5",
+    "params": [
+      {
+        "name": "player",
+        "type": "string",
+        "sample": "SR Tendulkar"
+      }
+    ]
+  },
+  {
+    "id": "ck_tournament_season_top_scorer",
+    "difficulty": "hard",
+    "question": "Who scored the most runs in the {tournament} in {season}?",
+    "cypher": "MATCH (p:Player)-[b:BATTED_IN]->(m:Match)-[:PART_OF]->(:Tournament {name: $tournament}) MATCH (m)-[:IN_SEASON]->(:Season {year: $season}) RETURN p.name AS player, sum(b.runs) AS runs ORDER BY runs DESC LIMIT 5",
+    "params": [
+      {
+        "name": "tournament",
+        "type": "string",
+        "sample": "Indian Premier League"
+      },
+      {
+        "name": "season",
+        "type": "string",
+        "sample": "2016"
+      }
+    ]
+  },
+  {
+    "id": "ck_tournament_motm_leaders",
+    "difficulty": "hard",
+    "question": "Who has won the most player-of-the-match awards in the {tournament}?",
+    "cypher": "MATCH (p:Player)-[:PLAYER_OF_MATCH]->(m:Match)-[:PART_OF]->(:Tournament {name: $tournament}) RETURN p.name AS player, count(m) AS awards ORDER BY awards DESC LIMIT 5",
+    "params": [
+      {
+        "name": "tournament",
+        "type": "string",
+        "sample": "Indian Premier League"
+      }
+    ]
+  },
+  {
+    "id": "ck_batting_first_at_venue",
+    "difficulty": "hard",
+    "question": "At {venue}, under any of its names, how many matches were won by the side batting first and how many by the side chasing?",
+    "paraphrases": [
+      "Is {venue} a ground where you should bat first or chase?"
+    ],
+    "cypher": "MATCH (m:Match)-[:HOSTED_AT]->(v:Venue) WHERE v.name = $venue OR v.name STARTS WITH $venue + ', ' OPTIONAL MATCH (:Team)-[w:WON]->(m) RETURN sum(CASE WHEN m.win_by_runs IS NOT NULL THEN 1 ELSE 0 END) AS batting_first_won, sum(CASE WHEN w.by_wickets IS NOT NULL THEN 1 ELSE 0 END) AS chasing_won",
+    "params": [
+      {
+        "name": "venue",
+        "type": "string",
+        "sample": "Wankhede Stadium"
+      }
+    ]
+  },
+  {
+    "id": "ck_caught_off_bowler",
+    "difficulty": "hard",
+    "question": "Which fielder has taken the most catches off {bowler}'s bowling?",
+    "cypher": "MATCH (bw:Player {name: $bowler})-[d:DISMISSED]->(x:Player)<-[f:FIELDED_DISMISSAL]-(fl:Player) WHERE d.kind = 'caught' AND f.kind = 'caught' AND f.match_file_id = d.match_file_id AND f.over = d.over RETURN fl.name AS fielder, count(*) AS catches ORDER BY catches DESC LIMIT 5",
+    "params": [
+      {
+        "name": "bowler",
+        "type": "string",
+        "sample": "JM Anderson"
+      }
+    ]
+  },
+  {
+    "id": "ck_unanswerable_birth_dates",
+    "difficulty": "easy",
+    "question": "When was each player born?",
+    "unanswerable": true,
+    "cypher": "MATCH (p:Player) WHERE p.born IS NOT NULL RETURN p.name AS player, p.born AS born"
+  },
+  {
+    "id": "ck_unanswerable_captains",
+    "difficulty": "medium",
+    "question": "Who captained {team} most often?",
+    "unanswerable": true,
+    "cypher": "MATCH (p:Player)-[:CAPTAINED]->(t:Team {name: $team}) RETURN p.name AS captain, count(*) AS matches ORDER BY matches DESC",
+    "params": [
+      {
+        "name": "team",
+        "type": "string",
+        "sample": "India"
+      }
+    ]
+  },
+  {
+    "id": "ck_unanswerable_attendance",
+    "difficulty": "medium",
+    "question": "Which match drew the biggest crowd?",
+    "unanswerable": true,
+    "cypher": "MATCH (m:Match) WHERE m.attendance IS NOT NULL RETURN m.date AS date, m.attendance AS crowd ORDER BY crowd DESC LIMIT 1"
+  }
+]
