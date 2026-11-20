@@ -446,3 +446,7 @@ harness = false
 [[bench]]
 name = "hybrid_retrieval_benchmark"
 harness = false
+
+[[bench]]
+name = "checkpoint_rollback_benchmark"
+harness = false
