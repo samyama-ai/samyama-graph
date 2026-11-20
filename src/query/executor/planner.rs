@@ -840,6 +840,10 @@ pub struct QueryPlanner {
     /// The query's `CYPHER planner=… plan=N` options (#1616), set per `plan`
     /// call for the same reason as `hints`.
     forcing: std::sync::Mutex<Forcing>,
+    /// The point-index scan a single-node `ORDER BY point.distance(n.p, c)
+    /// LIMIT k` can start from (#2255), set per `plan` call like `hints`.
+    /// Taken by the first scan choice for its variable.
+    nearest: std::sync::Mutex<Option<NearestTopK>>,
 }
 
 /// `CYPHER` options in force for the query being planned (#1616).
@@ -940,6 +944,7 @@ impl QueryPlanner {
             trail_enumeration: std::sync::atomic::AtomicBool::new(false),
             hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
             forcing: std::sync::Mutex::new(Forcing::default()),
+            nearest: std::sync::Mutex::new(None),
         }
     }
 
@@ -951,6 +956,7 @@ impl QueryPlanner {
             trail_enumeration: std::sync::atomic::AtomicBool::new(false),
             hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
             forcing: std::sync::Mutex::new(Forcing::default()),
+            nearest: std::sync::Mutex::new(None),
         }
     }
 
@@ -1317,7 +1323,11 @@ impl QueryPlanner {
             },
             plan: options.plan,
         };
+        // Saved and put back rather than cleared: a subquery planned through
+        // `plan` must not hand its outer query's scan away, or keep it.
+        let outer = std::mem::replace(&mut *self.nearest.lock().unwrap(), nearest_top_k(query, store));
         let plan = self.plan_with_hints(query, store);
+        *self.nearest.lock().unwrap() = outer;
         *self.forcing.lock().unwrap() = Forcing::default();
         plan
     }
@@ -1590,8 +1600,8 @@ impl QueryPlanner {
         // checks are independent and this keeps the statement arms together.
         if query.analyze {
             return Ok(ExecutionPlan {
-                root: Box::new(super::analyze_ops::AnalyzeOperator::new()),
-                output_columns: super::analyze_ops::analyze_columns(),
+                root: Box::new(super::analyze_ops::AnalyzeOperator::for_label(query.analyze_label.clone())),
+                output_columns: super::analyze_ops::columns_for(query.analyze_label.as_ref()),
                 // A cache, not the graph. Marking it a write would put it
                 // behind write access and make it unavailable to the person
                 // diagnosing a slow read, which is who asks for it.
@@ -5151,6 +5161,10 @@ impl QueryPlanner {
                 // A spatial predicate on an R-tree-indexed property (#1618).
                 // The predicate stays in the filter: the region is a superset.
                 op
+            } else if let Some(op) = self.nearest_scan(&start_var, &remaining_predicates) {
+                // `ORDER BY point.distance(n.p, c) LIMIT k` over the R-tree
+                // (#2255). The Sort and Limit above stay: this is a superset.
+                op
             } else {
                 Box::new(NodeScanOperator::new(
                     start_var.clone(),
@@ -8053,6 +8067,125 @@ fn point_index_scan(
         }
     }
     None
+}
+
+/// A single-node `MATCH (n:L) RETURN ... ORDER BY point.distance(n.p, c)
+/// LIMIT k` that a point index on `:L(p)` can answer from its k nearest
+/// (#2255). Found from the whole query, because the scan choice that uses it
+/// never sees the ORDER BY or the LIMIT.
+#[derive(Debug, Clone)]
+struct NearestTopK {
+    var: String,
+    label: Label,
+    property: String,
+    centre: (f64, f64, bool),
+    k: usize,
+}
+
+/// The nearest-first scan a query can start from, or `None`.
+///
+/// Declined unless every row the label scan would produce reaches the sort, so
+/// the index's k nearest are a superset of the rows the `LIMIT` keeps:
+///
+/// * one MATCH, not OPTIONAL, of one node with one label and no inline
+///   properties -- a filter, a join or a second label would drop some of the
+///   k nearest and leave fewer than k rows;
+/// * nothing else in the query: no WHERE, WITH, UNWIND, CALL, UNION or write.
+///   The check compares against an empty query, so a clause added to the AST
+///   later is declined until someone decides it is safe;
+/// * no DISTINCT and no aggregate in RETURN, which would change the row count
+///   between the scan and the sort;
+/// * the first ORDER BY key is ascending `point.distance(n.p, c)` with `c`
+///   constant, written out or through its RETURN alias. Later keys are fine:
+///   the scan includes every node tied with the k-th;
+/// * the index holds at least `SKIP + LIMIT` points. With fewer, a node with
+///   no point -- a null distance, sorted last -- would be in the answer and
+///   not in the index.
+///
+/// A node whose `p` is not a point at all is not in the index, and the scan
+/// never meets it. Over the whole label `point.distance` raises an error on
+/// such a node; through the index the query answers. The spatial predicate
+/// scan above has the same property.
+fn nearest_top_k(query: &Query, store: &GraphStore) -> Option<NearestTopK> {
+    if store.point_index.is_empty() {
+        return None;
+    }
+    let first = query.order_by.as_ref()?.items.first()?;
+    if !first.ascending {
+        return None;
+    }
+    let k = query.skip.unwrap_or(0).checked_add(query.limit?)?;
+    if k == 0 {
+        return None;
+    }
+    let ret = query.return_clause.as_ref()?;
+    if ret.distinct {
+        return None;
+    }
+    let [mc] = query.match_clauses.as_slice() else { return None };
+    let [path] = mc.pattern.paths.as_slice() else { return None };
+    if mc.optional || !path.segments.is_empty() || path.path_variable.is_some() || path.path_type != PathType::Normal {
+        return None;
+    }
+    let node = &path.start;
+    let var = node.variable.clone()?;
+    let [label] = node.labels.as_slice() else { return None };
+    if node.properties.as_ref().is_some_and(|p| !p.is_empty())
+        || node.property_exprs.as_ref().is_some_and(|p| !p.is_empty())
+    {
+        return None;
+    }
+    let mut counter = 0usize;
+    if ret.items.iter().any(|i| !extract_nested_aggregates(&i.expression, &mut counter).1.is_empty()) {
+        return None;
+    }
+    let mut rest = query.clone();
+    rest.match_clauses.clear();
+    rest.return_clause = None;
+    rest.order_by = None;
+    rest.limit = None;
+    rest.skip = None;
+    rest.clauses.clear();
+    rest.params.clear();
+    rest.hints.clear();
+    rest.plan_options = PlanOptions::default();
+    rest.explain = false;
+    rest.profile = false;
+    rest.plan_json = false;
+    if rest != Query::new() {
+        return None;
+    }
+    // `ORDER BY d` where the RETURN wrote `point.distance(...) AS d`.
+    let key = match &first.expression {
+        Expression::Variable(a) => ret
+            .items
+            .iter()
+            .find(|i| i.alias.as_deref() == Some(a.as_str()))
+            .map_or(&first.expression, |i| &i.expression),
+        e => e,
+    };
+    let (property, centre) = super::point_ops::distance_sort_key(&var, key, store)?;
+    let held = store.point_index.with(label.as_str(), &property, |i| i.len())?;
+    if held < k {
+        return None;
+    }
+    Some(NearestTopK { var, label: label.clone(), property, centre, k })
+}
+
+impl QueryPlanner {
+    /// The nearest-first scan `nearest_top_k` found, if it is for `var` and
+    /// nothing is left to filter it.
+    fn nearest_scan(&self, var: &str, preds: &[Expression]) -> Option<OperatorBox> {
+        if !preds.is_empty() {
+            return None;
+        }
+        let mut slot = self.nearest.lock().unwrap();
+        if !slot.as_ref().is_some_and(|n| n.var == var) {
+            return None;
+        }
+        let n = slot.take()?;
+        Some(Box::new(super::point_ops::PointNearestScanOperator::new(n.var, n.label, n.property, n.centre, n.k)))
+    }
 }
 
 /// What remains of a closing segment after a fused cyclic close bound it
@@ -11808,6 +11941,7 @@ mod tests {
             profile: false,
             plan_json: false,
             analyze: false,
+            analyze_label: None,
             hints: Vec::new(),
             plan_options: Default::default(),
             params: std::collections::HashMap::new(),

@@ -1,0 +1,628 @@
+[
+  {
+    "id": "lj_case_count",
+    "difficulty": "easy",
+    "question": "How many judgments does the legal graph hold?",
+    "paraphrases": [
+      "How many Supreme Court judgments are in the graph?"
+    ],
+    "cypher": "MATCH (c:Case) RETURN count(c) AS judgments"
+  },
+  {
+    "id": "lj_judge_record_count",
+    "difficulty": "easy",
+    "question": "How many judge names does the graph record?",
+    "cypher": "MATCH (j:Judge) RETURN count(j) AS judges"
+  },
+  {
+    "id": "lj_act_count",
+    "difficulty": "easy",
+    "question": "How many different law names (acts and codes) does the graph record?",
+    "cypher": "MATCH (a:Act) RETURN count(a) AS laws"
+  },
+  {
+    "id": "lj_party_count",
+    "difficulty": "easy",
+    "question": "How many different parties appear in the graph?",
+    "cypher": "MATCH (p:Party) RETURN count(p) AS parties"
+  },
+  {
+    "id": "lj_topic_count",
+    "difficulty": "easy",
+    "question": "How many distinct subject topics are judgments tagged with?",
+    "cypher": "MATCH (t:Topic) RETURN count(t) AS topics"
+  },
+  {
+    "id": "lj_topics_per_category",
+    "difficulty": "easy",
+    "question": "How many topics fall in each topic category?",
+    "paraphrases": [
+      "Break the topics down by category."
+    ],
+    "cypher": "MATCH (t:Topic) RETURN t.category AS category, count(*) AS topics ORDER BY topics DESC, category"
+  },
+  {
+    "id": "lj_judgments_by_month_2016",
+    "difficulty": "easy",
+    "question": "How many judgments were delivered in each month of 2016?",
+    "cypher": "MATCH (c:Case) WHERE c.year = 2016 RETURN c.month AS month, count(*) AS judgments ORDER BY month"
+  },
+  {
+    "id": "lj_judgment_from_2017",
+    "difficulty": "easy",
+    "question": "Which judgment in the graph is dated 2017 rather than 2016?",
+    "cypher": "MATCH (c:Case) WHERE c.year = 2017 RETURN c.title AS judgment"
+  },
+  {
+    "id": "lj_untitled_judgments",
+    "difficulty": "easy",
+    "question": "How many judgments have no title recorded?",
+    "cypher": "MATCH (c:Case) WHERE c.title IS NULL RETURN count(c) AS untitled"
+  },
+  {
+    "id": "lj_top_judge",
+    "difficulty": "easy",
+    "question": "Which judge decided the most judgments?",
+    "paraphrases": [
+      "Who was the busiest judge in the graph?"
+    ],
+    "cypher": "MATCH (j:Judge)-[:DECIDED]->(c:Case) WITH j, count(DISTINCT c) AS judgments RETURN j.name AS judge, judgments ORDER BY judgments DESC, judge LIMIT 1"
+  },
+  {
+    "id": "lj_judge_judgment_count",
+    "difficulty": "easy",
+    "question": "How many judgments did Justice {judge} decide?",
+    "cypher": "MATCH (j:Judge {name: $judge})-[:DECIDED]->(c:Case) RETURN count(DISTINCT c) AS judgments",
+    "params": [
+      {
+        "name": "judge",
+        "type": "string",
+        "sample": "Dipak Misra"
+      }
+    ]
+  },
+  {
+    "id": "lj_judgments_in_month",
+    "difficulty": "easy",
+    "question": "How many judgments were delivered in month {month} of 2016 (1 = January)?",
+    "cypher": "MATCH (c:Case) WHERE c.year = 2016 AND c.month = $month RETURN count(c) AS judgments",
+    "params": [
+      {
+        "name": "month",
+        "type": "int",
+        "sample": 2
+      }
+    ]
+  },
+  {
+    "id": "lj_act_judgment_count",
+    "difficulty": "easy",
+    "question": "How many judgments cite the {act}?",
+    "cypher": "MATCH (c:Case)-[:CITES]->(a:Act {name: $act}) RETURN count(DISTINCT c) AS judgments",
+    "params": [
+      {
+        "name": "act",
+        "type": "string",
+        "sample": "Indian Evidence Act"
+      }
+    ]
+  },
+  {
+    "id": "lj_category_topic_count",
+    "difficulty": "easy",
+    "question": "How many topics belong to the {category} category?",
+    "cypher": "MATCH (t:Topic {category: $category}) RETURN count(t) AS topics",
+    "params": [
+      {
+        "name": "category",
+        "type": "string",
+        "sample": "tax",
+        "enum_values": [
+          "procedural",
+          "administrative",
+          "criminal",
+          "constitutional",
+          "civil",
+          "property",
+          "tax",
+          "corporate",
+          "other",
+          "family",
+          "environmental"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "lj_party_judgment_count",
+    "difficulty": "easy",
+    "question": "In how many judgments is {party} a party?",
+    "cypher": "MATCH (p:Party {name: $party})-[:PARTY_IN]->(c:Case) RETURN count(DISTINCT c) AS judgments",
+    "params": [
+      {
+        "name": "party",
+        "type": "string",
+        "sample": "State of Haryana"
+      }
+    ]
+  },
+  {
+    "id": "lj_top_judges",
+    "difficulty": "medium",
+    "question": "Which ten judges decided the most judgments?",
+    "cypher": "MATCH (j:Judge)-[:DECIDED]->(c:Case) WITH j, count(DISTINCT c) AS judgments RETURN j.name AS judge, judgments ORDER BY judgments DESC, judge LIMIT 10"
+  },
+  {
+    "id": "lj_most_cited_laws",
+    "difficulty": "medium",
+    "question": "Which ten laws are cited in the most judgments?",
+    "paraphrases": [
+      "Which statutes does the Court cite most often?"
+    ],
+    "cypher": "MATCH (c:Case)-[:CITES]->(a:Act) WITH a, count(DISTINCT c) AS judgments RETURN a.name AS law, judgments ORDER BY judgments DESC, law LIMIT 10"
+  },
+  {
+    "id": "lj_most_cited_sections",
+    "difficulty": "medium",
+    "question": "Which ten provisions (law plus section) are cited in the most judgments?",
+    "cypher": "MATCH (c:Case)-[r:CITES]->(a:Act) WITH a.name AS law, r.section AS section, count(DISTINCT c) AS judgments RETURN law, section, judgments ORDER BY judgments DESC, law, section LIMIT 10"
+  },
+  {
+    "id": "lj_section_judgment_count",
+    "difficulty": "medium",
+    "question": "How many judgments cite section {section} of the {act}?",
+    "paraphrases": [
+      "In how many judgments is section {section} of the {act} invoked?"
+    ],
+    "cypher": "MATCH (c:Case)-[r:CITES]->(a:Act {name: $act}) WHERE r.section = $section RETURN count(DISTINCT c) AS judgments",
+    "params": [
+      {
+        "name": "section",
+        "type": "string",
+        "sample": "302"
+      },
+      {
+        "name": "act",
+        "type": "string",
+        "sample": "Indian Penal Code"
+      }
+    ]
+  },
+  {
+    "id": "lj_case_judges",
+    "difficulty": "medium",
+    "question": "Which judges decided the case {title}?",
+    "cypher": "MATCH (j:Judge)-[:DECIDED]->(c:Case {title: $title}) RETURN j.name AS judge ORDER BY judge",
+    "params": [
+      {
+        "name": "title",
+        "type": "string",
+        "sample": "SUKH RAM v. STATE OF HIMACHAL PRADESH"
+      }
+    ]
+  },
+  {
+    "id": "lj_case_citations",
+    "difficulty": "medium",
+    "question": "Which laws and sections does the judgment in {title} cite?",
+    "cypher": "MATCH (c:Case {title: $title})-[r:CITES]->(a:Act) RETURN a.name AS law, r.section AS section ORDER BY law, section",
+    "params": [
+      {
+        "name": "title",
+        "type": "string",
+        "sample": "SUKH RAM v. STATE OF HIMACHAL PRADESH"
+      }
+    ]
+  },
+  {
+    "id": "lj_case_topics",
+    "difficulty": "medium",
+    "question": "What topics is the judgment in {title} tagged with, and in which category is each?",
+    "cypher": "MATCH (c:Case {title: $title})-[:ABOUT]->(t:Topic) RETURN t.text AS topic, t.category AS category ORDER BY topic",
+    "params": [
+      {
+        "name": "title",
+        "type": "string",
+        "sample": "SUKH RAM v. STATE OF HIMACHAL PRADESH"
+      }
+    ]
+  },
+  {
+    "id": "lj_case_parties",
+    "difficulty": "medium",
+    "question": "Who were the parties in {title}, and what role did each play?",
+    "cypher": "MATCH (p:Party)-[r:PARTY_IN]->(c:Case {title: $title}) RETURN p.name AS party, r.role AS role ORDER BY party",
+    "params": [
+      {
+        "name": "title",
+        "type": "string",
+        "sample": "SUKH RAM v. STATE OF HIMACHAL PRADESH"
+      }
+    ]
+  },
+  {
+    "id": "lj_judge_benchmates",
+    "difficulty": "medium",
+    "question": "With which five judges did {judge} sit most often?",
+    "cypher": "MATCH (j:Judge {name: $judge})-[:DECIDED]->(c:Case)<-[:DECIDED]-(o:Judge) WITH o, count(DISTINCT c) AS judgments RETURN o.name AS judge, judgments ORDER BY judgments DESC, judge LIMIT 5",
+    "params": [
+      {
+        "name": "judge",
+        "type": "string",
+        "sample": "Dipak Misra"
+      }
+    ]
+  },
+  {
+    "id": "lj_judge_top_laws",
+    "difficulty": "medium",
+    "question": "Which six laws are cited most often in judgments decided by {judge}?",
+    "cypher": "MATCH (j:Judge {name: $judge})-[:DECIDED]->(c:Case)-[:CITES]->(a:Act) WITH a, count(DISTINCT c) AS judgments RETURN a.name AS law, judgments ORDER BY judgments DESC, law LIMIT 6",
+    "params": [
+      {
+        "name": "judge",
+        "type": "string",
+        "sample": "Dipak Misra"
+      }
+    ]
+  },
+  {
+    "id": "lj_judge_categories",
+    "difficulty": "medium",
+    "question": "Across the judgments decided by {judge}, how many touch each topic category?",
+    "cypher": "MATCH (j:Judge {name: $judge})-[:DECIDED]->(c:Case)-[:ABOUT]->(t:Topic) WITH t.category AS category, count(DISTINCT c) AS judgments RETURN category, judgments ORDER BY judgments DESC, category",
+    "params": [
+      {
+        "name": "judge",
+        "type": "string",
+        "sample": "Dipak Misra"
+      }
+    ]
+  },
+  {
+    "id": "lj_judge_months",
+    "difficulty": "medium",
+    "question": "In each month, how many judgments did {judge} deliver?",
+    "cypher": "MATCH (j:Judge {name: $judge})-[:DECIDED]->(c:Case) WITH c.year AS year, c.month AS month, count(DISTINCT c) AS judgments RETURN year, month, judgments ORDER BY year, month",
+    "params": [
+      {
+        "name": "judge",
+        "type": "string",
+        "sample": "Dipak Misra"
+      }
+    ]
+  },
+  {
+    "id": "lj_law_sections",
+    "difficulty": "medium",
+    "question": "Which ten sections of the {act} are cited in the most judgments?",
+    "cypher": "MATCH (c:Case)-[r:CITES]->(a:Act {name: $act}) WITH r.section AS section, count(DISTINCT c) AS judgments RETURN section, judgments ORDER BY judgments DESC, section LIMIT 10",
+    "params": [
+      {
+        "name": "act",
+        "type": "string",
+        "sample": "Indian Penal Code"
+      }
+    ]
+  },
+  {
+    "id": "lj_law_distinct_sections",
+    "difficulty": "medium",
+    "question": "How many different sections of the {act} are cited across all judgments?",
+    "cypher": "MATCH (:Case)-[r:CITES]->(a:Act {name: $act}) RETURN count(DISTINCT r.section) AS sections",
+    "params": [
+      {
+        "name": "act",
+        "type": "string",
+        "sample": "Indian Penal Code"
+      }
+    ]
+  },
+  {
+    "id": "lj_party_roles",
+    "difficulty": "medium",
+    "question": "In how many judgments does {party} appear in each role, ignoring capitalisation of the role?",
+    "paraphrases": [
+      "How often was {party} the appellant and how often the respondent?"
+    ],
+    "cypher": "MATCH (p:Party {name: $party})-[r:PARTY_IN]->(c:Case) WITH toLower(r.role) AS role, count(DISTINCT c) AS judgments RETURN role, judgments ORDER BY judgments DESC, role",
+    "params": [
+      {
+        "name": "party",
+        "type": "string",
+        "sample": "Union of India"
+      }
+    ]
+  },
+  {
+    "id": "lj_role_totals",
+    "difficulty": "medium",
+    "question": "Across all judgments, how many party appearances are there in each role, ignoring capitalisation?",
+    "cypher": "MATCH (:Party)-[r:PARTY_IN]->(:Case) WITH toLower(r.role) AS role, count(*) AS appearances RETURN role, appearances ORDER BY appearances DESC, role"
+  },
+  {
+    "id": "lj_frequent_parties",
+    "difficulty": "medium",
+    "question": "Which parties appear in at least 10 judgments, and in how many each?",
+    "cypher": "MATCH (p:Party)-[:PARTY_IN]->(c:Case) WITH p, count(DISTINCT c) AS judgments WHERE judgments >= 10 RETURN p.name AS party, judgments ORDER BY judgments DESC, party"
+  },
+  {
+    "id": "lj_bench_sizes",
+    "difficulty": "medium",
+    "question": "Among judgments with at least one judge recorded, how many were decided by benches of each size?",
+    "paraphrases": [
+      "How common are two-judge, three-judge and larger benches?"
+    ],
+    "cypher": "MATCH (j:Judge)-[:DECIDED]->(c:Case) WITH c, count(DISTINCT j) AS bench RETURN bench, count(*) AS judgments ORDER BY bench"
+  },
+  {
+    "id": "lj_largest_bench",
+    "difficulty": "medium",
+    "question": "Which judgment had the largest bench, and how many judges sat on it?",
+    "cypher": "MATCH (j:Judge)-[:DECIDED]->(c:Case) WITH c, count(DISTINCT j) AS bench RETURN c.title AS judgment, bench ORDER BY bench DESC, judgment LIMIT 1"
+  },
+  {
+    "id": "lj_judgments_without_judges",
+    "difficulty": "medium",
+    "question": "How many judgments have no judge recorded?",
+    "cypher": "MATCH (c:Case) WHERE NOT (c)<-[:DECIDED]-(:Judge) RETURN count(c) AS judgments"
+  },
+  {
+    "id": "lj_judgments_citing_no_law",
+    "difficulty": "medium",
+    "question": "How many judgments do not cite any law?",
+    "cypher": "MATCH (c:Case) WHERE NOT (c)-[:CITES]->(:Act) RETURN count(c) AS judgments"
+  },
+  {
+    "id": "lj_busiest_month",
+    "difficulty": "medium",
+    "question": "Which month of 2016 saw the most judgments delivered?",
+    "cypher": "MATCH (c:Case) WHERE c.year = 2016 WITH c.month AS month, count(*) AS judgments RETURN month, judgments ORDER BY judgments DESC, month LIMIT 1"
+  },
+  {
+    "id": "lj_most_common_topics",
+    "difficulty": "medium",
+    "question": "Which ten topics are attached to the most judgments?",
+    "cypher": "MATCH (c:Case)-[:ABOUT]->(t:Topic) WITH t, count(DISTINCT c) AS judgments RETURN t.text AS topic, judgments ORDER BY judgments DESC, topic LIMIT 10"
+  },
+  {
+    "id": "lj_judgments_per_category",
+    "difficulty": "medium",
+    "question": "How many distinct judgments touch each topic category?",
+    "cypher": "MATCH (c:Case)-[:ABOUT]->(t:Topic) WITH t.category AS category, count(DISTINCT c) AS judgments RETURN category, judgments ORDER BY judgments DESC, category"
+  },
+  {
+    "id": "lj_topic_judgments",
+    "difficulty": "medium",
+    "question": "Which judgments are tagged with the topic {topic}?",
+    "cypher": "MATCH (c:Case)-[:ABOUT]->(t:Topic {text: $topic}) RETURN c.title AS judgment ORDER BY judgment",
+    "params": [
+      {
+        "name": "topic",
+        "type": "string",
+        "sample": "Arbitration"
+      }
+    ]
+  },
+  {
+    "id": "lj_category_top_judges",
+    "difficulty": "medium",
+    "question": "Which five judges decided the most judgments with a {category} topic?",
+    "cypher": "MATCH (j:Judge)-[:DECIDED]->(c:Case)-[:ABOUT]->(:Topic {category: $category}) WITH j, count(DISTINCT c) AS judgments RETURN j.name AS judge, judgments ORDER BY judgments DESC, judge LIMIT 5",
+    "params": [
+      {
+        "name": "category",
+        "type": "string",
+        "sample": "tax",
+        "enum_values": [
+          "procedural",
+          "administrative",
+          "criminal",
+          "constitutional",
+          "civil",
+          "property",
+          "tax",
+          "corporate",
+          "other",
+          "family",
+          "environmental"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "lj_parties_in_several",
+    "difficulty": "medium",
+    "question": "How many parties appear in more than one judgment?",
+    "cypher": "MATCH (p:Party)-[:PARTY_IN]->(c:Case) WITH p, count(DISTINCT c) AS judgments WHERE judgments > 1 RETURN count(p) AS parties"
+  },
+  {
+    "id": "lj_judge_pairs",
+    "difficulty": "hard",
+    "question": "Which ten pairs of judges sat together on the most judgments?",
+    "cypher": "MATCH (j1:Judge)-[:DECIDED]->(c:Case)<-[:DECIDED]-(j2:Judge) WHERE j1.name < j2.name WITH j1.name AS judge_a, j2.name AS judge_b, count(DISTINCT c) AS judgments RETURN judge_a, judge_b, judgments ORDER BY judgments DESC, judge_a, judge_b LIMIT 10"
+  },
+  {
+    "id": "lj_judges_together",
+    "difficulty": "hard",
+    "question": "On how many judgments did {judge_a} and {judge_b} sit together?",
+    "cypher": "MATCH (a:Judge {name: $judge_a})-[:DECIDED]->(c:Case)<-[:DECIDED]-(b:Judge {name: $judge_b}) RETURN count(DISTINCT c) AS judgments",
+    "params": [
+      {
+        "name": "judge_a",
+        "type": "string",
+        "sample": "Kurian Joseph"
+      },
+      {
+        "name": "judge_b",
+        "type": "string",
+        "sample": "Rohinton F. Nariman"
+      }
+    ]
+  },
+  {
+    "id": "lj_laws_cited_together",
+    "difficulty": "hard",
+    "question": "Which ten pairs of laws are most often cited in the same judgment?",
+    "cypher": "MATCH (a1:Act)<-[:CITES]-(c:Case)-[:CITES]->(a2:Act) WHERE a1.name < a2.name WITH a1.name AS law_a, a2.name AS law_b, count(DISTINCT c) AS judgments RETURN law_a, law_b, judgments ORDER BY judgments DESC, law_a, law_b LIMIT 10"
+  },
+  {
+    "id": "lj_law_topic_breadth",
+    "difficulty": "hard",
+    "question": "Which ten laws are cited in judgments spanning the most topic categories?",
+    "cypher": "MATCH (a:Act)<-[:CITES]-(c:Case)-[:ABOUT]->(t:Topic) WITH a, count(DISTINCT t.category) AS categories, count(DISTINCT c) AS judgments RETURN a.name AS law, categories, judgments ORDER BY categories DESC, judgments DESC, law LIMIT 10"
+  },
+  {
+    "id": "lj_category_top_laws",
+    "difficulty": "hard",
+    "question": "Which six laws are cited most often in judgments with a {category} topic?",
+    "cypher": "MATCH (a:Act)<-[:CITES]-(c:Case)-[:ABOUT]->(:Topic {category: $category}) WITH a, count(DISTINCT c) AS judgments RETURN a.name AS law, judgments ORDER BY judgments DESC, law LIMIT 6",
+    "params": [
+      {
+        "name": "category",
+        "type": "string",
+        "sample": "tax",
+        "enum_values": [
+          "procedural",
+          "administrative",
+          "criminal",
+          "constitutional",
+          "civil",
+          "property",
+          "tax",
+          "corporate",
+          "other",
+          "family",
+          "environmental"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "lj_section_top_judges",
+    "difficulty": "hard",
+    "question": "Which judges decided at least 8 judgments citing section {section} of the {act}, and how many each?",
+    "cypher": "MATCH (j:Judge)-[:DECIDED]->(c:Case)-[r:CITES]->(:Act {name: $act}) WHERE r.section = $section WITH j, count(DISTINCT c) AS judgments WHERE judgments >= 8 RETURN j.name AS judge, judgments ORDER BY judgments DESC, judge",
+    "params": [
+      {
+        "name": "section",
+        "type": "string",
+        "sample": "302"
+      },
+      {
+        "name": "act",
+        "type": "string",
+        "sample": "Indian Penal Code"
+      }
+    ]
+  },
+  {
+    "id": "lj_party_top_judges",
+    "difficulty": "hard",
+    "question": "Which three judges most often heard judgments involving {party}?",
+    "cypher": "MATCH (:Party {name: $party})-[:PARTY_IN]->(c:Case)<-[:DECIDED]-(j:Judge) WITH j, count(DISTINCT c) AS judgments RETURN j.name AS judge, judgments ORDER BY judgments DESC, judge LIMIT 3",
+    "params": [
+      {
+        "name": "party",
+        "type": "string",
+        "sample": "Union of India"
+      }
+    ]
+  },
+  {
+    "id": "lj_judge_party_count",
+    "difficulty": "hard",
+    "question": "How many judgments involving {party} did {judge} decide?",
+    "cypher": "MATCH (:Party {name: $party})-[:PARTY_IN]->(c:Case)<-[:DECIDED]-(:Judge {name: $judge}) RETURN count(DISTINCT c) AS judgments",
+    "params": [
+      {
+        "name": "party",
+        "type": "string",
+        "sample": "Union of India"
+      },
+      {
+        "name": "judge",
+        "type": "string",
+        "sample": "T. S. Thakur"
+      }
+    ]
+  },
+  {
+    "id": "lj_co_cited_sections",
+    "difficulty": "hard",
+    "question": "Which five other sections of the {act} are most often cited in the same judgment as section {section}?",
+    "cypher": "MATCH (a:Act {name: $act})<-[r1:CITES]-(c:Case)-[r2:CITES]->(a) WHERE r1.section = $section AND r2.section <> $section WITH r2.section AS section, count(DISTINCT c) AS judgments RETURN section, judgments ORDER BY judgments DESC, section LIMIT 5",
+    "params": [
+      {
+        "name": "act",
+        "type": "string",
+        "sample": "Indian Penal Code"
+      },
+      {
+        "name": "section",
+        "type": "string",
+        "sample": "302"
+      }
+    ]
+  },
+  {
+    "id": "lj_co_tagged_topics",
+    "difficulty": "hard",
+    "question": "Which four other topics are most often tagged on the same judgments as {topic}?",
+    "cypher": "MATCH (:Topic {text: $topic})<-[:ABOUT]-(c:Case)-[:ABOUT]->(o:Topic) WHERE o.text <> $topic WITH o, count(DISTINCT c) AS judgments RETURN o.text AS topic, judgments ORDER BY judgments DESC, topic LIMIT 4",
+    "params": [
+      {
+        "name": "topic",
+        "type": "string",
+        "sample": "Murder"
+      }
+    ]
+  },
+  {
+    "id": "lj_judge_law_breadth",
+    "difficulty": "hard",
+    "question": "Which five judges decided judgments citing the widest range of different laws?",
+    "cypher": "MATCH (j:Judge)-[:DECIDED]->(c:Case)-[:CITES]->(a:Act) WITH j, count(DISTINCT a) AS laws RETURN j.name AS judge, laws ORDER BY laws DESC, judge LIMIT 5"
+  },
+  {
+    "id": "lj_category_pairs",
+    "difficulty": "hard",
+    "question": "Which five pairs of topic categories most often appear together on the same judgment?",
+    "cypher": "MATCH (t1:Topic)<-[:ABOUT]-(c:Case)-[:ABOUT]->(t2:Topic) WHERE t1.category < t2.category WITH t1.category AS category_a, t2.category AS category_b, count(DISTINCT c) AS judgments RETURN category_a, category_b, judgments ORDER BY judgments DESC, category_a, category_b LIMIT 5"
+  },
+  {
+    "id": "lj_unanswerable_outcome",
+    "difficulty": "easy",
+    "question": "How many appeals were allowed and how many dismissed?",
+    "unanswerable": true,
+    "cypher": "MATCH (c:Case) WHERE c.outcome IS NOT NULL RETURN c.outcome AS outcome, count(*) AS judgments ORDER BY judgments DESC"
+  },
+  {
+    "id": "lj_unanswerable_advocates",
+    "difficulty": "medium",
+    "question": "Which advocate argued the most cases before the Court?",
+    "unanswerable": true,
+    "cypher": "MATCH (a:Advocate)-[:ARGUED]->(c:Case) RETURN a.name AS advocate, count(DISTINCT c) AS cases ORDER BY cases DESC, advocate LIMIT 1"
+  },
+  {
+    "id": "lj_unanswerable_lower_court",
+    "difficulty": "medium",
+    "question": "Which High Court did the most appeals come from?",
+    "unanswerable": true,
+    "cypher": "MATCH (c:Case) WHERE c.lower_court IS NOT NULL RETURN c.lower_court AS court, count(*) AS appeals ORDER BY appeals DESC, court LIMIT 1"
+  },
+  {
+    "id": "lj_unanswerable_case_duration",
+    "difficulty": "hard",
+    "question": "How many days passed between filing and judgment in {title}?",
+    "unanswerable": true,
+    "cypher": "MATCH (c:Case {title: $title}) WHERE c.filed_date IS NOT NULL AND c.decided_date IS NOT NULL RETURN c.filed_date AS filed, c.decided_date AS decided",
+    "params": [
+      {
+        "name": "title",
+        "type": "string",
+        "sample": "SUKH RAM v. STATE OF HIMACHAL PRADESH"
+      }
+    ]
+  }
+]

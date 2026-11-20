@@ -1,0 +1,23 @@
+# Competitor systems for the graph + vector hybrid benchmark (#1987).
+# Versions are pinned so a rerun measures the same software.
+#
+#   docker compose -f benches/graph_vector_hybrid/docker-compose.yml up -d
+#   python3 benches/graph_vector_hybrid/run_competitors.py --data data/hybrid
+#
+# Not run in CI.
+services:
+  neo4j:
+    image: neo4j:5.26.0-community
+    environment:
+      NEO4J_AUTH: neo4j/benchpassword
+      NEO4J_server_memory_heap_initial__size: 2g
+      NEO4J_server_memory_heap_max__size: 2g
+      NEO4J_server_memory_pagecache_size: 2g
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    ports:
+      - "6333:6333"
+      - "6334:6334"
