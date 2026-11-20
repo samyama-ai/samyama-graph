@@ -110,6 +110,12 @@ indexes (`GraphStore::apply_property_set`), so:
   search returns a node that is gone — which a caller cannot distinguish from
   a correct hit.
 
+## Combining it with vector search
+
+`db.hybrid.search` runs a full-text search and a vector search together, fuses
+the two lists and can walk a bounded neighbourhood of the best hits. See
+[HYBRID-RETRIEVAL.md](./HYBRID-RETRIEVAL.md).
+
 ## What this does not do
 
 - **Relationship properties are not indexed.** Nodes only.
