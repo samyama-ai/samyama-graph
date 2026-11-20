@@ -122,6 +122,20 @@ class SamyamaClient:
     ) -> QueryStream:
         """Iterate a read query's rows as the server produces them, one dict per row."""
         ...
+    def query_arrow(
+        self, cypher: str, graph: str = "default", cancel: CancelToken | None = None
+    ) -> Any:
+        """A read query's result as a ``pyarrow.Table`` (needs pyarrow installed)."""
+        ...
+    def export(
+        self,
+        cypher: str,
+        graph: str = "default",
+        format: str = "arrow",
+        cancel: CancelToken | None = None,
+    ) -> bytes:
+        """A read query's result as Arrow IPC (``"arrow"``) or Parquet (``"parquet"``) bytes."""
+        ...
     def nlq(
         self,
         question: str,

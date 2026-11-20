@@ -75,6 +75,34 @@ Other methods on the client: `status()` (returns a `ServerStatus` with
 `status`, `version`, `nodes`, `edges`), `ping()`, `list_graphs()`,
 `delete_graph(graph="default")`.
 
+## Arrow, pandas and Parquet
+
+`query_arrow` returns a read query's result as a `pyarrow.Table`, with no file
+in between:
+
+```python
+tbl = client.query_arrow("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+df = tbl.to_pandas()              # or polars.from_arrow(tbl)
+
+raw = client.export("MATCH (p:Person) RETURN p.name AS name", format="parquet")
+open("people.parquet", "wb").write(raw)
+```
+
+- **Typed columns.** An integer property becomes `int64`, a float `double`, a
+  list of strings `list<string>`, and a missing property a null. The engine's own
+  export encoder sets the types, the same one behind `POST /api/query/export`.
+- **No server needed for an embedded client.** It runs that encoder in this
+  process. A remote client reads the endpoint. Both give the same table.
+- **`export` returns the encoded bytes.** You get an Arrow IPC stream
+  (`format="arrow"`, the default) or a Parquet file (`format="parquet"`), and it
+  doesn't need pyarrow.
+- **pyarrow is optional.** It isn't a dependency of this SDK; `query_arrow`
+  imports it when called, and an `ImportError` names the package if it's missing.
+- **Reads only.** A write raises `RuntimeError` before it runs, as the endpoint
+  refuses one.
+- **Async and cancellable.** Both methods take `cancel=`, and `samyama_aio` has
+  both.
+
 ## Snapshots
 
 A `.sgsnap` file is a whole graph in one file. In embedded mode the client
