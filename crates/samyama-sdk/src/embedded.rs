@@ -12,7 +12,7 @@ use samyama::query::{QueryEngine, Value, RecordBatch};
 
 use crate::client::SamyamaClient;
 use crate::error::{SamyamaError, SamyamaResult};
-use crate::models::{QueryResult, SdkNode, SdkEdge, ServerStatus, StorageStats};
+use crate::models::{ExportFormat, QueryResult, SdkNode, SdkEdge, ServerStatus, StorageStats};
 
 /// The NLQ settings for one [`EmbeddedClient::nlq_with`] call (#2092).
 ///
@@ -296,6 +296,67 @@ impl EmbeddedClient {
         store_guard
             .find_node_by_unique(&samyama::graph::Label::new(label), property, &value)
             .map_err(|e| SamyamaError::QueryError(e.to_string()))
+    }
+
+    /// A read query's result as Arrow IPC or Parquet bytes, with no server and
+    /// no file (ML-01, #2267).
+    ///
+    /// The in-process counterpart of `POST /api/query/export`, built from the
+    /// same pieces in the same order: the query runs under one read guard,
+    /// nodes are resolved to the store's merged view inside it
+    /// (`samyama::export::resolve_nodes`), and the batch is encoded by the
+    /// engine's own `to_ipc` / `to_parquet`. A result read this way and one
+    /// read from a server are the same table, column types included.
+    ///
+    /// Reads only, as the endpoint is: a write is refused before it runs,
+    /// naming `query` as the call that writes.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use samyama_sdk::{EmbeddedClient, ExportFormat, SamyamaClient};
+    /// # #[tokio::main] async fn main() -> samyama_sdk::SamyamaResult<()> {
+    /// let client = EmbeddedClient::new();
+    /// client.query("default", "CREATE (:P {name: 'Ada', age: 36})").await?;
+    /// let ipc = client
+    ///     .export("default", "MATCH (p:P) RETURN p.name AS name, p.age AS age", ExportFormat::Arrow)
+    ///     .await?;
+    /// assert!(!ipc.is_empty());
+    /// # Ok(()) }
+    /// ```
+    pub async fn export(
+        &self,
+        graph: &str,
+        cypher: &str,
+        format: ExportFormat,
+    ) -> SamyamaResult<Vec<u8>> {
+        reject_foreign_graph(graph)?;
+        let is_write = self
+            .engine
+            .statement_is_write(cypher)
+            .map_err(|e| SamyamaError::QueryError(e.to_string()))?;
+        if is_write {
+            return Err(SamyamaError::QueryError(
+                "export is read-only: this statement writes. Run it with `query`, then \
+                 export a read of what it wrote."
+                    .to_string(),
+            ));
+        }
+        let batch = {
+            let store_guard = self.store.read().await;
+            let mut batch = self
+                .engine
+                .execute(cypher, &store_guard)
+                .map_err(|e| SamyamaError::QueryError(e.to_string()))?;
+            samyama::export::resolve_nodes(&mut batch, &store_guard);
+            batch
+        };
+        // Encoded outside the guard, as the endpoint does (#545): Parquet
+        // encoding of a large result must not hold writers off the store.
+        match format {
+            ExportFormat::Arrow => samyama::export::to_ipc(&batch),
+            ExportFormat::Parquet => samyama::export::to_parquet(&batch),
+        }
+        .map_err(|e| SamyamaError::QueryError(e.to_string()))
     }
 }
 

@@ -9,7 +9,7 @@ use reqwest::Client;
 
 use crate::client::SamyamaClient;
 use crate::error::{SamyamaError, SamyamaResult};
-use crate::models::{QueryResult, ServerStatus};
+use crate::models::{ExportFormat, QueryResult, ServerStatus};
 
 /// How a `RemoteClient` treats the network (API-06).
 ///
@@ -381,6 +381,52 @@ impl RemoteClient {
             }
         }
         Ok(stream)
+    }
+
+    /// A read query's result as Arrow IPC or Parquet bytes, from
+    /// `POST /api/query/export` (ML-01, #2267).
+    ///
+    /// The bytes are the server's response body, undecoded: Arrow IPC *stream*
+    /// format, or a Parquet file. The server refuses a write, and that refusal
+    /// -- like an unknown graph or a query that does not parse -- arrives as
+    /// [`SamyamaError::QueryError`] carrying the server's message.
+    ///
+    /// [`ConnectionConfig::timeout`] bounds the whole download, as it does a
+    /// buffered query; a large export needs a client built with a longer one.
+    /// The request reads only, so a connection or timeout failure is retried
+    /// under the same policy as a query.
+    pub async fn export(
+        &self,
+        graph: &str,
+        cypher: &str,
+        format: ExportFormat,
+    ) -> SamyamaResult<Vec<u8>> {
+        let url = format!("{}/api/query/export", self.http_base_url);
+        let body = serde_json::json!({
+            "query": cypher,
+            "graph": graph,
+            "format": format.as_str(),
+        });
+        let response = self
+            .send_with_retry(|| self.http_client.post(&url).json(&body))
+            .await?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response.bytes().await?.to_vec());
+        }
+        let error_body: serde_json::Value = response
+            .json()
+            .await
+            .unwrap_or_else(|_| serde_json::json!({"error": "Unknown error"}));
+        let msg = error_body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown error")
+            .to_string();
+        Err(SamyamaError::QueryError(format!(
+            "{} from /api/query/export: {msg}",
+            status.as_u16()
+        )))
     }
 
     /// Execute a POST request to /api/query
