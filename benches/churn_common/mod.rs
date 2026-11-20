@@ -327,10 +327,8 @@ pub fn read_vectors(path: &std::path::Path, limit: Option<usize>) -> Result<Vect
             path.display()
         )
     })?;
-    let data = buf
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
+    let (words, _) = buf.as_chunks::<4>();
+    let data = words.iter().map(|w| f32::from_le_bytes(*w)).collect();
     Ok(Vectors { dim, data })
 }
 
