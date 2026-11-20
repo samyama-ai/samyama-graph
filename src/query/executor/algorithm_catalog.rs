@@ -482,9 +482,9 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         EDGE_TYPE,
     ]),
     ("algo.graphRag", &[
-        Param { name: "query", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None },
-        Param { name: "label", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
-        Param { name: "property", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        Param { name: "query", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None, bound: None },
+        Param { name: "label", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
+        Param { name: "property", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
         key("strategy", T::String, D::String("local")),
         key("k", T::Integer, D::Integer(5)),
         key("hops", T::Integer, D::Integer(2)),
@@ -577,6 +577,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.solve", "Optimises a numeric property on each node of a label with a metaheuristic solver (Jaya by default), each value within the bounds, minimising the sum of value times its cost property."),
     ("algo.negativeSampling", "Node pairs that are not edges, for training link prediction (random, degree-matched or k-hop)."),
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
+    ("algo.graphRag", "GraphRAG retrieval in one call: a vector search for the k nodes nearest the question, then the graph around them (local hops, their Louvain communities, or both)."),
 ];
 
 impl AlgorithmEntry {
