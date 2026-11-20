@@ -1025,9 +1025,10 @@ impl VectorIndex {
                 got: query.len(),
             });
         }
-        // An IVF index's search width is its `nprobe` (#1975).
+        // An IVF index's search width is its `nprobe` (#1975). It has no
+        // walk to put the predicate in, so it scans its lists with it.
         if self.kind.is_ivf() {
-            return Ok(self.report(self.ivf_search(query, k, ef, &|_| true)));
+            return Ok(self.report(self.ivf_search(query, k, ef, &pass)));
         }
         
         // ef_search drives recall (HNSW only returns from the ef candidate set), so
