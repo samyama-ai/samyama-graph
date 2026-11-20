@@ -202,6 +202,14 @@ version = "0.1"
 optional = true
 default-features = false
 
+
+# `samyama --sandbox` (#2218): Landlock and seccomp are Linux kernel features,
+# so the crates are built for Linux only; elsewhere the flag is refused.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+seccompiler = "0.5.0"
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3.8"
 criterion = "0.5"
