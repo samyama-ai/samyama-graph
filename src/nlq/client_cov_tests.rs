@@ -625,14 +625,31 @@ async fn gemini_sends_both_the_mime_type_and_the_schema() {
         r#"{"candidates":[{"content":{"parts":[{"text":"RETURN 1"}]}}]}"#.to_string(),
     )]);
     let client = NLQClient::new(&cfg(LLMProvider::Gemini, &srv.base_url, Some("k"), None)).unwrap();
+    let mut gemini_schema = schema();
+    gemini_schema
+        .schema
+        .as_object_mut()
+        .unwrap()
+        .remove("additionalProperties");
 
     let out = client
-        .complete_structured("q", Some(&schema()))
+        .complete_structured("q", Some(&gemini_schema))
         .await
         .unwrap();
     assert!(out.schema_enforced);
 
-    let gc = &srv.requests()[0].json()["generationConfig"];
+    let err = client
+        .complete_structured("q", Some(&schema()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, NLQError::ConfigError(ref message) if message.contains("additionalProperties") && message.contains("not supported by Gemini")),
+        "{err:?}"
+    );
+    let requests = srv.requests();
+    assert_eq!(requests.len(), 1, "unsupported schema must not be sent");
+
+    let gc = &requests[0].json()["generationConfig"];
     // Gemini constrains the decode only when BOTH are set: the schema alone
     // is ignored without the MIME type, which is the easy half to get wrong.
     assert_eq!(gc["responseMimeType"], "application/json");

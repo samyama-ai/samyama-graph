@@ -73,7 +73,7 @@ pub struct Completion {
 ///
 /// Callers provide the common supported subset. The client closes objects
 /// and checks required fields for OpenAI strict mode, converts type names and
-/// drops unsupported keywords for Gemini, and passes the schema unchanged to
+/// rejects unsupported keywords for Gemini, and passes the schema unchanged to
 /// Ollama. Unsupported constructs fail before a provider request is sent.
 #[derive(Clone, Debug)]
 pub struct ResponseSchema {
@@ -227,20 +227,11 @@ fn normalize_gemini_schema(schema: &Value, path: &str) -> Result<Value, String> 
                 | "description"
                 | "nullable"
                 | "format"
-                | "additionalProperties"
         ) {
             return Err(format!(
                 "keyword `{key}` is not supported by Gemini at {path}"
             ));
         }
-    }
-    if source
-        .get("additionalProperties")
-        .is_some_and(|value| value != &Value::Bool(false))
-    {
-        return Err(format!(
-            "{path}.additionalProperties must be false when supplied"
-        ));
     }
     if let Some(kind) = source.get("type").and_then(Value::as_str) {
         let upper = match kind {
