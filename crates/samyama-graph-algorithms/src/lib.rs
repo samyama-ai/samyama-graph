@@ -8,6 +8,8 @@ mod gpu_parity_coverage;
 #[cfg(all(test, feature = "gpu"))]
 mod gpu_parity_tests;
 pub mod pagerank;
+pub mod guided_path;
+pub mod spatial_louvain;
 pub mod frontier;
 pub mod progress;
 pub mod community;
@@ -36,6 +38,8 @@ pub use common::{GraphView, NodeId};
 pub use constrained_path::{constrained_shortest_path, ConstrainedPath, ConstrainedPathError};
 pub use pagerank::{page_rank, page_rank_with, PageRankConfig};
 pub use progress::{NoProgress, Progress, Stopped};
+pub use guided_path::{guided_shortest_path, GuidedPath};
+pub use spatial_louvain::{spatial_louvain, spatial_modularity, SpatialCommunities, SpatialError};
 pub use community::{weakly_connected_components, WccResult, strongly_connected_components, SccResult};
 pub use pathfinding::{bfs, dijkstra, bfs_all_shortest_paths, PathResult};
 pub use flow::{edmonds_karp, FlowResult};
