@@ -649,6 +649,12 @@ impl<'a> QueryExecutor<'a> {
 
         // Append planner diagnostics (candidate plans) if available
         let diagnostics = PLAN_DIAGNOSTICS.with(|diag: &std::cell::RefCell<Option<planner::PlanDiagnostics>>| diag.borrow_mut().take());
+        let forceable = planner::FORCEABLE_PLANS.with(|f| f.take());
+        if diagnostics.is_none() && forceable.is_some() {
+            // Cost-based planning was asked for and every MATCH fell back to
+            // the default planner: no candidates to list, but still a count.
+            plan_text.push_str("\n--- Planner Diagnostics ---\n");
+        }
         if let Some(diag) = diagnostics {
             plan_text.push_str("\n--- Planner Diagnostics ---\n");
             plan_text.push_str(&format!(
@@ -676,6 +682,21 @@ impl<'a> QueryExecutor<'a> {
                     ));
                 }
             }
+        }
+
+        // The range a plan-equivalence harness loops over (LANG-06, #2252):
+        // `Candidates evaluated` above counts one MATCH, and `plan=N` picks
+        // the N-th of every MATCH, so the query has as many plans as its
+        // MATCH with the fewest. Past it, `plan=N` is refused, never run as
+        // some other plan.
+        if let Some(k) = forceable {
+            plan_text.push_str(&match k {
+                0 => "Forceable plans: 0 -- the cost-based enumerator cannot plan this query, \
+                      so CYPHER plan=N is refused for every N\n"
+                    .to_string(),
+                1 => "Forceable plans: 1 -- CYPHER plan=1 runs it\n".to_string(),
+                k => format!("Forceable plans: {k} -- CYPHER plan=1 .. plan={k} runs each\n"),
+            });
         }
 
         // The `USING` hints, each with what it did (LANG-13). Listing them

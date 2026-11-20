@@ -2691,3 +2691,69 @@ async fn metrics_lists_the_model_call_counters() {
         assert!(t.contains(&format!("# TYPE {name} counter")), "{name}");
     }
 }
+
+#[tokio::test]
+async fn the_plan_body_fields_force_a_plan_or_are_refused() {
+    // CH-PLANEQ's `body_field_plan` probe (LANG-06, #2252): `plan` and
+    // `planner` in the body used to be dropped by serde and answered 200
+    // with the default plan. They are now `CYPHER plan=… planner=…`.
+    let st = state();
+    run(&st, "UNWIND range(1,10) AS i CREATE (:P {id: i})").await;
+    run(&st, "MATCH (a:P),(b:P) WHERE b.id = a.id + 1 CREATE (a)-[:R]->(b)").await;
+    let plan_text = |r: &Reply| r.json()["records"][0][0].as_str().unwrap_or_default().to_string();
+
+    let chain = "EXPLAIN MATCH (a:P)-[:R]->(b:P) RETURN a.id";
+    let r = post_json(
+        routes(st.clone()),
+        "/api/query",
+        json!({ "query": chain, "plan": 2, "planner": "cost" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let forced = plan_text(&r);
+    assert!(forced.contains("Chosen plan: #2, forced by CYPHER plan=N"), "{forced}");
+    let r = post_json(routes(st.clone()), "/api/query", json!({ "query": chain })).await;
+    assert!(!plan_text(&r).contains("Candidates evaluated"), "{}", r.text());
+
+    // The probe's own statement has one node, so one plan: refused with the
+    // count rather than answered with plan 1.
+    let r = post_json(
+        routes(st.clone()),
+        "/api/query",
+        json!({
+            "query": "EXPLAIN MATCH (p:P) WHERE p.id = 1 RETURN p.id",
+            "plan": 2,
+            "planner": "cost",
+        }),
+    )
+    .await;
+    assert_ne!(r.status, StatusCode::OK, "{}", r.text());
+    assert!(r.text().contains("cannot honour CYPHER plan=2"), "{}", r.text());
+
+    // Checked as the prefix is: an unknown planner or runtime is named.
+    for (body, why) in [
+        (json!({ "query": chain, "planner": "idp" }), "planner=cost"),
+        (json!({ "query": chain, "runtime": "slotted" }), "one runtime"),
+        (json!({ "query": "CYPHER plan=1 MATCH (p:P) RETURN p.id", "plan": 1 }), "given twice"),
+    ] {
+        let r = post_json(routes(st.clone()), "/api/query", body.clone()).await;
+        assert_ne!(r.status, StatusCode::OK, "{body}: {}", r.text());
+        assert!(r.text().contains(why), "{body}: {}", r.text());
+    }
+    // A value is spliced into the statement, so only a bare word is taken.
+    let r = post_json(
+        routes(st.clone()),
+        "/api/query",
+        json!({ "query": "MATCH (p:P) RETURN p.id", "planner": "cost MATCH (n) DETACH DELETE n //" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::BAD_REQUEST, "{}", r.text());
+    assert_eq!(st.store.read().await.node_count(), 10);
+    let r = post_json(
+        routes(st),
+        "/api/query",
+        json!({ "query": "MATCH (p:P) RETURN p.id", "runtime": "volcano", "planner": "legacy" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+}
