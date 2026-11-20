@@ -1,0 +1,85 @@
+# AppArmor profile for the Samyama server (#2218, REL-16).
+#
+# Install:
+#   sudo install -m 0644 ops/security/apparmor/usr.bin.samyama /etc/apparmor.d/
+#   sudo apparmor_parser -r /etc/apparmor.d/usr.bin.samyama
+#
+# It attaches to /usr/bin/samyama and /usr/local/bin/samyama (the Docker image's
+# path). Data lives under /var/lib/samyama or /data (the image's volume);
+# certificates, keys and the credential file under /etc/samyama; the audit log
+# under /var/log/samyama. A server started with paths outside these needs the
+# variables below widened -- that is the gap `samyama --sandbox` closes, because
+# it confines itself to the paths it was actually given.
+#
+# CI loads this profile and runs the server through writes, an index build, a
+# restart on its own data and a snapshot export and import, and fails on any
+# denial; then it checks that a confined process cannot read /etc/shadow or
+# start /bin/sh, even as root (scripts/apparmor_check.py).
+#
+# No explicit `deny` rules: AppArmor does not log what a deny rule refuses, and
+# the kernel's record of a refusal is one of the three things CI checks.
+# Everything not allowed here is refused and logged.
+#
+# The path lists must match ops/security/kubearmor/samyama-ksp.yaml;
+# tests/mac_profiles_agree.rs compares them.
+
+abi <abi/3.0>,
+
+include <tunables/global>
+
+@{SAMYAMA_DATA}=/var/lib/samyama /data
+@{SAMYAMA_CONF}=/etc/samyama
+@{SAMYAMA_LOG}=/var/log/samyama
+
+profile samyama /usr/{,local/}bin/samyama {
+  include <abstractions/base>
+  include <abstractions/nameservice>
+  include <abstractions/ssl_certs>
+
+  network inet stream,
+  network inet6 stream,
+  network inet dgram,
+  network inet6 dgram,
+  network unix stream,
+  network netlink raw,
+
+  signal (receive) peer=unconfined,
+
+  /usr/{,local/}bin/samyama mr,
+
+  # read-write: the data path (RocksDB takes a LOCK file and hard-links on
+  # checkpoint), the temp dir, the audit log
+  @{SAMYAMA_DATA}/ rw,
+  @{SAMYAMA_DATA}/** rwkl,
+  /tmp/ r,
+  owner /tmp/** rwkl,
+  @{SAMYAMA_LOG}/ rw,
+  @{SAMYAMA_LOG}/** rw,
+
+  # read-only: certificates, keys, the credential file, the snapshot key
+  @{SAMYAMA_CONF}/ r,
+  @{SAMYAMA_CONF}/** r,
+
+  # read-only: time zones, and what the allocator, the RSS gauge and the
+  # CPU-limit detection read about this process and this machine
+  /etc/localtime r,
+  /usr/share/zoneinfo/** r,
+  @{PROC}/@{pid}/** r,
+  @{PROC}/sys/vm/overcommit_memory r,
+  @{PROC}/sys/kernel/osrelease r,
+  @{PROC}/sys/kernel/random/uuid r,
+  @{PROC}/cpuinfo r,
+  @{PROC}/meminfo r,
+  @{PROC}/stat r,
+  @{sys}/fs/cgroup/** r,
+  @{sys}/devices/system/cpu/** r,
+  @{sys}/kernel/mm/transparent_hugepage/** r,
+  # RocksDB reads the device's block size for direct and buffered I/O sizing
+  @{sys}/devices/**/queue/logical_block_size r,
+
+  # naming its own threads (glibc's pthread_setname_np on another thread of
+  # the process writes that thread's comm file)
+  owner @{PROC}/@{pid}/task/@{tid}/comm rw,
+  /dev/urandom r,
+  /dev/null rw,
+}
