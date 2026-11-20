@@ -417,3 +417,7 @@ harness = false
 [[bench]]
 name = "filtered_ann_benchmark"
 harness = false
+
+[[bench]]
+name = "checkpoint_rollback_benchmark"
+harness = false
