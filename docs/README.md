@@ -100,3 +100,4 @@ Retired 2026-10-14 because it no longer described anything in the repository (#1
 ### Vector benchmark methodology
 
 - **[benchmarks/](./benchmarks/)** — vector benchmark protocols, filtered-search strategy costs, graph + vector hybrid queries and checkpoint methodology; documents distinguish implemented scope from measurements still required.
+- **[benchmarks/retrieval-quality.md](./benchmarks/retrieval-quality.md)** — retrieval quality on BEIR / MS MARCO (nDCG@10, recall@100, latency) for BM25, dense and client-side RRF, and the competitor script for Elasticsearch, OpenSearch, Weaviate and Qdrant.
