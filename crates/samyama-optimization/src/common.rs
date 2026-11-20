@@ -47,6 +47,19 @@ pub trait Problem: Send + Sync {
     fn budget_exhausted(&self) -> bool {
         false
     }
+
+    /// Whether [`Self::repair`] is implemented: the `Repair` strategy of
+    /// [`crate::constraints::ConstraintHandling`] is refused otherwise.
+    fn can_repair(&self) -> bool {
+        false
+    }
+
+    /// Map a candidate that breaks a constraint to a nearby one that does not
+    /// (OPT-10). Problem-specific, so `None` unless a problem provides it. A
+    /// feasible candidate should come back unchanged.
+    fn repair(&self, _variables: &Array1<f64>) -> Option<Array1<f64>> {
+        None
+    }
 }
 
 /// Represents a candidate solution in a multi-objective space.
@@ -145,6 +158,19 @@ pub trait MultiObjectiveProblem: Send + Sync {
     /// Whether the run's budget is spent; see [`Problem::budget_exhausted`].
     fn budget_exhausted(&self) -> bool {
         false
+    }
+
+    /// Whether [`Self::repair`] is implemented: the `Repair` strategy of
+    /// [`crate::constraints::ConstraintHandling`] is refused otherwise.
+    fn can_repair(&self) -> bool {
+        false
+    }
+
+    /// Map a candidate that breaks a constraint to a nearby one that does not
+    /// (OPT-10). Problem-specific, so `None` unless a problem provides it. A
+    /// feasible candidate should come back unchanged.
+    fn repair(&self, _variables: &Array1<f64>) -> Option<Array1<f64>> {
+        None
     }
 }
 
