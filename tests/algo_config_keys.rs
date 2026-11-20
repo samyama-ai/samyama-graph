@@ -91,13 +91,13 @@ fn a_call_with_no_config_is_untouched() {
 }
 
 #[test]
-fn the_message_says_mutate_is_not_implemented() {
-    // `mutate` is what a GDS user tries after `writeProperty`, which works now
-    // (#1683). "Unknown key" alone would read as a typo rather than a missing
-    // feature, so the message says what is missing: graph projections.
+fn a_wrong_mutate_key_names_the_right_one() {
+    // `mutate` is what a GDS user tries after `writeProperty`. Mutate mode
+    // exists now (ALGO-06, #2263), under `mutateProperty` with `graph`, so the
+    // refusal of a near miss names both rather than reading as a typo.
     let s = store();
     let err = run(&s, "CALL algo.cdlp({mutate: true}) YIELD node, community RETURN node")
         .expect_err("refused");
-    assert!(err.contains("ALGO-06") || err.contains("write-back"),
-            "the message points at the unbuilt feature: {err}");
+    assert!(err.contains("`mutateProperty`") && err.contains("`graph`"),
+            "the message names mutate mode's keys: {err}");
 }

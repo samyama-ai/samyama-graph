@@ -46,9 +46,10 @@ plausible numbers while answering a different question.
 
 ### Execution modes
 
-Every algorithm here streams a row per node. GDS's `write` and `mutate` persist
-a property and `stats` returns a summary. Those names are refused, with the
-reason rather than "Unknown procedure":
+Every algorithm here streams a row per node. GDS's `write` persists a property
+and returns a summary, and `stats` returns a summary. Those names are refused,
+with the reason rather than "Unknown procedure" (`mutate` is answered; see
+below):
 
 ```text
 CALL gds.pageRank.write()
@@ -63,8 +64,15 @@ node's result (see "Write-back" in `ALGORITHM-CONVENTIONS.md`). It is not
 aliased onto `gds.<name>.write` because GDS's write mode returns one summary
 row (`nodePropertiesWritten`, ...) where ours returns the rows, and running a
 different result shape under a name the user already trusts is worse than not
-recognising the name. `mutate` writes into a graph projection; projections
-exist (`CREATE GRAPH PROJECTION`), but cannot hold a written property yet.
+recognising the name.
+
+`gds.<name>.mutate(graphName, {mutateProperty: '...'})` **is** answered, because
+its answer can match GDS's: the result is kept in the named projection only
+(the store is untouched), and the call returns GDS's one summary row,
+`nodePropertiesWritten` and `mutateMillis` (ALGO-06, #2263). Of GDS's other
+summary columns (`ranIterations`, `didConverge`, ...) none is returned yet. It
+is read back with `algo.graph.nodeProperty(graphName, property)`; see "Mutate
+mode" in `ALGORITHM-CONVENTIONS.md`.
 
 ### Divergent semantics
 

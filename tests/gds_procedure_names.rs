@@ -97,9 +97,10 @@ fn a_divergent_name_does_not_resolve() {
 fn a_writing_mode_is_refused_with_the_reason() {
     // "Unknown procedure" sends the reader looking for an algorithm that is in
     // fact right there. The mode is what is missing, and the message says so.
+    // `mutate` is not here: it is answered now (ALGO-06, #2263), and
+    // `tests/algorithm_mutate_mode.rs` covers its refusals.
     for (q, mode) in [
         ("CALL gds.pageRank.write() YIELD node RETURN count(*)", "write"),
-        ("CALL gds.wcc.mutate() YIELD node RETURN count(*)", "mutate"),
         ("CALL gds.pageRank.stats() YIELD node RETURN count(*)", "stats"),
     ] {
         let err = run(q).expect_err("a writing mode must not run");

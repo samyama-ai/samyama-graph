@@ -263,13 +263,47 @@ What it refuses, before anything is written:
   `SET`;
 - a `writeProperty` that is not a non-empty string;
 - `gds.<name>.stream({writeProperty: ...})`: stream mode does not write;
-- `mutate` / `mutateProperty`: it writes into a graph projection, and a
-  projection cannot hold a written property yet. Projections themselves exist
-  (see "Graph projections" below); `writeProperty` works on one.
+- `writeProperty` together with `mutateProperty`: they are two modes, so the
+  call picks one (see "Mutate mode" below).
 
 Config is read from a literal map. A config map passed as a parameter
 (`$config`) is not read by any algorithm here, so a `writeProperty` inside one
 is not honoured either.
+
+## Mutate mode
+
+`mutateProperty` keeps the result **in the graph projection the algorithm ran
+on**, and nowhere else (ALGO-06, #2263). It is GDS's mutate mode:
+
+```cypher
+CREATE GRAPH PROJECTION social NODES :Person RELATIONSHIPS :KNOWS
+```
+
+```cypher
+CALL algo.pageRank({graph: 'social', mutateProperty: 'rank'}) YIELD node, score
+```
+
+```cypher
+CALL algo.graph.nodeProperty('social', 'rank') YIELD node, value
+```
+
+- **The same algorithms as `writeProperty`**, and the same column: one value
+  per node. The call streams its rows as well, as a write does.
+- **The store is not touched.** `MATCH (n) RETURN n.rank` finds nothing; that
+  is the difference from `writeProperty`.
+- **`graph` is required**: mutate is projection-only, so without one there is
+  nowhere to keep the result.
+- **It describes the view it was computed on.** `REFRESH` and `DROP` discard
+  it with that view, and `SHOW GRAPH PROJECTIONS` lists what a projection
+  holds in `node_properties`. Mutating the same name again replaces it.
+- **GDS's spelling** `gds.pageRank.mutate('social', {mutateProperty: 'rank'})`
+  answers as GDS does, with one summary row (`nodePropertiesWritten`,
+  `mutateMillis`) instead of the per-node rows.
+- **Not yet:** no algorithm reads a projection's node property as an input,
+  so mutate does not yet chain one algorithm into the next, as it does in GDS.
+  The value is read back with `algo.graph.nodeProperty`.
+- Refused: `fastRP`, `node2vec` and `or.solve`, which write the store by
+  design; `writeProperty` and `mutateProperty` together; a `gds.*.stream` call.
 
 ## Graph projections
 
@@ -366,8 +400,8 @@ returns exactly what a write would have stored. A list literal stays 64-bit
 
 Running the call again overwrites the stored vectors, which is how they are
 refreshed. Nothing records which run, config or seed produced a stored vector:
-versioning (ML-06's "versioned") is not built. `mutate` mode is not built either,
-because a projection cannot hold a property yet (ALGO-05).
+versioning (ML-06's "versioned") is not built. `mutate` mode is refused for both:
+they write their embedding to the nodes in the store, not into a projection.
 
 **node2vec here runs the real biased 2nd-order random walks (`returnFactor` =
 p, `inOutFactor` = q) but embeds them with a random-projection of the walks'
