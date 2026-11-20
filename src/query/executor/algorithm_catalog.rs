@@ -486,7 +486,7 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
     // `time` and `source` strategies and refused by the others; `edgeType` is
     // required by `entity`.
     ("algo.split", &[
-        Param { name: "strategy", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        Param { name: "strategy", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
         key("ratios", T::List, D::FloatList(&[0.8, 0.1, 0.1])),
         key("seed", T::Integer, D::Integer(42)),
         opt("property", T::String),
@@ -495,7 +495,7 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
     ]),
     // `hops` is read by the `entity` strategy only.
     ("algo.splitLeakage", &[
-        Param { name: "strategy", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None },
+        Param { name: "strategy", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
         key("splitProperty", T::String, D::String("split")),
         key("hops", T::Integer, D::Integer(3)),
         opt("property", T::String),
@@ -581,6 +581,8 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.solve", "Optimises a numeric property on each node of a label with a metaheuristic solver (Jaya by default), each value within the bounds, minimising the sum of value times its cost property."),
     ("algo.negativeSampling", "Node pairs that are not edges, for training link prediction (random, degree-matched or k-hop)."),
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
+    ("algo.split", "Assigns each node to train, validation or test so that related nodes (a component, a community, a source, or a time window) land in the same split."),
+    ("algo.splitLeakage", "The pairs of related nodes that a split put in different splits, each with the reason they count as a leak."),
 ];
 
 impl AlgorithmEntry {
