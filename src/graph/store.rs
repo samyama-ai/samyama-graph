@@ -93,6 +93,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use crate::agent::{AgentRuntime, tools::WebSearchTool};
 
+mod checkpoint;
+pub use checkpoint::{EntityRef, GraphDiff, LabelChange, PropertyChange, RollbackConflict, RollbackStats};
+
 // Add chrono dependency (local hack like in node.rs)
 mod chrono {
     pub struct Utc;
@@ -155,6 +158,21 @@ pub enum GraphError {
     /// no index can answer it with at most one node (#542).
     #[error("No unique constraint on :{label}({property})")]
     NoUniqueConstraint { label: String, property: String },
+
+    /// A checkpoint version that is not pinned: never taken, already
+    /// released, or already rolled back to (#2093).
+    #[error("Checkpoint {0} is not pinned")]
+    CheckpointNotPinned(u64),
+
+    /// A checkpoint operation the store cannot run in its present state, such
+    /// as one inside an open session transaction (#2093).
+    #[error("Checkpoint refused: {0}")]
+    CheckpointRefused(String),
+
+    /// `rollback_to` refused because another writer committed changes to
+    /// entities the rollback would undo. Carries the diff (#2093).
+    #[error("{0}")]
+    RollbackConflict(Box<RollbackConflict>),
 }
 
 pub type GraphResult<T> = Result<T, GraphError>;
@@ -1240,6 +1258,11 @@ pub struct GraphStore {
     /// the caller holds the writer's lock for as long as it is open.
     session_txn: Option<SessionTxn>,
 
+    /// Pinned checkpoints and what changed since the oldest of them (#2093).
+    /// Empty, and never consulted past one `is_pinned` check, while no
+    /// checkpoint is held.
+    checkpoints: checkpoint::Checkpoints,
+
     /// Free node IDs for reuse
     free_node_ids: Vec<u64>,
 
@@ -1487,6 +1510,7 @@ impl GraphStore {
             node_last_commit: HashMap::new(),
             node_history: HashMap::new(),
             session_txn: None,
+            checkpoints: checkpoint::Checkpoints::default(),
             edge_last_commit: HashMap::new(),
             free_node_ids: Vec::new(),
             free_edge_ids: Vec::new(),
@@ -1539,6 +1563,13 @@ impl GraphStore {
         if self.write_log.is_none() {
             self.write_log = Some(Vec::new());
         }
+    }
+
+    /// Stop recording changes, dropping any not yet taken. For a caller that
+    /// enabled the log for one write only, such as a persisted rollback
+    /// (#2093).
+    pub fn disable_write_log(&mut self) {
+        self.write_log = None;
     }
 
     /// Whether this store is recording changes.
@@ -2125,7 +2156,7 @@ NodeDeleted { id, .. } => {
     /// from insertion so a transaction can reserve an id when it creates a
     /// node and insert the node at commit (#1200 step 4).
     fn allocate_node_id(&mut self) -> NodeId {
-        let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
+        let node_id_u64 = if let Some(id) = self.checkpoints.reuse(&mut self.free_node_ids) {
             id
         } else {
             let id = self.next_node_id;
@@ -2265,7 +2296,7 @@ NodeDeleted { id, .. } => {
         properties: PropertyMap,
     ) -> NodeId {
         self.invalidate_statistics_cache();
-        let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
+        let node_id_u64 = if let Some(id) = self.checkpoints.reuse(&mut self.free_node_ids) {
             id
         } else {
             let id = self.next_node_id;
@@ -2493,7 +2524,7 @@ NodeDeleted { id, .. } => {
     /// Properties should be set via `set_column_property()` for two-phase bulk loading.
     pub fn create_node_stub(&mut self, label: impl Into<Label>) -> NodeId {
         self.invalidate_statistics_cache();
-        let node_id_u64 = if let Some(id) = self.free_node_ids.pop() {
+        let node_id_u64 = if let Some(id) = self.checkpoints.reuse(&mut self.free_node_ids) {
             id
         } else {
             let id = self.next_node_id;
@@ -2822,13 +2853,29 @@ NodeDeleted { id, .. } => {
         // For now, we'll just not return it in get_node_at_version if we had a flag.
         // Let's add a `deleted` flag to Node/Edge for true MVCC.
         
+        // While a checkpoint is pinned the node is kept whole, with the
+        // version it was born at, so `rollback_to` can put it back and
+        // `diff_since` can say what it was (#2093). Its history stays too: it
+        // is what turns the node as it is now into the node at the checkpoint,
+        // and no id is reused while a checkpoint is pinned, so no other node
+        // can inherit it.
+        let pinned = self.checkpoints.is_pinned();
+        if pinned {
+            let born = self.node_history.get(&id).and_then(|h| h.born);
+            if let Some(whole) = self.node_materialized(id) {
+                self.checkpoints.bury_node(self.current_version, born, whole);
+            }
+        }
+
         // Add to free list for reuse (In true MVCC, we only reuse after compaction/vacuum)
         self.free_node_ids.push(id.as_u64());
         // The history goes with the node. The id is reused, and the next node
         // to take it must not answer for this one's earlier states. A death
         // version is not recorded yet, so a snapshot loses a node deleted after
         // it (#1200).
-        self.node_history.remove(&id);
+        if !pinned {
+            self.node_history.remove(&id);
+        }
 
         // For this prototype, we'll keep the removal logic but wrap it in MVCC metadata if needed.
         // Actually, let's keep it simple: removal from the latest version effectively deletes it.
@@ -3180,7 +3227,7 @@ NodeDeleted { id, .. } => {
         // Before the edge exists, not after it is persisted (#1483).
         self.admit_edge()?;
         self.invalidate_statistics_cache();
-        let edge_id_u64 = if let Some(id) = self.free_edge_ids.pop() {
+        let edge_id_u64 = if let Some(id) = self.checkpoints.reuse(&mut self.free_edge_ids) {
             id
         } else {
             let id = self.next_edge_id;
@@ -3240,7 +3287,7 @@ NodeDeleted { id, .. } => {
             return Err(GraphError::InvalidEdgeTarget(target));
         }
 
-        let edge_id_u64 = if let Some(id) = self.free_edge_ids.pop() {
+        let edge_id_u64 = if let Some(id) = self.checkpoints.reuse(&mut self.free_edge_ids) {
             id
         } else {
             let id = self.next_edge_id;
@@ -3345,7 +3392,7 @@ NodeDeleted { id, .. } => {
             return Err(GraphError::InvalidEdgeTarget(target));
         }
 
-        let edge_id_u64 = if let Some(id) = self.free_edge_ids.pop() {
+        let edge_id_u64 = if let Some(id) = self.checkpoints.reuse(&mut self.free_edge_ids) {
             id
         } else {
             let id = self.next_edge_id;
@@ -3549,6 +3596,7 @@ NodeDeleted { id, .. } => {
             return;
         }
         let at = self.current_version;
+        self.checkpoints.touch_edge(at, edge_id);
         let old = self.edge_property(edge_id, key);
         let entry = EdgeUndo::Property { at, key: key.to_string(), old };
         self.edge_history.entry(edge_id).or_default().undo.push(entry);
@@ -3561,6 +3609,7 @@ NodeDeleted { id, .. } => {
             return;
         }
         let at = self.current_version;
+        self.checkpoints.touch_edge(at, edge_id);
         let old = self.edge_properties_merged(edge_id);
         self.edge_history.entry(edge_id).or_default().undo.push(EdgeUndo::Map { at, old });
     }
@@ -3570,6 +3619,7 @@ NodeDeleted { id, .. } => {
     fn note_edge_created(&mut self, edge_id: EdgeId) {
         self.admission_births.1 += 1;
         let current = self.current_version;
+        self.checkpoints.touch_edge(current, edge_id);
         if current != Self::FIRST_VERSION {
             let born = Some(current);
             self.edge_history.insert(edge_id, EdgeHistory { born, ..EdgeHistory::default() });
@@ -3687,6 +3737,13 @@ NodeDeleted { id, .. } => {
             }
         }
         self.invalidate_hierarchies_for_edge_type(&edge.edge_type);
+        // Kept whole while a checkpoint is pinned, as `delete_node` keeps a
+        // node (#2093).
+        let pinned = self.checkpoints.is_pinned();
+        if pinned {
+            let born = self.edge_history.get(&id).and_then(|h| h.born);
+            self.checkpoints.bury_edge(self.current_version, born, edge.clone());
+        }
 
         // Collect catalog info
         let src_labels: Vec<Label> = self.get_node(edge.source).map(|n| n.labels.iter().cloned().collect()).unwrap_or_default();
@@ -3732,7 +3789,11 @@ NodeDeleted { id, .. } => {
         // for a property it never had, and over one it was created with.
         self.edge_columns.clear_row(idx);
         // The id is reused; its next edge must not answer for this one's past.
-        self.edge_history.remove(&id);
+        // Not while a checkpoint is pinned: no id is reused then, and the
+        // history is what rebuilds the edge as it was (#2093).
+        if !pinned {
+            self.edge_history.remove(&id);
+        }
 
         // Update catalog triple stats
         self.catalog.on_edge_deleted(edge.source, &src_labels, &edge.edge_type, edge.target, &tgt_labels);
@@ -5990,6 +6051,7 @@ NodeDeleted { id, .. } => {
     }
 
     fn push_node_undo(&mut self, id: NodeId, entry: NodeUndo) {
+        self.checkpoints.touch_node(entry.at(), id);
         self.node_history.entry(id).or_default().undo.push(entry);
     }
 
@@ -6000,6 +6062,7 @@ NodeDeleted { id, .. } => {
         // statement's tally is kept (#1483). The *check* is at the call sites,
         // because `create_node*` returns a `NodeId` and cannot refuse.
         self.admission_births.0 += 1;
+        self.checkpoints.touch_node(self.current_version, id);
         if self.current_version > 1 {
             let born = Some(self.current_version);
             self.node_history.insert(id, NodeHistory { born, ..NodeHistory::default() });
@@ -6228,6 +6291,31 @@ NodeDeleted { id, .. } => {
             history.undo.retain(|e| e.at() != version);
         }
         self.edge_history.retain(|_, h| h.born.is_some() || !h.undo.is_empty());
+        // What a checkpoint recorded at this version describes writes that no
+        // longer happened (#2093). While one is pinned a deleted entity keeps
+        // its history, so the ones this transaction created and the rollback
+        // deleted would keep a birth at a version that is about to be reused.
+        self.checkpoints.forget_version(version);
+        if self.checkpoints.is_pinned() {
+            let dead: Vec<NodeId> = self
+                .node_history
+                .iter()
+                .filter(|(id, h)| h.born == Some(version) && self.get_node(**id).is_none())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in dead {
+                self.node_history.remove(&id);
+            }
+            let dead: Vec<EdgeId> = self
+                .edge_history
+                .iter()
+                .filter(|(id, h)| h.born == Some(version) && self.get_edge(**id).is_none())
+                .map(|(id, _)| *id)
+                .collect();
+            for id in dead {
+                self.edge_history.remove(&id);
+            }
+        }
 
         self.current_version = version - 1;
         Ok(())
@@ -6532,6 +6620,12 @@ NodeDeleted { id, .. } => {
         // Old versions are invisible to every reader left, so dropping them
         // changes no data a query can see.
         self.bump_epoch_for_housekeeping();
+        // Never past a pinned checkpoint: its history lives only here, and
+        // `diff_since` and `rollback_to` read every entry after it (#2093).
+        let min_version = match self.checkpoints.oldest() {
+            Some(pinned) => min_version.min(pinned),
+            None => min_version,
+        };
         let mut nodes_pruned = 0usize;
         let mut edges_pruned = 0usize;
 
@@ -6606,6 +6700,7 @@ NodeDeleted { id, .. } => {
         self.edge_history.clear();
         self.node_history.clear();
         self.session_txn = None;
+        self.checkpoints = checkpoint::Checkpoints::default();
         self.outgoing.clear();
         self.incoming.clear();
         self.buffer_edge_count = 0;
@@ -7803,6 +7898,7 @@ mod tests {
         // once X stops bumping.
         const EXEMPT: &[(&str, &str)] = &[
             ("enable_write_log", "recording flag; the writes it records bump on their own path"),
+            ("disable_write_log", "recording flag; turning it off changes no row (#2093)"),
             ("begin_deferred_bulk_load", "raises the deferral counter; it changes when the held-back finish runs, not what any read returns -- every structure it holds back is guarded against being read short (#1807)"),
             ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
             ("set_write_admission", "stores the quota ceiling this statement is admitted under; it refuses writes, it does not change one (#1483)"),
