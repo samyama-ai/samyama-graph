@@ -50,6 +50,8 @@ fn every_probe_is_fired_from_the_engine() {
         ("query_done", "src/query/mod.rs"),
         ("persist_start", "src/persistence/mod.rs"),
         ("persist_done", "src/persistence/mod.rs"),
+        ("lock_wait_start", "src/store_lock.rs"),
+        ("lock_acquired", "src/store_lock.rs"),
     ];
     assert_eq!(callers.len(), PROBES.len(), "a probe was added without a caller here");
     for (f, file) in callers {
@@ -104,4 +106,50 @@ fn on_linux_the_binary_carries_every_probe() {
         assert_eq!(found.get(*name), Some(&want),
                    "samyama:{name} with {want} arguments is not in {bin}; readelf found {found:?}\n{}", evidence());
     }
+}
+
+/// The store's lock is taken through `src/store_lock.rs` and nowhere else, so
+/// the lock probes see every wait (#2219). A site that calls `read()`/`write()`
+/// on it directly is invisible to them -- which is how the first version of
+/// the helper missed the HTTP read path, `AppState::mutate`, RESP's read and
+/// write and `INFO`: each had `.instrument(..)` or a line break between the
+/// lock and `.await`, and a one-line rewrite did not see them.
+#[test]
+fn every_store_lock_goes_through_the_helper() {
+    // Other locks that happen to guard a GraphStore: the optimisation
+    // problems hold their own std::sync::RwLock, not the server's.
+    const OTHER_LOCKS: &[&str] = &["src/http/uc_problems.rs"];
+    let direct = regex::Regex::new(r"\bstore\s*\.\s*(read|write)(_owned)?\(\)").unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut offenders = Vec::new();
+    let mut stack = vec![root.join("src")];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            if !rel.ends_with(".rs")
+                || rel.ends_with("_cov_tests.rs")
+                || rel == "src/store_lock.rs"
+                || rel.starts_with("src/raft/")
+                || OTHER_LOCKS.contains(&rel.as_str())
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let production = text.split("#[cfg(test)]").next().unwrap();
+            for m in direct.find_iter(production) {
+                let line = production[..m.start()].matches('\n').count() + 1;
+                offenders.push(format!("{rel}:{line}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these take the store's lock directly, so lock__wait_start/lock__acquired \
+         never see them; use crate::store_lock::{{read, write, read_owned, write_owned}}: {offenders:?}"
+    );
 }

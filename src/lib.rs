@@ -118,6 +118,7 @@
 pub mod auth;
 pub mod logging;
 pub mod usdt;
+pub mod store_lock;
 #[cfg(feature = "otel")]
 pub mod otel;
 pub mod allocator;
