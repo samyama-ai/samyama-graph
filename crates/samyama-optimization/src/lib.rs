@@ -2,6 +2,7 @@ pub mod algorithms;
 pub mod benchmarks;
 pub mod budget;
 pub mod common;
+pub mod constraints;
 pub mod moo;
 pub mod stats;
 
