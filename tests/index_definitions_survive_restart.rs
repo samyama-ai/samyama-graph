@@ -293,3 +293,37 @@ fn a_unique_constraint_still_refuses_a_duplicate_after_a_restart() {
     );
     s.write("CREATE (:U {email: 'b@x'})");
 }
+
+#[test]
+fn a_point_index_still_plans_and_answers_after_a_restart() {
+    // NDS-04 (#2255): the R-tree is rebuilt from the catalog and the rows, so
+    // both the predicate scan and the nearest scan read it after a restart.
+    let mut s = Server::new();
+    s.write(
+        "CREATE (:Pt {id: 1, loc: point({x: 0, y: 0})}) \
+         CREATE (:Pt {id: 2, loc: point({x: 5, y: 5})}) \
+         CREATE (:Pt {id: 3, loc: point({x: 9, y: 9})})",
+    );
+    s.write("CREATE POINT INDEX pt_loc FOR (n:Pt) ON (n.loc)");
+    let bbox = "MATCH (n:Pt) WHERE point.withinBBox(n.loc, point({x: 4, y: 4}), point({x: 10, y: 10})) \
+                RETURN n.id AS id ORDER BY id";
+    let nearest = "MATCH (n:Pt) RETURN n.id AS id, point.distance(n.loc, point({x: 8, y: 8})) AS d \
+                   ORDER BY d LIMIT 1";
+    assert!(
+        s.plan(bbox).contains("PointIndexScan"),
+        "the index is not being used before the restart, so this test proves nothing"
+    );
+
+    s.restart();
+
+    let plan = s.plan(bbox);
+    assert!(plan.contains("PointIndexScan"), "the point index did not come back:\n{plan}");
+    let plan = s.plan(nearest);
+    assert!(plan.contains("PointIndexNearest"), "the nearest scan did not find the index:\n{plan}");
+    assert_eq!(
+        s.rows(bbox),
+        vec!["Some(Property(Integer(2)))".to_string(), "Some(Property(Integer(3)))".to_string()],
+        "a restored point index that answers with nothing is worse than none"
+    );
+    assert!(s.rows(nearest)[0].starts_with("Some(Property(Integer(3)))"), "{:?}", s.rows(nearest));
+}

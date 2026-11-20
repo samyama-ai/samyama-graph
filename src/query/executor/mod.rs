@@ -539,7 +539,8 @@ impl<'a> QueryExecutor<'a> {
             return whole(plan_json::batch(doc, plan_hash), sink);
         }
         if query.explain {
-            let mut batch = Self::explain_plan_with_stats(&mut plan, Some(self.store), self.row_budget);
+            let mut batch =
+                Self::explain_plan_with_stats(&mut plan, Some(self.store), self.row_budget, &query.hints);
             batch.plan_hash = plan_hash;
             return whole(batch, sink);
         }
@@ -632,6 +633,7 @@ impl<'a> QueryExecutor<'a> {
         plan: &mut ExecutionPlan,
         store: Option<&GraphStore>,
         row_budget: u64,
+        hints: &[crate::query::ast::PlanHint],
     ) -> RecordBatch {
         use crate::graph::PropertyValue;
         use crate::query::executor::planner::PLAN_DIAGNOSTICS;
@@ -673,6 +675,30 @@ impl<'a> QueryExecutor<'a> {
                         "  ... and {} more\n", diag.candidate_costs.len() - 6
                     ));
                 }
+            }
+        }
+
+        // The `USING` hints, each with what it did (LANG-13). Listing them
+        // here is a statement of fact, not a hope: a hint is mandatory, and
+        // planning fails on one no scan choice took, so a plan that reached
+        // EXPLAIN honoured every INDEX and SCAN hint it names. The operator
+        // tree above shows where; this says why it starts there.
+        if !hints.is_empty() {
+            use crate::query::ast::PlanHint;
+            plan_text.push_str("\n--- Planner hints ---\n");
+            for h in hints {
+                let effect = match h {
+                    PlanHint::Index { variable, .. } => {
+                        format!("applied: `{variable}` starts its pattern with an IndexScan on that index")
+                    }
+                    PlanHint::Scan { variable, .. } => {
+                        format!("applied: `{variable}` starts its pattern with a label NodeScan, no index")
+                    }
+                    PlanHint::Join { .. } => {
+                        "accepted: comma-separated patterns are joined on their shared variables".to_string()
+                    }
+                };
+                plan_text.push_str(&format!("{h} -- {effect}\n"));
             }
         }
 
@@ -891,7 +917,8 @@ impl<'a> MutQueryExecutor<'a> {
         }
         if query.explain {
             let store_ref: &GraphStore = self.store;
-            let mut batch = QueryExecutor::explain_plan_with_stats(&mut plan, Some(store_ref), self.row_budget);
+            let mut batch =
+                QueryExecutor::explain_plan_with_stats(&mut plan, Some(store_ref), self.row_budget, &query.hints);
             batch.plan_hash = plan_hash;
             return Ok(batch);
         }

@@ -79,3 +79,37 @@ fn analyze_describes_itself() {
     assert_eq!(d.details, "recompute planner statistics");
     assert!(d.children.is_empty());
 }
+
+#[test]
+fn analyze_label_reports_that_label_only() {
+    let mut store = small_store();
+    let n = store.create_node("Person");
+    store
+        .set_node_property("default", n, "name", PropertyValue::String("x".into()))
+        .unwrap();
+    let mut op = AnalyzeOperator::for_label(Some(crate::graph::Label::new("Person")));
+    let row = op.next(&store).unwrap().unwrap();
+    assert_eq!(
+        row.get("label"),
+        Some(&Value::Property(PropertyValue::String("Person".into())))
+    );
+    assert_eq!(int(&row, "nodes"), 3);
+    assert_eq!(int(&row, "properties"), 1);
+    assert!(!boolean(&row, "cache_was_stale"));
+    assert!(op.next(&store).unwrap().is_none());
+    assert_eq!(
+        op.describe().details,
+        "recompute planner statistics, report :Person"
+    );
+}
+
+#[test]
+fn columns_follow_the_form() {
+    assert_eq!(columns_for(None), analyze_columns());
+    let label = crate::graph::Label::new("Person");
+    assert_eq!(columns_for(Some(&label)), analyze_label_columns());
+    assert_eq!(
+        analyze_label_columns(),
+        vec!["label", "nodes", "properties", "cache_was_stale"]
+    );
+}

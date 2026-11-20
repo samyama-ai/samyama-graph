@@ -450,6 +450,10 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         aka(opt("minTotal", T::Float), "min_total"),
         opt("budget", T::Float),
         aka(opt("bestKnown", T::Float), "best_known"),
+        // `penalty`, `repair` or `feasibility` (OPT-10, #2266). Its default
+        // depends on the solver -- `penalty` for a single-objective one,
+        // `feasibility` for a multi-objective one -- so none is listed.
+        aka(opt("constraintHandling", T::String), "constraint_handling"),
         aka(key("populationSize", T::Integer, D::Integer(50)), "population_size"),
         aka(key("maxIterations", T::Integer, D::Integer(100)), "max_iterations"),
         // Not applied when left out: an unseeded solve draws from entropy (#2061).
