@@ -8,6 +8,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crate::common::GraphView;
+use crate::frontier::{self, Direction, Visit};
 
 /// Shortest paths from one source with **negative weights allowed**.
 ///
@@ -69,22 +70,12 @@ pub fn bellman_ford(view: &GraphView, source: usize) -> Option<Vec<Option<f64>>>
 pub fn all_pairs_hops(view: &GraphView) -> HashMap<(usize, usize), usize> {
     let n = view.node_count;
     let mut out = HashMap::new();
-    let mut dist = vec![usize::MAX; n];
+    let mut bfs = frontier::Bfs::new(n);
     for s in 0..n {
-        dist.iter_mut().for_each(|d| *d = usize::MAX);
-        dist[s] = 0;
-        let mut q = VecDeque::from([s]);
-        while let Some(u) = q.pop_front() {
-            for &v in view.successors(u) {
-                if dist[v] == usize::MAX {
-                    dist[v] = dist[u] + 1;
-                    q.push_back(v);
-                }
-            }
-        }
-        for (t, &d) in dist.iter().enumerate() {
-            if t != s && d != usize::MAX {
-                out.insert((s, t), d);
+        bfs.distances(view, s, Direction::Out);
+        for &t in bfs.reached() {
+            if t != s {
+                out.insert((s, t), bfs.depth(t).expect("a reached node has a depth"));
             }
         }
     }
@@ -190,22 +181,16 @@ fn topological_order(view: &GraphView) -> Option<Vec<usize>> {
 pub fn transitive_closure(view: &GraphView) -> Vec<(usize, usize)> {
     let n = view.node_count;
     let mut out = Vec::new();
-    let mut seen = vec![false; n];
+    let mut bfs = frontier::Bfs::new(n);
     for s in 0..n {
-        seen.iter_mut().for_each(|x| *x = false);
-        let mut stack: Vec<usize> = view.successors(s).to_vec();
-        while let Some(u) = stack.pop() {
-            if seen[u] {
-                continue;
-            }
-            seen[u] = true;
-            stack.extend_from_slice(view.successors(u));
-        }
-        for (t, &r) in seen.iter().enumerate() {
-            if r {
-                out.push((s, t));
-            }
-        }
+        // The walk reaches `s` at depth 0; it is in the closure only when an
+        // edge leads back into it.
+        let mut returns = false;
+        bfs.walk(&[s], |u, _| frontier::neighbours(view, u, Direction::Out), |e| {
+            returns |= e.to == s;
+            Visit::Continue
+        });
+        out.extend(bfs.reached().iter().filter(|&&t| t != s || returns).map(|&t| (s, t)));
     }
     out.sort_unstable();
     out

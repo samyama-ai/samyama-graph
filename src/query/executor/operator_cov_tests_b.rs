@@ -6894,6 +6894,80 @@ fn every_catalogued_algorithm_yields_its_listed_columns() {
 }
 
 #[test]
+fn every_algorithm_has_a_description() {
+    use super::super::algorithm_catalog::{ALGORITHM_CATALOG, DESCRIPTIONS};
+    for e in ALGORITHM_CATALOG {
+        let d = e.description();
+        assert!(d.len() > 20 && d.ends_with('.'), "{}: no description ({d:?})", e.name);
+    }
+    let mut names: Vec<&str> = DESCRIPTIONS.iter().map(|(n, _)| *n).collect();
+    assert_eq!(names.len(), ALGORITHM_CATALOG.len(), "one description per algorithm");
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), ALGORITHM_CATALOG.len(), "a duplicated description");
+}
+
+/// A bound in the catalogue is one the engine enforces (#2013): called just
+/// below its minimum, an algorithm whose bound says `refused` fails, and one
+/// that says `clamped` or `replaced` runs. A bound nobody enforces would tell
+/// a client to validate a rule the engine does not have.
+#[test]
+fn every_listed_bound_is_enforced() {
+    use super::super::algorithm_catalog::{BelowMin, ParamKind, ParamType, ALGORITHM_CATALOG};
+    let mut checked = 0;
+    for e in ALGORITHM_CATALOG {
+        let params = e.parameters();
+        for (i, p) in params.iter().enumerate() {
+            let Some(b) = p.bound else { continue };
+            let below = match p.ty {
+                ParamType::Integer => PropertyValue::Integer(b.min as i64 - if b.inclusive { 1 } else { 0 }),
+                ParamType::Float => PropertyValue::Float(if b.inclusive { b.min - 1.0 } else { b.min }),
+                other => panic!("{}: {} is {other:?}, and only numbers have bounds", e.name, p.name),
+            };
+            let (mut store, mut args) = catalogue_call(&AlgorithmOperator::canonical_name(e.name));
+            match p.kind {
+                ParamKind::Positional => {
+                    let slot = params[..i].iter().filter(|q| q.kind == ParamKind::Positional).count();
+                    while args.len() <= slot {
+                        args.push(Expression::Literal(PropertyValue::Null));
+                    }
+                    args[slot] = Expression::Literal(below.clone());
+                }
+                ParamKind::Config => match args.last_mut() {
+                    Some(Expression::Literal(PropertyValue::Map(m))) => {
+                        m.insert(p.name.to_string(), below.clone());
+                    }
+                    _ => args.push(lmap(&[(p.name, below.clone())])),
+                },
+            }
+            let out = if e.writes {
+                run_algo_mut(&mut store, e.name, args)
+            } else {
+                run_algo(&store, e.name, args)
+            };
+            match b.below {
+                BelowMin::Refused => assert!(out.is_err(), "{} {}={below:?}: listed as refused, but it ran", e.name, p.name),
+                BelowMin::Clamped | BelowMin::Replaced => {
+                    // A clamped iteration count can make an iterative
+                    // algorithm stop short (Katz at 1 iteration); that error
+                    // names the clamped value, which is the evidence.
+                    let ran_at_min = |e: &ExecutionError| {
+                        e.to_string().contains(&format!("in {} iterations", b.min as i64))
+                    };
+                    assert!(
+                        out.as_ref().map_or_else(ran_at_min, |_| true),
+                        "{} {}={below:?}: listed as {:?}, but it failed: {:?}",
+                        e.name, p.name, b.below, out.err()
+                    )
+                }
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked >= 30, "only {checked} bounds were exercised");
+}
+
+#[test]
 fn catalogue_names_are_unique_and_write_access_matches_the_operator() {
     use super::super::algorithm_catalog::ALGORITHM_CATALOG;
     let mut seen = std::collections::HashSet::new();

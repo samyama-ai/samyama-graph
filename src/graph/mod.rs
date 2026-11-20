@@ -54,6 +54,7 @@
 
 pub mod catalog;
 pub mod edge;
+pub mod feature;
 pub mod node;
 pub mod projection;
 pub mod property;

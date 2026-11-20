@@ -145,6 +145,9 @@ pub struct Query {
     pub show_indexes: bool,
     /// ANALYZE flag -- recompute the planner's statistics (LANG-13).
     pub analyze: bool,
+    /// `ANALYZE :Label` -- the label whose statistics the row reports. The
+    /// recomputation is the same either way: the store caches one set.
+    pub analyze_label: Option<Label>,
     /// Planner hints from every MATCH in the query (#1675). Keyed by variable,
     /// which names one node across the whole query.
     pub hints: Vec<PlanHint>,
@@ -429,6 +432,21 @@ pub enum PlanHint {
     /// `USING JOIN ON n` -- accepted; this planner joins comma-separated
     /// patterns on their shared variables already, so it is checked and kept.
     Join { variables: Vec<String> },
+}
+
+impl std::fmt::Display for PlanHint {
+    /// The hint as it is written in the query, so EXPLAIN can name it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlanHint::Index { variable, label, properties } => {
+                write!(f, "USING INDEX {variable}:{}({})", label.as_str(), properties.join(", "))
+            }
+            PlanHint::Scan { variable, label } => {
+                write!(f, "USING SCAN {variable}:{}", label.as_str())
+            }
+            PlanHint::Join { variables } => write!(f, "USING JOIN ON {}", variables.join(", ")),
+        }
+    }
 }
 
 /// Options written as `CYPHER key=value …` before a query (LANG-06, #1616):
@@ -1497,6 +1515,20 @@ impl Query {
             Clause::Call(call) => AlgorithmOperator::call_writes(&call.procedure_name, &call.arguments),
             _ => false,
         }) || self.calls_a_writing_vector_procedure()
+            || self.calls_a_writing_feature_procedure()
+    }
+
+    /// `feature.define` / `feature.materialize` / `feature.drop` (ML-07),
+    /// which change the store's feature registry.
+    fn calls_a_writing_feature_procedure(&self) -> bool {
+        use crate::query::executor::feature_ops::call_writes;
+        self.call_clause
+            .as_ref()
+            .is_some_and(|c| call_writes(&c.procedure_name))
+            || self.clauses.iter().any(|c| match c {
+                Clause::Call(call) => call_writes(&call.procedure_name),
+                _ => false,
+            })
     }
 
     /// `vector.knnGraph` / `vector.similarityJoin` with `write: true` (#1979),
@@ -1550,6 +1582,7 @@ impl Query {
             graph_projection_ddl: None,
             show_indexes: false,
             analyze: false,
+            analyze_label: None,
             hints: Vec::new(),
             plan_options: PlanOptions::default(),
             show_constraints: false,

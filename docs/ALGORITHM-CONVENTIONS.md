@@ -25,6 +25,32 @@ Conventions are stated for the algorithm as the engine calls it. `algo.*`,
 the namespace and lower-cases, so `algo.pageRank`, `pagerank` and
 `gds.pageRank` are the same row.
 
+## One walk, two neighbour readings
+
+Fifteen of the algorithms below walk the graph through one shared module,
+`samyama_graph_algorithms::frontier` (ALGO-13): closeness, harmonic,
+betweenness, eccentricity (and so diameter and radius), average neighbour
+degree, all-pairs shortest path (and so the Wiener index), transitive closure,
+global efficiency, bipartite, shortest path (unweighted), all shortest paths
+and k-hop negative sampling. Where the rows below say "BFS", it is that walk:
+breadth-first, nodes expanded in the order they were reached, neighbours in
+stored order with successors before predecessors.
+
+Two readings of "neighbour" are in use, and the rows say which:
+
+- **Every edge** (`neighbours`): a parallel relationship is two neighbours.
+  Betweenness, closeness and harmonic read the graph this way, so two
+  parallel edges are two shortest paths.
+- **Each neighbour once** (`distinct_neighbours`): a parallel pair or a
+  reciprocal `a -> b`, `b -> a` is one adjacency and a self-loop none, as in
+  NetworkX's `nx.Graph(D)`. Bipartite, matching and global efficiency read the
+  graph this way. Average neighbour degree and degree assortativity do too when
+  undirected (the default); with `undirected: false` they count every outgoing
+  edge except a self-loop, so a parallel pair still counts twice.
+
+Moving these algorithms onto the shared walk changed no answer:
+`frontier_parity_tests` holds each to the output it gave before, bit for bit.
+
 ## How to read the columns
 
 | Column | Means |

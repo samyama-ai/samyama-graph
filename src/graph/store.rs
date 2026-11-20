@@ -1088,8 +1088,9 @@ pub struct MemoryReport {
 }
 
 impl MemoryReport {
-    /// Everything the walk attributes. Deliberately not called `total`: the vector,
-    /// property and hierarchy index managers are behind `Arc` and are not walked, so
+    /// Everything the walk attributes. Deliberately not called `total`: the
+    /// indexes (vector and hierarchy included) are counted by
+    /// `GraphStore::index_memory`, not here, and allocator slack by nothing, so
     /// this is a floor on the graph's footprint and not the process's.
     pub fn attributed(&self) -> usize {
         self.node_columns
@@ -1355,6 +1356,10 @@ pub struct GraphStore {
     /// In memory only; see `crate::graph::projection`.
     pub graph_projections: Arc<crate::graph::projection::GraphProjections>,
 
+    /// Declarative feature definitions and their latest values (ML-07).
+    /// In memory only; see `crate::graph::feature`.
+    pub features: Arc<crate::graph::feature::FeatureRegistry>,
+
     /// Columnar storage for node properties
     pub node_columns: ColumnStore,
 
@@ -1423,6 +1428,10 @@ pub struct GraphStore {
     /// The incremental algorithms' saved state for this graph (ALGO-14).
     /// Lives with the store so it is per tenant and goes when the graph does.
     incremental: crate::algo::incremental::IncrementalStates,
+    /// The last content hash computed and the `data_changes` it was computed
+    /// at (ML-08, #1747). A hash is one pass over the whole graph, so an
+    /// export reuses it until the data changes.
+    content_hash_memo: std::sync::Mutex<Option<(u64, String)>>,
     /// Where this graph's data came from, from the `.sgsnap` headers it was
     /// imported from or a converter that built it (#1911). Written back into
     /// the header of every export.
@@ -1505,6 +1514,7 @@ impl GraphStore {
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
             structure_registry: Arc::new(crate::index::structure::StructureRegistry::new()),
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
+            features: Arc::new(crate::graph::feature::FeatureRegistry::new()),
             node_columns: ColumnStore::new(),
             edge_columns: ColumnStore::new(),
             index_sender: None,
@@ -1519,6 +1529,7 @@ impl GraphStore {
             data_changes: std::sync::atomic::AtomicU64::new(0),
             structure_log: Default::default(),
             incremental: Default::default(),
+            content_hash_memo: std::sync::Mutex::new(None),
             snapshot_sources: Vec::new(),
             snapshot_sources_epoch: 0,
             snapshot_sources_stale: false,
@@ -1744,9 +1755,9 @@ impl GraphStore {
     /// walked, so this is O(nodes + edges) and is a diagnostic rather than
     /// something to call per query.
     ///
-    /// Heap only. The `Arc`-held index managers report their own sizes if they can;
-    /// what is not attributed here is named in `unattributed_note` rather than
-    /// silently folded into another line.
+    /// Heap only, and the graph only. The `Arc`-held index managers report their
+    /// own sizes through [`GraphStore::index_memory`] rather than being folded
+    /// into a line here, so the two never count the same bytes.
     /// Resident bytes of every index the store holds, one row each, largest
     /// first (COST-06, NDS-14).
     ///
@@ -5037,6 +5048,11 @@ NodeDeleted { id, .. } => {
         &self.incremental
     }
 
+    /// The memo `snapshot::content_hash::cached_content_hash` keeps.
+    pub(crate) fn content_hash_memo(&self) -> &std::sync::Mutex<Option<(u64, String)>> {
+        &self.content_hash_memo
+    }
+
     pub fn data_changes(&self) -> u64 {
         self.data_changes.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -6636,6 +6652,8 @@ NodeDeleted { id, .. } => {
         self.hierarchy_index = Arc::new(HierarchyIndexManager::new());
         // A projection is a copy of data that `clear` just removed.
         self.graph_projections = Arc::new(crate::graph::projection::GraphProjections::new());
+        // Materialized feature values name nodes `clear` just removed.
+        self.features = Arc::new(crate::graph::feature::FeatureRegistry::new());
         self.node_columns = ColumnStore::new();
         self.edge_columns = ColumnStore::new();
         self.next_node_id = 1;
