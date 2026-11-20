@@ -1590,8 +1590,8 @@ impl QueryPlanner {
         // checks are independent and this keeps the statement arms together.
         if query.analyze {
             return Ok(ExecutionPlan {
-                root: Box::new(super::analyze_ops::AnalyzeOperator::new()),
-                output_columns: super::analyze_ops::analyze_columns(),
+                root: Box::new(super::analyze_ops::AnalyzeOperator::for_label(query.analyze_label.clone())),
+                output_columns: super::analyze_ops::columns_for(query.analyze_label.as_ref()),
                 // A cache, not the graph. Marking it a write would put it
                 // behind write access and make it unavailable to the person
                 // diagnosing a slow read, which is who asks for it.
@@ -11808,6 +11808,7 @@ mod tests {
             profile: false,
             plan_json: false,
             analyze: false,
+            analyze_label: None,
             hints: Vec::new(),
             plan_options: Default::default(),
             params: std::collections::HashMap::new(),
