@@ -1346,6 +1346,12 @@ pub struct GraphStore {
     /// path of writes that changed no index at all.
     index_catalog_dirty: std::sync::atomic::AtomicBool,
 
+    /// Replies to keyed writes, so a retried write is answered and not run
+    /// again (#2176). Here rather than in a transport so that every transport
+    /// sharing the store shares the keys, and under the same lock as the
+    /// writes they describe.
+    idempotency: crate::idempotency::IdempotencyLog,
+
     /// Hierarchy (OEH) index registry — subsumption + index-resident roll-up (ADR-035)
     pub hierarchy_index: Arc<HierarchyIndexManager>,
 
@@ -1505,6 +1511,7 @@ impl GraphStore {
             point_index: Default::default(),
             property_index: Arc::new(IndexManager::new()),
             index_catalog_dirty: std::sync::atomic::AtomicBool::new(false),
+            idempotency: Default::default(),
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
             structure_registry: Arc::new(crate::index::structure::StructureRegistry::new()),
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
@@ -6759,6 +6766,16 @@ NodeDeleted { id, .. } => {
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// The replies remembered for keyed writes (#2176).
+    pub fn idempotency(&self) -> &crate::idempotency::IdempotencyLog {
+        &self.idempotency
+    }
+
+    /// The replies remembered for keyed writes, to record one (#2176).
+    pub fn idempotency_mut(&mut self) -> &mut crate::idempotency::IdempotencyLog {
+        &mut self.idempotency
+    }
+
     /// Every index declaration in the store, in the order `SHOW INDEXES` sorts
     /// them.
     ///
@@ -6784,6 +6801,17 @@ NodeDeleted { id, .. } => {
                     label: label.as_str().to_string(),
                     property,
                 }),
+        );
+        definitions.extend(
+            self.property_index
+                .list_upsert_constraints()
+                .into_iter()
+                .map(
+                    |(label, property)| IndexDefinition::UniqueConstraintUpsert {
+                        label: label.as_str().to_string(),
+                        property,
+                    },
+                ),
         );
         definitions.extend(self.fulltext.listing().into_iter().map(
             |(name, label, property)| IndexDefinition::FullText { name, label, property },
@@ -6818,6 +6846,9 @@ NodeDeleted { id, .. } => {
             }
             IndexDefinition::VectorKind { label, property, .. } => {
                 (6u8, label.clone(), property.clone(), String::new())
+            }
+            IndexDefinition::UniqueConstraintUpsert { label, property } => {
+                (7u8, label.clone(), property.clone(), String::new())
             }
         });
         IndexCatalog { definitions }
@@ -6910,6 +6941,166 @@ NodeDeleted { id, .. } => {
         Ok(filled)
     }
 
+    /// Declare what a `CREATE` that repeats a key of the unique constraint on
+    /// `label.property` does: update the node holding the key (`update`), or
+    /// be refused, which is the default (#2176).
+    ///
+    /// `CREATE CONSTRAINT ... OPTIONS {onDuplicate: 'update'}` sets it, and
+    /// `OPTIONS {onDuplicate: 'error'}` puts it back. Persisted in the index
+    /// catalog beside the constraint, so a restart does not quietly turn
+    /// retried writes back into refusals.
+    pub fn set_unique_constraint_on_duplicate(
+        &mut self,
+        label: &Label,
+        property: &str,
+        update: bool,
+    ) -> Result<(), String> {
+        if !self.property_index.has_unique_constraint(label, property) {
+            return Err(format!(
+                "no unique constraint on :{}({})",
+                label.as_str(),
+                property
+            ));
+        }
+        if self
+            .property_index
+            .set_constraint_upsert(label, property, update)
+        {
+            self.bump_epoch();
+            self.mark_index_catalog_changed();
+        }
+        Ok(())
+    }
+
+    /// The existing node a `CREATE` of `labels` with `properties` updates
+    /// instead of creating a new one, or `None` to create (#2176).
+    ///
+    /// Only keys whose unique constraint was declared `onDuplicate: 'update'`
+    /// are consulted; under any other constraint a repeated key is still
+    /// refused by the write itself. Two such keys held by two different nodes
+    /// are refused here: one `CREATE` updates one node and does not merge two.
+    pub fn upsert_target<'a>(
+        &self,
+        labels: &[Label],
+        properties: impl IntoIterator<Item = (&'a String, &'a PropertyValue)>,
+    ) -> GraphResult<Option<NodeId>> {
+        if !self.property_index.has_any_upsert_constraints() {
+            return Ok(None);
+        }
+        let properties: Vec<(&String, &PropertyValue)> = properties.into_iter().collect();
+        let mut found: Option<(NodeId, &Label, &String)> = None;
+        for label in labels {
+            for &(key, value) in &properties {
+                if value.is_null() || !self.property_index.is_upsert_constraint(label, key) {
+                    continue;
+                }
+                let Some(holder) = self.find_node_by_unique(label, key, value)? else {
+                    continue;
+                };
+                match found {
+                    None => found = Some((holder, label, key)),
+                    Some((first, first_label, first_key)) if first != holder => {
+                        return Err(GraphError::ConstraintViolation(format!(
+                            ":{}({}) is held by node {} and :{}({}) by node {}; \
+                             a CREATE updates one node, it does not merge two",
+                            first_label.as_str(),
+                            first_key,
+                            first,
+                            label.as_str(),
+                            key,
+                            holder
+                        )));
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        Ok(found.map(|(node, _, _)| node))
+    }
+
+    /// Apply a `CREATE` to the node [`upsert_target`](Self::upsert_target)
+    /// returned: add the labels it lacks and set every property given, each
+    /// write a new version of the node, as `SET n += {...}` would make
+    /// (#2176). Properties the `CREATE` does not mention are kept.
+    ///
+    /// Every unique constraint the node will be under afterwards is checked
+    /// before anything is written, so a refused update leaves the node as it
+    /// was rather than half-updated.
+    pub fn upsert_node<'a>(
+        &mut self,
+        tenant_id: &str,
+        node_id: NodeId,
+        labels: &[Label],
+        properties: impl IntoIterator<Item = (&'a String, &'a PropertyValue)>,
+    ) -> GraphResult<()> {
+        let properties: Vec<(String, PropertyValue)> = properties
+            .into_iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let held: Vec<Label> = self
+            .get_node(node_id)
+            .ok_or(GraphError::NodeNotFound(node_id))?
+            .labels
+            .iter()
+            .cloned()
+            .collect();
+        let added: Vec<Label> = {
+            let mut added: Vec<Label> = Vec::new();
+            for label in labels {
+                if !held.contains(label) && !added.contains(label) {
+                    added.push(label.clone());
+                }
+            }
+            added
+        };
+
+        if self.property_index.has_any_unique_constraints() {
+            let mut after = self.node_properties_full(node_id);
+            for (key, value) in &properties {
+                if value.is_null() {
+                    after.remove(key);
+                } else {
+                    after.insert(key.clone(), value.clone());
+                }
+            }
+            for label in held.iter().chain(added.iter()) {
+                for (key, value) in &after {
+                    if !self.property_index.has_unique_constraint(label, key) {
+                        continue;
+                    }
+                    let other = self
+                        .property_index
+                        .unique_constraint_holders(label, key, value)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|&id| {
+                            id != node_id
+                                && self.get_node(id).is_some_and(|n| n.labels.contains(label))
+                                && self.node_property(id, key).as_ref() == Some(value)
+                        })
+                        .min();
+                    if let Some(other) = other {
+                        return Err(GraphError::ConstraintViolation(format!(
+                            ":{}({}) already has value {:?} on node {}",
+                            label.as_str(),
+                            key,
+                            value,
+                            other
+                        )));
+                    }
+                }
+            }
+        }
+
+        for label in added {
+            self.add_label_to_node(tenant_id, node_id, label)?;
+        }
+        for (key, value) in properties {
+            self.set_node_property(tenant_id, node_id, key, value)?;
+        }
+        Ok(())
+    }
+
     /// The node holding `value` for `:label(property)` under a unique
     /// constraint: a lookup by external key (#542).
     ///
@@ -6999,6 +7190,8 @@ NodeDeleted { id, .. } => {
         let mut vector_params = Vec::new();
         // And its kind (#1975).
         let mut vector_kinds = Vec::new();
+        // Likewise: the mode of a constraint is set once the constraint exists.
+        let mut upserts = Vec::new();
 
         for def in &catalog.definitions {
             match def {
@@ -7031,6 +7224,9 @@ NodeDeleted { id, .. } => {
                 }
                 IndexDefinition::VectorKind { label, property, kind } => {
                     vector_kinds.push((label, property, *kind));
+                }
+                IndexDefinition::UniqueConstraintUpsert { label, property } => {
+                    upserts.push((label, property));
                 }
                 IndexDefinition::VectorParams { label, property, m, ef_construction, ef } => {
                     vector_params.push((
@@ -7066,6 +7262,13 @@ NodeDeleted { id, .. } => {
                     }
                 },
             }
+        }
+
+        for (label, property) in upserts {
+            // A constraint that could not be restored is already counted as
+            // failed; its mode has nothing to attach to.
+            self.property_index
+                .set_constraint_upsert(&Label::new(label), property, true);
         }
 
         for (label, property, params) in vector_params {
@@ -7816,6 +8019,7 @@ mod tests {
             ("commit_session_transaction", "drops the rollback journal, keeping every write already applied and already bumped; rollback_session_transaction, which does change rows, bumps (#1200 step 6)"),
             ("add_snapshot_sources", "records where the data came from, for the next export's header; no query reads it, and it must not bump: it records the current epoch to tell later writes apart (#1911)"),
             ("record_snapshot_sources", "records where the data came from, for the next export's header; no query reads it, and it must not bump: it records the current epoch to tell later writes apart (#1911)"),
+            ("idempotency_mut", "hands out the log of replies remembered for keyed writes; no query reads it, and the write a key guards bumps on its own path (#2176)"),
         ];
 
         let src = std::fs::read_to_string(concat!(

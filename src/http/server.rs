@@ -791,11 +791,15 @@ impl AppState {
             store.set_write_admission(pm.write_admission(graph));
         }
         let out = body(&mut store);
+        // Idempotency keys the body recorded go to disk in the same commit as
+        // its rows (#2176). Taken without persistence too, so they do not pile
+        // up in a queue nothing drains.
+        let keys = store.idempotency_mut().take_pending();
         if let Some(pm) = &self.persistence {
             let mutations = store.take_write_log();
             let _persist =
                 tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64, entities = tracing::field::Empty).entered();
-            match pm.apply_mutations(graph, &store, &mutations) {
+            match pm.apply_mutations_keyed(graph, &store, &mutations, &keys) {
                 Ok(n) => {
                     _persist.record("entities", n as i64);
                     tracing::debug!("persisted {n} entities from {} mutations", mutations.len())
@@ -1065,6 +1069,7 @@ impl HttpServer {
             .route("/api/tx/begin", post(super::transactions::begin_handler))
             .route("/api/tx/:id/commit", post(super::transactions::commit_handler))
             .route("/api/tx/:id/rollback", post(super::transactions::rollback_handler))
+            .route("/api/requests/:key", get(super::handler::request_status_handler))
             .route(
                 "/api/import/parquet",
                 post(import_parquet_handler).layer(DefaultBodyLimit::max(self.import_body_limit)),
