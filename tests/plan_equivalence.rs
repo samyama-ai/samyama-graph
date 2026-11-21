@@ -118,6 +118,12 @@ fn explain(s: &GraphStore, q: &str) -> String {
     }
 }
 
+/// The `K` of EXPLAIN's `Forceable plans: K` line, if it has one.
+fn forceable(plan: &str) -> Option<usize> {
+    let line = plan.lines().find(|l| l.starts_with("Forceable plans: "))?;
+    line["Forceable plans: ".len()..].split_whitespace().next()?.parse().ok()
+}
+
 /// The operator tree alone, with the blocks EXPLAIN appends stripped.
 fn tree(plan: &str) -> &str {
     plan.split("\n---").next().unwrap()
@@ -149,6 +155,9 @@ fn every_plan_of_every_query_returns_the_default_planners_answer() {
             n += 1;
             assert!(n <= 64, "{q}: more plans than the enumerator keeps");
         }
+        // EXPLAIN states the range the loop above found by trial (#2252), so
+        // a harness can loop `plan=1..=K` instead of running until refused.
+        assert_eq!(forceable(&explain(&s, &format!("CYPHER planner=cost {q}"))), Some(n - 1), "{q}");
         if n > 2 {
             queries_with_alternatives += 1;
         }
@@ -206,4 +215,113 @@ fn an_option_that_cannot_be_honoured_is_an_error() {
     assert!(run(&s, "cypher PLANNER=Cost MATCH (p:P) RETURN p.id").is_ok());
     // `CYPHER` is a keyword only before options: a label named Cypher is not one.
     assert!(run(&s, "MATCH (c:Cypher) RETURN count(c)").is_ok());
+}
+
+/// The plan text EXPLAIN returns for a statement that already says EXPLAIN.
+fn explain_text(s: &GraphStore, q: &str) -> String {
+    let batch = QueryExecutor::new(s)
+        .execute(&parse_query(q).unwrap_or_else(|e| panic!("{q}: {e}")))
+        .unwrap_or_else(|e| panic!("{q}: {e}"));
+    match batch.records[0].get("plan") {
+        Some(Value::Property(PropertyValue::String(t))) => t.clone(),
+        other => panic!("{q}: {other:?}"),
+    }
+}
+
+/// Each of the seven forcing mechanisms CH-PLANEQ probed on 2026-09-26
+/// (LANG-06, #2252), by the statement the probe sent. All seven were refused
+/// or ignored then. Each is now either honoured, or refused with an error
+/// that names what to send instead -- never accepted and ignored.
+#[test]
+fn the_ch_planeq_forcing_probes() {
+    let s = store();
+
+    // using_index: the probe's statement, with the index it names.
+    let q = "MATCH (p:P) USING INDEX p:P(id) WHERE p.id = 1 RETURN p.id";
+    assert_eq!(run(&s, q).unwrap(), vec!["Integer(1)".to_string()]);
+    let plan = explain(&s, q);
+    assert!(tree(&plan).contains("IndexScan"), "{plan}");
+    assert!(plan.contains("starts its pattern with an IndexScan"), "{plan}");
+
+    // using_scan: a label scan although the index exists.
+    let q = "MATCH (p:P) USING SCAN p:P WHERE p.id = 1 RETURN p.id";
+    assert_eq!(run(&s, q).unwrap(), vec!["Integer(1)".to_string()]);
+    let plan = explain(&s, q);
+    assert!(!tree(&plan).contains("IndexScan"), "{plan}");
+    assert!(plan.contains("starts its pattern with a label NodeScan"), "{plan}");
+
+    // using_join.
+    let q = "MATCH (a:P)-[:R]->(b:P) USING JOIN ON b RETURN count(*)";
+    assert_eq!(run(&s, q).unwrap(), vec!["Integer(59)".to_string()]);
+    assert!(explain(&s, q).contains("USING JOIN ON b"), "{}", explain(&s, q));
+
+    // cypher_planner_prefix: planned by the enumerator, which says so.
+    let q = "CYPHER planner=cost MATCH (p:P) RETURN p.id";
+    assert_eq!(run(&s, q).unwrap().len(), 60);
+    let plan = explain(&s, q);
+    assert!(plan.contains("Candidates evaluated: 1"), "{plan}");
+    assert_eq!(forceable(&plan), Some(1), "{plan}");
+
+    // cypher_runtime_prefix: `slotted` is a runtime this engine does not
+    // have, refused by name; the one it has is accepted.
+    let e = run(&s, "CYPHER runtime=slotted MATCH (p:P) RETURN p.id").unwrap_err();
+    assert!(e.contains("one runtime") && e.contains("runtime=volcano"), "{e}");
+    assert!(run(&s, "CYPHER runtime=volcano MATCH (p:P) RETURN p.id").is_ok());
+
+    // explain_option_prefix: `EXPLAIN(plan=2)` is `EXPLAIN CYPHER plan=2`.
+    // The probe's own pattern has one node and so one plan: plan 2 is
+    // refused with the count, not run as plan 1.
+    let e = QueryExecutor::new(&s)
+        .execute(&parse_query("EXPLAIN(plan=2) MATCH (p:P) RETURN p.id").unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("cannot honour CYPHER plan=2"), "{e}");
+    let one = explain_text(&s, "EXPLAIN(plan=1) MATCH (p:P) RETURN p.id");
+    assert!(one.contains("Chosen plan: #1\n"), "{one}");
+    let chain = "MATCH (a:P)-[:R]->(b:P) RETURN a.id";
+    let two = explain_text(&s, &format!("EXPLAIN(plan=2) {chain}"));
+    assert!(two.contains("Chosen plan: #2, forced by CYPHER plan=N"), "{two}");
+    assert_eq!(tree(&two), tree(&explain(&s, &format!("CYPHER plan=2 {chain}"))));
+    assert_eq!(forceable(&two), Some(2), "{two}");
+    let opts = parse_query(&format!("PROFILE (planner=cost, plan=2) {chain}")).unwrap();
+    assert!(opts.profile);
+    assert_eq!(opts.plan_options.plan, Some(2));
+    // Checked as the prefix is, and not given twice across the two spellings.
+    let e = parse_query(&format!("EXPLAIN (join_order=ab) {chain}")).unwrap_err().to_string();
+    assert!(e.contains("unknown CYPHER option"), "{e}");
+    let e = parse_query(&format!("CYPHER plan=1 EXPLAIN (plan=2) {chain}")).unwrap_err().to_string();
+    assert!(e.contains("given twice"), "{e}");
+    let e = parse_query(&format!("CYPHER plan=1 EXPLAIN CYPHER plan=2 {chain}")).unwrap_err().to_string();
+    assert!(e.contains("given twice"), "{e}");
+    // `(FORMAT JSON)` is still the format, not an option.
+    assert!(parse_query(&format!("EXPLAIN (FORMAT JSON) {chain}")).unwrap().plan_json);
+
+    // body_field_plan is an HTTP field: see `src/http/handler_cov_tests.rs`.
+}
+
+/// `Forceable plans` counts the query, not its last MATCH: `plan=N` picks the
+/// N-th of every MATCH, so a query has as many plans as its MATCH with the
+/// fewest (#2252).
+#[test]
+fn forceable_plans_is_the_fewest_over_the_matches() {
+    let s = store();
+    // The MATCH planned last has the most candidates, so `Candidates
+    // evaluated` alone would overstate the range.
+    let q = "MATCH (x:Person)-[:LIVES_IN]->(y:City) \
+             MATCH (a:P)-[:R]->(b:P)-[:R]->(c:P) RETURN count(*)";
+    let want = run(&s, q).unwrap();
+    let plan = explain(&s, &format!("CYPHER planner=cost {q}"));
+    let k = forceable(&plan).unwrap_or_else(|| panic!("{plan}"));
+    assert!(k >= 2, "{plan}");
+    for n in 1..=k {
+        assert_eq!(run(&s, &format!("CYPHER plan={n} {q}")).unwrap(), want, "plan={n}");
+    }
+    let e = run(&s, &format!("CYPHER plan={} {q}", k + 1)).unwrap_err();
+    assert!(e.contains(&format!("cannot honour CYPHER plan={}", k + 1)), "{e}");
+    // A pattern the enumerator does not plan has the one plan the default
+    // planner gives it.
+    let plan = explain(&s, "CYPHER planner=cost MATCH (a:P {id: 1})-[:R*1..3]->(b:P) RETURN b.id");
+    assert_eq!(forceable(&plan), Some(1), "{plan}");
+    // The default planner forces nothing and claims nothing.
+    assert_eq!(forceable(&explain(&s, q)), None);
 }
