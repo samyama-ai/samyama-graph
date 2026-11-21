@@ -152,6 +152,21 @@ impl CacheStats {
     }
 }
 
+/// Whether reads are planned by the graph-native, cost-based planner (#1729).
+///
+/// On by default: it is the planner that enumerates candidate plans and
+/// reports their cost (`Candidates evaluated`, `Chosen plan cost`), which the
+/// plan diagram (VIS-06) and EXPLAIN's cost block read, and a default server
+/// used to show none of it. `SAMYAMA_GRAPH_NATIVE=false` (or `0`) falls back to
+/// the rule-based planner, for a workload that plans worse under the new one.
+/// Read on every query, so it can be changed without a restart.
+pub fn graph_native_enabled() -> bool {
+    !matches!(
+        std::env::var("SAMYAMA_GRAPH_NATIVE").as_deref().map(str::trim),
+        Ok("false" | "0" | "off" | "no")
+    )
+}
+
 /// Query engine - high-level interface for executing queries
 ///
 /// Includes an LRU AST cache that eliminates repeated parsing overhead
@@ -544,7 +559,7 @@ impl QueryEngine {
             query = Arc::new(own);
         }
 
-        let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
+        let mut executor = if graph_native_enabled() {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
                 executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
             ))
@@ -616,7 +631,7 @@ impl QueryEngine {
         let _in_flight = crate::query::metrics::in_flight();
         let query = self.parse_to_run(query_str)?;
 
-        let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
+        let mut executor = if graph_native_enabled() {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
                 executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
             ))
