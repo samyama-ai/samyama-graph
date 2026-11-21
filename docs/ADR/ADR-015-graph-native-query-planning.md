@@ -146,9 +146,22 @@ plan, per query rather than per server:
 | `plan=N` | Each MATCH runs its N-th cheapest candidate, numbered as EXPLAIN numbers `Alternative plans`; implies `planner=cost` |
 | `runtime=volcano` | The one runtime there is; any other runtime is an error |
 
+The same options are accepted in parentheses after `EXPLAIN` or `PROFILE`
+(`EXPLAIN (plan=2) …`), and as the `plan`, `planner` and `runtime` fields of a
+`POST /api/query` body, which become the `CYPHER` prefix (2026-11-20, #2252).
+Before that the body fields were dropped by serde: a `plan` key came back 200
+with the default plan, the one outcome plan forcing cannot afford.
+
+EXPLAIN under `planner=cost` (or any `plan=N`) ends its diagnostics with
+`Forceable plans: K`. `Candidates evaluated` counts one MATCH, the last planned;
+`plan=N` picks the N-th of every MATCH, so the query has as many plans as its
+MATCH with the fewest, and `K` is that. A harness loops `plan=1..=K`; `plan=K+1`
+is refused.
+
 Options are mandatory, like the `USING` hints: an unknown option, a plan number a
-MATCH does not have, or `plan=2` on a MATCH the enumerator cannot plan is an
-error that says why, never a silent fallback. This is what plan-equivalence
+MATCH does not have, the same option given twice (also across two spellings), or
+`plan=2` on a MATCH the enumerator cannot plan is an error that says why, never a
+silent fallback. This is what plan-equivalence
 testing (LANG-06) needs: `tests/plan_equivalence.rs` runs a corpus under every
 plan it has and compares each answer with the default planner's.
 
