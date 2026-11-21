@@ -112,8 +112,16 @@ pub fn set_query_deadline(deadline: Option<std::time::Instant>) {
     QUERY_DEADLINE.with(|d| d.set(deadline));
 }
 
-/// Check if the query deadline has been exceeded; returns Err if so
+/// Check if the query deadline has been exceeded; returns Err if so.
+///
+/// Also stops an algorithm call that was cancelled (`POST
+/// /api/algorithms/running/{id}/cancel`, #1693): every loop that already
+/// checks the deadline then honours a cancel too, with no second check to
+/// forget. Outside an algorithm call nothing is ever cancelled.
 fn check_deadline() -> ExecutionResult<()> {
+    if crate::query::running::cancelled() {
+        return Err(ExecutionError::RuntimeError(CANCELLED.to_string()));
+    }
     QUERY_DEADLINE.with(|d| {
         if let Some(deadline) = d.get() {
             if std::time::Instant::now() > deadline {
@@ -124,27 +132,54 @@ fn check_deadline() -> ExecutionResult<()> {
     })
 }
 
-/// Stops a long algorithm at the query deadline (ALGO-12, #1693).
+/// The message a cancelled algorithm call fails with, ahead of how far it got.
+const CANCELLED: &str = "Query cancelled";
+
+/// Reports a long algorithm's progress and stops it at the query deadline or
+/// on a cancel request (ALGO-12, #1693).
 ///
 /// An algorithm runs inside one call, so without this the deadline was only
 /// looked at once that call returned: `algo.pageRank` on a large graph ran
 /// every iteration however long they took, and the query reported
-/// `Query timed out` only afterwards, if at all. Checked between iterations, on
-/// the executor's thread, which is where the deadline is set.
-struct DeadlineProgress;
+/// `Query timed out` only afterwards, if at all. Checked between steps, on the
+/// executor's thread, which is where the deadline is set and where the call is
+/// registered in `query::running` -- so each step is also what
+/// `GET /api/algorithms/running` shows, and where a cancel takes effect.
+struct QueryProgress(&'static str);
 
-impl crate::algo::Progress for DeadlineProgress {
-    fn step(&self, _done: usize, _total: usize) -> bool {
+/// Reading the store into the algorithm's view; counts nodes.
+const VIEW_PROGRESS: QueryProgress = QueryProgress(crate::query::running::phase::BUILDING_VIEW);
+/// The algorithm's own loop; counts its iterations or sweeps.
+const RUN_PROGRESS: QueryProgress = QueryProgress(crate::query::running::phase::RUNNING);
+
+impl crate::algo::Progress for QueryProgress {
+    fn step(&self, done: usize, total: usize) -> bool {
+        if crate::query::running::report(self.0, done, total) {
+            return false;
+        }
         check_deadline().is_ok()
     }
 }
 
-/// The error for an algorithm the deadline stopped: still `Query timed out`,
-/// the deadline's message everywhere else, and how far it got.
-fn algorithm_timed_out(call: &str, stopped: crate::algo::Stopped) -> ExecutionError {
+/// Why an algorithm stopped early, as its error says: cancelled when a cancel
+/// was requested, otherwise the deadline.
+fn stop_reason() -> &'static str {
+    if crate::query::running::cancelled() {
+        CANCELLED
+    } else {
+        "Query timed out"
+    }
+}
+
+/// The error for an algorithm the deadline or a cancel stopped: `Query timed
+/// out` (the deadline's message everywhere else) or `Query cancelled`, and how
+/// far it got, in the algorithm's own `unit`.
+fn algorithm_stopped(call: &str, unit: &str, stopped: crate::algo::Stopped) -> ExecutionError {
     ExecutionError::RuntimeError(format!(
-        "Query timed out: {call} stopped after {} of {} iterations",
-        stopped.done, stopped.total
+        "{}: {call} stopped after {} of {} {unit}",
+        stop_reason(),
+        stopped.done,
+        stopped.total
     ))
 }
 
@@ -18726,10 +18761,10 @@ impl AlgorithmOperator {
         weight_property: Option<&str>,
     ) -> ExecutionResult<AlgoView> {
         let Some(projection) = self.requested_projection(store)? else {
-            let view = crate::algo::build_view_with(store, label, edge_type, weight_property, &DeadlineProgress)
+            let view = crate::algo::build_view_with(store, label, edge_type, weight_property, &VIEW_PROGRESS)
                 .map_err(|stopped| ExecutionError::RuntimeError(format!(
-                    "Query timed out: {} stopped building its graph view after {} of {} nodes",
-                    self.name, stopped.done, stopped.total
+                    "{}: {} stopped building its graph view after {} of {} nodes",
+                    stop_reason(), self.name, stopped.done, stopped.total
                 )))?;
             return Ok(AlgoView::Built(view));
         };
@@ -19057,8 +19092,8 @@ impl AlgorithmOperator {
 
         // Build view and run
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
-        let scores = crate::algo::page_rank_with(&view, config, &DeadlineProgress)
-            .map_err(|stopped| algorithm_timed_out("algo.pageRank", stopped))?;
+        let scores = crate::algo::page_rank_with(&view, config, &RUN_PROGRESS)
+            .map_err(|stopped| algorithm_stopped("algo.pageRank", "iterations", stopped))?;
 
         // Convert to records. One per node, with a copy of the node, so on a
         // large graph this is not free either: checked like the iterations.
@@ -20306,7 +20341,8 @@ impl AlgorithmOperator {
     /// `algo.louvain()` -- community per node, ids renumbered from zero.
     fn execute_louvain(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         let view = self.structural_view(store)?;
-        let comms = crate::algo::louvain(&view, 20);
+        let comms = crate::algo::louvain_with(&view, 20, &RUN_PROGRESS)
+            .map_err(|stopped| algorithm_stopped("algo.louvain", "sweeps", stopped))?;
         // Modularity of the partition just found, on every row. A community
         // id alone tells a caller nothing about whether the partition is any
         // good, and the score is what says so.
@@ -22545,6 +22581,9 @@ impl AlgorithmOperator {
 impl PhysicalOperator for AlgorithmOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         if !self.executed {
+            // Listed by `GET /api/algorithms/running`, and cancellable, until
+            // the call returns (#1693).
+            let _running = crate::query::running::enter(&self.name);
             // A mutating procedure cannot run here. Reaching this point means the
             // router sent it to the read executor, which is the bug #1468 fixed in
             // `Query::is_write()`; the message stays for a caller who builds a read
@@ -22662,6 +22701,7 @@ impl PhysicalOperator for AlgorithmOperator {
 
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
          if !self.executed {
+            let _running = crate::query::running::enter(&self.name);
             // Refused before the algorithm runs, so a request that cannot be
             // honoured costs nothing.
             let write_back = self.write_back_plan()?;

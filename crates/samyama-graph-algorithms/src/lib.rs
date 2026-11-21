@@ -70,7 +70,7 @@ pub use centrality_extra::{
     hits, index_of, katz_centrality, personalised_page_rank, ranked_scores, vote_rank,
 };
 pub use community_detect::{
-    louvain, modularity, with_ids, Communities,
+    louvain, louvain_with, modularity, with_ids, Communities,
 };
 pub use pathfinding_extra::{
     a_star, all_shortest_paths, article_rank, random_walk, yens_k_shortest,

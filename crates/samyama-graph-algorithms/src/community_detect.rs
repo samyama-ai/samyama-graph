@@ -33,6 +33,7 @@
 use std::collections::HashMap;
 
 use crate::common::{GraphView, NodeId};
+use crate::progress::{NoProgress, Progress, Stopped};
 
 /// A partition: community id per node, in the view's index order.
 pub type Communities = Vec<usize>;
@@ -125,6 +126,32 @@ pub fn modularity(view: &GraphView, communities: &[usize]) -> Option<f64> {
 /// renumbered from zero in order of first appearance so two runs produce
 /// identical labels rather than a relabelling of the same partition.
 pub fn louvain(view: &GraphView, max_passes: usize) -> Communities {
+    louvain_with(view, max_passes, &NoProgress).expect("NoProgress never stops a run")
+}
+
+/// Local-move sweeps Louvain makes per pass, at most; it stops a pass early
+/// once a sweep moves no node.
+const SWEEPS_PER_PASS: usize = 10;
+
+/// Nodes visited between progress reports inside one sweep. A sweep over a
+/// large graph is the long part of a pass, so waiting for it to end before
+/// asking whether to go on would let a cancelled run keep going for seconds.
+const NODES_PER_REPORT: usize = 1024;
+
+/// [`louvain`], reporting progress and stoppable (ALGO-12, #1693).
+///
+/// A step is one local-move sweep; `total` is the most the run can make,
+/// `max_passes` x 10, and a run that converges sooner finishes below it. The
+/// count is reported before the first sweep and after each one, and again
+/// every 1,024 nodes within a sweep without advancing, so a stop is seen
+/// part-way through a sweep. Stopped, it returns [`Stopped`]: a partition
+/// half-way through a pass is not an answer.
+pub fn louvain_with(view: &GraphView, max_passes: usize, progress: &dyn Progress) -> Result<Communities, Stopped> {
+    let total = max_passes.saturating_mul(SWEEPS_PER_PASS);
+    let mut done = 0usize;
+    if !progress.step(done, total) {
+        return Err(Stopped { done, total });
+    }
     let n = view.node_count;
     let adj = adjacency(view);
     let mut node_to_comm: Vec<usize> = (0..n).collect();
@@ -152,9 +179,12 @@ pub fn louvain(view: &GraphView, max_passes: usize) -> Communities {
         // The comment here used to say one sweep, directly above a loop that
         // does ten -- a reader budgeting the cost of a pass would have been out
         // by an order of magnitude.
-        for _sweep in 0..10 {
+        for _sweep in 0..SWEEPS_PER_PASS {
             let mut moved = false;
             for u in 0..cur_n {
+                if u > 0 && u % NODES_PER_REPORT == 0 && !progress.step(done, total) {
+                    return Err(Stopped { done, total });
+                }
                 let cu = comm[u];
                 // Weight from u into each neighbouring community.
                 let mut links: HashMap<usize, f64> = HashMap::new();
@@ -188,6 +218,10 @@ pub fn louvain(view: &GraphView, max_passes: usize) -> Communities {
                     moved = true;
                     improved = true;
                 }
+            }
+            done += 1;
+            if !progress.step(done, total) {
+                return Err(Stopped { done, total });
             }
             if !moved {
                 break;
@@ -243,7 +277,7 @@ pub fn louvain(view: &GraphView, max_passes: usize) -> Communities {
         }
     }
     node_to_comm.copy_from_slice(&level);
-    renumber(&node_to_comm)
+    Ok(renumber(&node_to_comm))
 }
 
 /// Renumber community ids from zero in order of first appearance.

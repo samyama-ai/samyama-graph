@@ -305,6 +305,98 @@ paths:
                           nullable: true
                           example: score
 
+  /api/algorithms/running:
+    get:
+      operationId: listRunningAlgorithms
+      summary: Graph algorithms running now, and how far each has got
+      description: |
+        Every `CALL algo.*` in progress, oldest first (ALGO-12). `phase` says what
+        `done` of `total` counts: `building graph view` counts nodes read into the
+        algorithm's view, `running` counts its own iterations (PageRank) or sweeps
+        (Louvain), and `starting` is before the first report. A call is listed for
+        exactly as long as it runs. Admin role when credentials are configured:
+        every tenant's calls are listed.
+      responses:
+        '200':
+          description: The running algorithm calls
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [running]
+                properties:
+                  running:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, algorithm, started_ms, elapsed_ms, phase, done, total, cancel_requested]
+                      properties:
+                        id:
+                          type: integer
+                          description: Monotonic per process; never reused.
+                        algorithm:
+                          type: string
+                          example: algo.pageRank
+                        started_ms:
+                          type: integer
+                          description: When it started, ms since the Unix epoch.
+                        elapsed_ms:
+                          type: integer
+                        phase:
+                          type: string
+                          enum: [starting, building graph view, running]
+                        done:
+                          type: integer
+                        total:
+                          type: integer
+                        cancel_requested:
+                          type: boolean
+              example:
+                running:
+                  - id: 7
+                    algorithm: algo.louvain
+                    started_ms: 1795000000000
+                    elapsed_ms: 4210
+                    phase: running
+                    done: 3
+                    total: 200
+                    cancel_requested: false
+  /api/algorithms/running/{id}/cancel:
+    post:
+      operationId: cancelRunningAlgorithm
+      summary: Stop one running algorithm call
+      description: |
+        The call stops at its next progress report -- within one view-building
+        batch of 4,096 nodes, one iteration, or 1,024 nodes of a Louvain sweep --
+        and its query fails with `Query cancelled: <algorithm> stopped ...`. The
+        server, the store and every other query carry on. Admin role when
+        credentials are configured.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: An `id` from `GET /api/algorithms/running`.
+          schema:
+            type: integer
+      responses:
+        '202':
+          description: Cancel requested
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, cancel_requested]
+                properties:
+                  id:
+                    type: integer
+                  cancel_requested:
+                    type: boolean
+        '404':
+          description: No algorithm call with that id is running (it never existed or has ended)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/import/csv:
     post:
       operationId: importCsv

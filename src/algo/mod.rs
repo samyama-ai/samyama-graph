@@ -31,7 +31,7 @@ pub use samyama_graph_algorithms::{
     negative_samples, NegativeStrategy,
     articulation_points, bridges, find_cycle, topological_sort, TopoResult,
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius, ranked_opt,
-    louvain, modularity, with_ids,
+    louvain, louvain_with, modularity, with_ids,
     hits, index_of, katz_centrality, personalised_page_rank, ranked_scores, vote_rank,
     all_pairs_hops, bellman_ford, dag_longest_path, transitive_closure, wiener_index,
     biconnected_components, bipartite_sets, dominating_set, global_efficiency,
