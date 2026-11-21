@@ -43,6 +43,7 @@ pub fn projection_columns() -> Vec<String> {
         "bytes",
         "stale",
         "status",
+        "node_properties",
     ]
     .iter()
     .map(|c| c.to_string())
@@ -94,6 +95,16 @@ pub fn projection_record(info: ProjectionInfo, status: &str) -> Record {
     record.bind(
         "status".to_string(),
         Value::Property(PropertyValue::String(status.to_string())),
+    );
+    // What mutate mode has written into it (ALGO-06), by name.
+    record.bind(
+        "node_properties".to_string(),
+        Value::List(
+            info.node_properties
+                .into_iter()
+                .map(|p| Value::Property(PropertyValue::String(p)))
+                .collect(),
+        ),
     );
     record
 }

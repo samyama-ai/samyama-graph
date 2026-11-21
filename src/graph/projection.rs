@@ -37,6 +37,15 @@
 //! The bytes are **reported, not capped**: a memory budget is a later
 //! requirement (ALGO-12). Projections live in memory only and are not written
 //! to disk, so a restart forgets them, as it forgets hierarchy indexes.
+//!
+//! # Mutate mode (ALGO-06)
+//!
+//! `CALL algo.pageRank({graph: 'social', mutateProperty: 'rank'})` keeps the
+//! result **in the projection**, as a node property of the projection alone:
+//! the nodes in the store are not touched. `CALL algo.graph.nodeProperty(
+//! 'social', 'rank')` reads it back. It describes the view it was computed on,
+//! so `REFRESH` and `DROP` discard it with that view. No algorithm reads a
+//! projection's node property as an input yet.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -44,7 +53,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use crate::algo::GraphView;
-use crate::graph::GraphStore;
+use crate::graph::{GraphStore, PropertyValue};
 
 /// Which part of the graph a projection holds.
 ///
@@ -73,6 +82,9 @@ pub struct GraphProjection {
     pub built_at_change: u64,
     /// `view.heap_bytes()`, computed once at build time.
     pub bytes: usize,
+    /// Node properties written by mutate mode, by name, each keyed by node id.
+    /// Empty when built: a rebuild drops what was computed on the old view.
+    pub node_properties: BTreeMap<String, Arc<BTreeMap<u64, PropertyValue>>>,
 }
 
 /// What `SHOW GRAPH PROJECTIONS` reports for one projection.
@@ -87,6 +99,8 @@ pub struct ProjectionInfo {
     /// since it was built. Never false after a change; it can be true after a
     /// write that touched only data outside the projection.
     pub stale: bool,
+    /// The node properties mutate mode has written into it, by name.
+    pub node_properties: Vec<String>,
 }
 
 /// Why a projection statement was refused.
@@ -98,6 +112,14 @@ pub enum ProjectionError {
     NotFound(String),
     /// A name with nothing in it.
     EmptyName,
+    /// A projection node property no mutate has written.
+    NoSuchProperty {
+        projection: String,
+        property: String,
+        available: Vec<String>,
+    },
+    /// A mutate value for a node the projection does not hold.
+    NotInProjection { projection: String, node: u64 },
 }
 
 impl fmt::Display for ProjectionError {
@@ -113,6 +135,25 @@ impl fmt::Display for ProjectionError {
                 "there is no graph projection named `{name}`; SHOW GRAPH PROJECTIONS lists them"
             ),
             ProjectionError::EmptyName => f.write_str("a graph projection needs a non-empty name"),
+            ProjectionError::NoSuchProperty {
+                projection,
+                property,
+                available,
+            } => write!(
+                f,
+                "graph projection `{projection}` has no node property `{property}`; {}",
+                if available.is_empty() {
+                    "none has been written. Run an algorithm on it with `mutateProperty` first"
+                        .to_string()
+                } else {
+                    format!("it has {}", available.join(", "))
+                }
+            ),
+            ProjectionError::NotInProjection { projection, node } => write!(
+                f,
+                "node {node} is not in graph projection `{projection}`, so it cannot hold a \
+                 property there"
+            ),
         }
     }
 }
@@ -204,6 +245,7 @@ impl GraphProjections {
             bytes: view.heap_bytes(),
             view: Arc::new(view),
             built_at_change: store.data_changes(),
+            node_properties: BTreeMap::new(),
         }
     }
 
@@ -215,6 +257,7 @@ impl GraphProjections {
             relationships: projection.view.edge_count(),
             bytes: projection.bytes,
             stale: projection.built_at_change != data_changes,
+            node_properties: projection.node_properties.keys().cloned().collect(),
         }
     }
 
@@ -292,6 +335,74 @@ impl GraphProjections {
         } else {
             Err(ProjectionError::NotFound(name.to_string()))
         }
+    }
+
+    /// Mutate mode: keep `values`, one per node of the projection, as its node
+    /// property `property`, replacing any earlier one of that name. The store's
+    /// nodes are not touched. Returns how many values were kept.
+    ///
+    /// A value for a node the projection does not hold is refused, and nothing
+    /// is kept: the values come from an algorithm run on this projection, so
+    /// such a node means they were computed on a different view.
+    pub fn mutate(
+        &self,
+        name: &str,
+        property: &str,
+        values: BTreeMap<u64, PropertyValue>,
+    ) -> Result<usize, ProjectionError> {
+        let name = Self::checked_name(name)?;
+        let mut entries = self.write();
+        let current = entries
+            .get(name)
+            .ok_or_else(|| ProjectionError::NotFound(name.to_string()))?;
+        if let Some(&node) = values
+            .keys()
+            .find(|id| !current.view.node_to_index.contains_key(id))
+        {
+            return Err(ProjectionError::NotInProjection {
+                projection: name.to_string(),
+                node,
+            });
+        }
+        let count = values.len();
+        // Copy-on-write: a reader holding the old `Arc` keeps what it read.
+        let mut updated = GraphProjection {
+            name: current.name.clone(),
+            spec: current.spec.clone(),
+            view: Arc::clone(&current.view),
+            built_at_change: current.built_at_change,
+            bytes: current.bytes,
+            node_properties: current.node_properties.clone(),
+        };
+        updated
+            .node_properties
+            .insert(property.to_string(), Arc::new(values));
+        entries.insert(name.to_string(), Arc::new(updated));
+        drop(entries);
+        self.changed();
+        Ok(count)
+    }
+
+    /// The node property mutate mode wrote into projection `name`.
+    pub fn node_property(
+        &self,
+        name: &str,
+        property: &str,
+    ) -> Result<Arc<BTreeMap<u64, PropertyValue>>, ProjectionError> {
+        let name = Self::checked_name(name)?;
+        let entries = self.read();
+        let projection = entries
+            .get(name)
+            .ok_or_else(|| ProjectionError::NotFound(name.to_string()))?;
+        projection
+            .node_properties
+            .get(property)
+            .cloned()
+            .ok_or_else(|| ProjectionError::NoSuchProperty {
+                projection: name.to_string(),
+                property: property.to_string(),
+                available: projection.node_properties.keys().cloned().collect(),
+            })
     }
 
     /// The projection under `name`, if any.

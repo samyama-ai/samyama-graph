@@ -4396,6 +4396,56 @@ impl QueryPlanner {
                 )));
             }
             Ok(Box::new(SchemaForLlmOperator::new(token_budget)))
+        } else if let Some(("mutate", bare)) =
+            AlgorithmOperator::unsupported_gds_mode(&call_clause.procedure_name)
+                .map(|(mode, bare)| (if mode.eq_ignore_ascii_case("mutate") { "mutate" } else { "" }, bare))
+        {
+            // GDS's mutate mode (ALGO-06, #2263): `gds.pageRank.mutate('social',
+            // {mutateProperty: 'rank'})`. The first argument is the projection,
+            // as in GDS; it becomes the `graph` key `algo.*` reads. The answer
+            // is GDS's summary row, not the per-node rows `algo.*` streams, so
+            // the name means here what it means there (INT-04).
+            let (graph, config) = match call_clause.arguments.as_slice() {
+                [Expression::Literal(PropertyValue::String(g))] => (g.clone(), Default::default()),
+                [Expression::Literal(PropertyValue::String(g)), Expression::Literal(PropertyValue::Map(m))] => {
+                    (g.clone(), m.clone())
+                }
+                _ => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{}` takes (graphName, {{{}: 'name', ...}}): the graph projection to \
+                         keep the result in, and a literal config map. The same call is \
+                         `algo.{bare}({{{}: 'graphName', {}: 'name'}})`.",
+                        call_clause.procedure_name,
+                        AlgorithmOperator::MUTATE_PROPERTY_KEY,
+                        AlgorithmOperator::GRAPH_KEY,
+                        AlgorithmOperator::MUTATE_PROPERTY_KEY
+                    )))
+                }
+            };
+            if !config.contains_key(AlgorithmOperator::MUTATE_PROPERTY_KEY) {
+                return Err(ExecutionError::bad_argument(format!(
+                    "`{}` needs `{}` in its config: the name to keep the result under",
+                    call_clause.procedure_name,
+                    AlgorithmOperator::MUTATE_PROPERTY_KEY
+                )));
+            }
+            if config.contains_key(AlgorithmOperator::GRAPH_KEY) {
+                return Err(ExecutionError::bad_argument(format!(
+                    "`{}` names its projection in the first argument; drop `{}` from the config",
+                    call_clause.procedure_name,
+                    AlgorithmOperator::GRAPH_KEY
+                )));
+            }
+            let mut config = config;
+            config.insert(AlgorithmOperator::GRAPH_KEY.to_string(), PropertyValue::String(graph));
+            Ok(Box::new(
+                AlgorithmOperator::new(
+                    format!("algo.{bare}"),
+                    vec![Expression::Literal(PropertyValue::Map(config))],
+                )
+                .with_gds_mutate_summary()
+                .with_aliases(&call_clause.yield_items),
+            ))
         } else if let Some((mode, bare)) =
             AlgorithmOperator::unsupported_gds_mode(&call_clause.procedure_name)
         {
@@ -4426,7 +4476,6 @@ impl QueryPlanner {
                 mode,
                 match mode.to_ascii_lowercase().as_str() {
                     "write" => "returns a summary row instead",
-                    "mutate" => "writes them into a graph projection, and a projection here cannot hold a written property yet",
                     _ => "returns a summary instead of the rows",
                 }
             )))

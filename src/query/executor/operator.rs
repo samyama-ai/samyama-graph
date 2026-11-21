@@ -18416,6 +18416,9 @@ pub struct AlgorithmOperator {
     /// for is refused instead of silently ignored. A `Cell` because the view
     /// is handed out from `&self`.
     projection_used: std::cell::Cell<bool>,
+    /// Called as `gds.<name>.mutate`: answer with GDS's one summary row
+    /// rather than the per-node rows (ALGO-06, #2263).
+    gds_mutate_summary: bool,
 }
 
 /// The graph an algorithm runs on: built for this call, or a named projection's.
@@ -18505,7 +18508,14 @@ impl AlgorithmOperator {
 
     pub fn new(name: String, args: Vec<crate::query::ast::Expression>) -> Self {
         Self { name, args, results: Vec::new(), current: 0, executed: false,
-               aliases: Vec::new(), projection_used: std::cell::Cell::new(false) }
+               aliases: Vec::new(), projection_used: std::cell::Cell::new(false),
+               gds_mutate_summary: false }
+    }
+
+    /// Answer as `gds.<name>.mutate` does: one summary row (ALGO-06, #2263).
+    pub fn with_gds_mutate_summary(mut self) -> Self {
+        self.gds_mutate_summary = true;
+        self
     }
 
     /// Record the `YIELD` aliases so the produced records carry them.
@@ -18524,6 +18534,13 @@ impl AlgorithmOperator {
     /// they all bind their own column names and every one of them would have to
     /// remember. A rename at the single point they converge on cannot be
     /// forgotten by the next algorithm added.
+    /// The next result row, if any, moving past it.
+    fn next_result(&mut self) -> Option<Record> {
+        let record = self.results.get(self.current).cloned()?;
+        self.current += 1;
+        Some(record)
+    }
+
     fn apply_yield_aliases(&mut self) {
         if self.aliases.is_empty() {
             return;
@@ -18628,6 +18645,17 @@ impl AlgorithmOperator {
     /// The config key naming a graph projection to run on (ALGO-05, #1681):
     /// `CALL algo.pageRank({graph: 'social'})`.
     pub const GRAPH_KEY: &'static str = "graph";
+
+    /// The config key that asks an algorithm to keep its result in the graph
+    /// projection it ran on, and nowhere else: GDS's mutate mode (ALGO-06,
+    /// #2263). `CALL algo.pageRank({graph: 'social', mutateProperty: 'rank'})`.
+    pub const MUTATE_PROPERTY_KEY: &'static str = "mutateProperty";
+
+    /// The procedure that reads a mutated property back out of a projection:
+    /// `CALL algo.graph.nodeProperty('social', 'rank') YIELD node, value`.
+    /// Not an algorithm, so it is not in the catalogue; matched on the
+    /// canonical name before dispatch.
+    const PROJECTION_NODE_PROPERTY: &'static str = "graph.nodeproperty";
 
     /// Algorithms that cannot run on a projection, and why. A projection keeps
     /// topology and one weight; these read more of the graph than that, or no
@@ -18767,6 +18795,10 @@ impl AlgorithmOperator {
     pub fn call_writes(name: &str, args: &[Expression]) -> bool {
         (Self::procedure_is_mutating(name) && !Self::embedding_streams(name, args))
             || Self::config_has_key(args, Self::WRITE_PROPERTY_KEY)
+            // Mutate changes no data, but it changes a projection that later
+            // queries read, as `REFRESH GRAPH PROJECTION` does, and takes the
+            // same path.
+            || Self::config_has_key(args, Self::MUTATE_PROPERTY_KEY)
     }
 
     /// Whether any literal config map among `args` holds `key`.
@@ -18887,6 +18919,181 @@ impl AlgorithmOperator {
         }
     }
 
+    /// The projection, property and column for a mutate-mode call; `None`
+    /// when it is not one.
+    ///
+    /// Refused before anything runs when it cannot be honoured: a
+    /// `mutateProperty` that is not a non-empty string, no `graph` to keep it
+    /// in (mutate is projection-only, so without one there is nowhere for it
+    /// to go), `writeProperty` alongside it (two modes at once), a GDS
+    /// `.stream` call, and an algorithm with no one value per node.
+    fn mutate_plan(&self) -> ExecutionResult<Option<(String, String, &'static str)>> {
+        if Self::procedure_is_mutating(&self.name) {
+            // fastRP, node2vec and or.solve write the store by design. The key
+            // is allowed for every algorithm, so without this it would be
+            // accepted here and quietly ignored.
+            if Self::config_has_key(&self.args, Self::MUTATE_PROPERTY_KEY) {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{} does not support `{}`: it writes its result to the nodes in the store, \
+                     not into a projection",
+                    self.name,
+                    Self::MUTATE_PROPERTY_KEY
+                )));
+            }
+            return Ok(None);
+        }
+        let config_string = |key: &str| -> ExecutionResult<Option<String>> {
+            let mut found = None;
+            for arg in &self.args {
+                if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                    match m.get(key) {
+                        None => {}
+                        Some(PropertyValue::String(p)) if !p.trim().is_empty() => {
+                            found = Some(p.clone())
+                        }
+                        Some(other) => {
+                            return Err(ExecutionError::bad_argument(format!(
+                                "{}: `{key}` must be a non-empty name, got {other:?}",
+                                self.name
+                            )))
+                        }
+                    }
+                }
+            }
+            Ok(found)
+        };
+        let Some(property) = config_string(Self::MUTATE_PROPERTY_KEY)? else {
+            return Ok(None);
+        };
+        let Some(graph) = config_string(Self::GRAPH_KEY)? else {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: `{}` keeps the result in a graph projection, and no projection is named. \
+                 Add `{}: '<name>'` (CREATE GRAPH PROJECTION makes one), or use `{}` to store \
+                 it on the nodes instead.",
+                self.name,
+                Self::MUTATE_PROPERTY_KEY,
+                Self::GRAPH_KEY,
+                Self::WRITE_PROPERTY_KEY
+            )));
+        };
+        if Self::config_has_key(&self.args, Self::WRITE_PROPERTY_KEY) {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: `{}` and `{}` are two modes; pick one. `{}` stores the result on the nodes, \
+                 `{}` only in the projection.",
+                self.name,
+                Self::WRITE_PROPERTY_KEY,
+                Self::MUTATE_PROPERTY_KEY,
+                Self::WRITE_PROPERTY_KEY,
+                Self::MUTATE_PROPERTY_KEY
+            )));
+        }
+        let lower = self.name.to_lowercase();
+        if lower.starts_with("gds.") && lower.ends_with(&format!(".{}", Self::GDS_STREAMING_MODE)) {
+            return Err(ExecutionError::bad_argument(format!(
+                "`{}` is a stream call, and GDS's stream mode does not mutate. Call \
+                 `gds.{}.mutate` or `algo.{}` with `{}`.",
+                self.name,
+                Self::canonical_name(&self.name),
+                Self::canonical_name(&self.name),
+                Self::MUTATE_PROPERTY_KEY
+            )));
+        }
+        match Self::write_back_column(&Self::canonical_name(&self.name)) {
+            Some(column) => Ok(Some((graph, property, column))),
+            None => Err(ExecutionError::bad_argument(format!(
+                "{} does not support `{}`: it does not return one value per node, so there is \
+                 no value for each node of the projection to hold.",
+                self.name,
+                Self::MUTATE_PROPERTY_KEY
+            ))),
+        }
+    }
+
+    /// Keep each result row's `column` value in projection `graph` as its
+    /// node property `property`. The store is not touched.
+    ///
+    /// The same per-row checks as `write_back`: every row names a node, has
+    /// the column, holds a property value, and no node appears twice.
+    fn mutate(&self, store: &GraphStore, graph: &str, property: &str, column: &str) -> ExecutionResult<()> {
+        let mut values = std::collections::BTreeMap::new();
+        for record in &self.results {
+            let id = match record.get("node") {
+                Some(Value::Node(id, _)) | Some(Value::NodeRef(id)) => *id,
+                _ => {
+                    return Err(ExecutionError::RuntimeError(format!(
+                        "{}: a result row has no `node` to keep `{property}` for",
+                        self.name
+                    )))
+                }
+            };
+            let value = match record.get(column) {
+                Some(Value::Property(p)) => p.clone(),
+                Some(Value::Null) => PropertyValue::Null,
+                None => {
+                    return Err(ExecutionError::RuntimeError(format!(
+                        "{}: a result row has no `{column}` column to keep as `{property}`",
+                        self.name
+                    )))
+                }
+                Some(other) => {
+                    return Err(ExecutionError::RuntimeError(format!(
+                        "{}: `{column}` is not a property value ({other:?}), so it cannot be \
+                         kept as `{property}`",
+                        self.name
+                    )))
+                }
+            };
+            if values.insert(id.as_u64(), value).is_some() {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "{}: node {} appears in two result rows, so `{property}` has no single \
+                     value to hold",
+                    self.name,
+                    id.as_u64()
+                )));
+            }
+        }
+        store
+            .graph_projections
+            .mutate(graph, property, values)
+            .map(|_| ())
+            .map_err(|e| ExecutionError::bad_argument(format!("{}: {e}", self.name)))
+    }
+
+    /// `algo.graph.nodeProperty(graph, property)`: a node property mutate mode
+    /// kept in a projection, one row per node, in node id order. A node
+    /// deleted from the store since has no row: there is nothing to bind.
+    fn execute_projection_node_property(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let call = "algo.graph.nodeProperty";
+        let names: Vec<String> = self
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                Expression::Literal(PropertyValue::String(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        if self.args.len() != 2 || names.len() != 2 {
+            return Err(ExecutionError::bad_argument(format!(
+                "{call} takes (graph, property): the projection's name and the property a \
+                 `{}` call kept in it, both strings",
+                Self::MUTATE_PROPERTY_KEY
+            )));
+        }
+        let values = store
+            .graph_projections
+            .node_property(&names[0], &names[1])
+            .map_err(|e| ExecutionError::bad_argument(format!("{call}: {e}")))?;
+        for (&id, value) in values.iter() {
+            let nid = NodeId::new(id);
+            let Some(node) = store.get_node(nid) else { continue };
+            let mut rec = Record::new();
+            rec.bind("node".to_string(), Value::Node(nid, Box::new(node.clone())));
+            rec.bind("value".to_string(), Value::Property(value.clone()));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
     /// Store each result row's `column` value on its node as `property`.
     ///
     /// Runs after the algorithm has finished, so the result is computed from
@@ -18992,6 +19199,7 @@ impl AlgorithmOperator {
                     .keys()
                     .filter(|k| {
                         k.as_str() != Self::WRITE_PROPERTY_KEY
+                            && k.as_str() != Self::MUTATE_PROPERTY_KEY
                             && k.as_str() != Self::GRAPH_KEY
                             && !allowed.contains(&k.as_str())
                     })
@@ -19011,10 +19219,8 @@ impl AlgorithmOperator {
                         },
                         allowed.join(", "),
                         if unknown.iter().any(|k| k.starts_with("mutate")) {
-                            " `mutate` mode writes the result into a graph projection, and a \
-                             projection cannot hold a written property yet (ALGO-06); \
-                             `writeProperty` stores the result on the nodes instead, and \
-                             `graph` runs the algorithm on a projection."
+                            " Mutate mode's key is `mutateProperty`, with `graph` naming the \
+                             projection to keep the result in."
                         } else {
                             ""
                         },
@@ -22554,6 +22760,22 @@ impl PhysicalOperator for AlgorithmOperator {
                     return Err(ExecutionError::RuntimeError(why.to_string()));
                 }
             }
+            // A mutate-mode call changes a projection later queries read, so
+            // it takes the write path too (ALGO-06, #2263).
+            if let Some((graph, property, _)) = self.mutate_plan()? {
+                return Err(ExecutionError::RuntimeError(format!(
+                    "{} with `{}` requires write access (MutQueryExecutor): it keeps `{property}` \
+                     in graph projection `{graph}`",
+                    self.name,
+                    Self::MUTATE_PROPERTY_KEY
+                )));
+            }
+            if Self::canonical_name(&self.name) == Self::PROJECTION_NODE_PROPERTY {
+                self.execute_projection_node_property(store)?;
+                self.apply_yield_aliases();
+                self.executed = true;
+                return Ok(self.next_result());
+            }
             // Likewise a write-back call (ALGO-06), which `Query::is_write()`
             // routes to the write executor.
             if let Some((property, _)) = self.write_back_plan()? {
@@ -22665,6 +22887,13 @@ impl PhysicalOperator for AlgorithmOperator {
             // Refused before the algorithm runs, so a request that cannot be
             // honoured costs nothing.
             let write_back = self.write_back_plan()?;
+            let mutate = self.mutate_plan()?;
+            if Self::canonical_name(&self.name) == Self::PROJECTION_NODE_PROPERTY {
+                self.execute_projection_node_property(store)?;
+                self.apply_yield_aliases();
+                self.executed = true;
+                return Ok(self.next_result());
+            }
             self.check_projection_support()?;
             match Self::canonical_name(&self.name).as_str() {
                 "or.solve" => self.execute_or_solve(store, tenant_id)?,
@@ -22756,6 +22985,25 @@ impl PhysicalOperator for AlgorithmOperator {
             self.check_projection_used()?;
             if let Some((property, column)) = write_back {
                 self.write_back(store, tenant_id, &property, column)?;
+            }
+            if let Some((graph, property, column)) = mutate {
+                let started = std::time::Instant::now();
+                self.mutate(store, &graph, &property, column)?;
+                if self.gds_mutate_summary {
+                    // GDS's mutate answers with a summary, not the rows: how
+                    // many node properties it wrote and how long that took.
+                    let written = self.results.len() as i64;
+                    let mut summary = Record::new();
+                    summary.bind(
+                        "nodePropertiesWritten".to_string(),
+                        Value::Property(PropertyValue::Integer(written)),
+                    );
+                    summary.bind(
+                        "mutateMillis".to_string(),
+                        Value::Property(PropertyValue::Integer(started.elapsed().as_millis() as i64)),
+                    );
+                    self.results = vec![summary];
+                }
             }
             self.apply_yield_aliases();
             self.executed = true;
