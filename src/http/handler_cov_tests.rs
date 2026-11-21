@@ -81,6 +81,7 @@ fn routes(state: AppState) -> Router {
         .route("/api/enrich/policy", post(set_enrich_policy_handler))
         .route("/api/enrich", post(enrich_handler))
         .route("/api/verify", post(verify_handler))
+        .route("/api/retract", post(retract_handler))
         .route("/api/nlq", post(nlq_handler))
         .route("/api/status", get(status_handler))
         .route("/api/memory", get(memory_handler))

@@ -1,7 +1,7 @@
 //! HTTP handlers for the Visualizer API
 
 use crate::graph::PropertyValue;
-use crate::http::server::{AppState, Subject};
+use crate::http::server::{AppState, AuditEnabled, AuditedChange, Subject};
 use crate::query::Value;
 use axum::http::StatusCode;
 use axum::{
@@ -3831,14 +3831,17 @@ pub async fn set_enrich_policy_handler(Json(cfg): Json<EnrichConfig>) -> impl In
 /// Real properties are untouched until POST /api/verify.
 pub async fn enrich_handler(
     State(state): State<AppState>,
+    audit_enabled: Option<Extension<AuditEnabled>>,
     Json(req): Json<EnrichRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let capture_audit = audit_enabled.is_some();
+    let statement = req.query;
     let cfg = enrich::global_config().read().unwrap().clone();
 
     // Read phase: nothing async is awaited while the store guard or the (non-Send) batch lives.
     let (gaps, ctxs) = {
         let store = state.store.read().await;
-        let batch = match state.engine.execute(&req.query, &*store) {
+        let batch = match state.engine.execute(&statement, &*store) {
             Ok(b) => b,
             Err(e) => {
                 return (
@@ -3893,51 +3896,259 @@ pub async fn enrich_handler(
     // `/api/enrich` is single-graph by design -- `EnrichRequest` carries no graph and
     // the policy is global -- so the tenant is the default one. A per-graph enrich
     // would have to thread the name through here as well.
-    let filled = state
+    let mut node_ids: Vec<crate::graph::NodeId> = outcomes
+        .iter()
+        .map(|outcome| crate::graph::NodeId(outcome.node_id))
+        .collect();
+    node_ids.sort_unstable();
+    node_ids.dedup();
+    let (filled, before, after) = state
         .mutate("default", |store| {
+            let before = capture_audit.then(|| agent_data_audit_snapshot(store, &node_ids));
             let mut filled = 0usize;
             for o in &outcomes {
                 if enrich::quarantine(store, o).is_ok() {
                     filled += 1;
                 }
             }
-            filled
+            let after = capture_audit.then(|| agent_data_audit_snapshot(store, &node_ids));
+            (filled, before, after)
         })
         .await;
 
-    (
+    let mut response = (
         StatusCode::OK,
         Json(json!({ "gaps": gaps.len(), "filled": filled, "declined": declined })),
     )
-        .into_response()
+    .into_response();
+    if let (Some(before), Some(after)) = (before, after) {
+        let (node_ids, edge_ids) = audit_entity_ids(&before, &after);
+        response.extensions_mut().insert(AuditedChange {
+            statement,
+            node_ids,
+            edge_ids,
+            before,
+            after,
+        });
+    }
+    response
 }
 
 /// POST /api/verify — promote pending enrichments on the nodes `query` surfaces, iff each
 /// clears its spec's `trust_floor`; sets the real property, retains provenance.
 pub async fn verify_handler(
     State(state): State<AppState>,
+    audit_enabled: Option<Extension<AuditEnabled>>,
     Json(req): Json<EnrichRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let capture_audit = audit_enabled.is_some();
+    if state.engine.statement_is_write(&req.query).unwrap_or(true) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "verify query must be read-only" })),
+        )
+            .into_response();
+    }
+    if let Some(refusal) = state.writes_refused() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": refusal })),
+        )
+            .into_response();
+    }
     let cfg = enrich::global_config().read().unwrap().clone();
-    let node_ids = {
-        let store = state.store.read().await;
-        let batch = match state.engine.execute(&req.query, &*store) {
-            Ok(b) => b,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": format!("{:?}", e) })),
-                )
-                    .into_response();
-            }
-        };
-        enrich::collect_result_nodes(&batch)
-    };
-    // Single-graph, as `/api/enrich` is.
-    let report = state
-        .mutate("default", |store| enrich::verify(&cfg, store, &node_ids))
+    let statement = req.query;
+    let engine = state.engine.clone();
+    // Select, snapshot and promote under the same writer lock so the audit
+    // record describes exactly the nodes this request changed.
+    let outcome = state
+        .mutate("default", |store| {
+            let batch = engine.execute(&statement, store).map_err(|err| format!("{:?}", err))?;
+            let mut node_ids = enrich::collect_result_nodes(&batch);
+            node_ids.sort_unstable();
+            let before = capture_audit.then(|| agent_data_audit_snapshot(store, &node_ids));
+            let report = enrich::verify(&cfg, store, &node_ids);
+            let after = capture_audit.then(|| agent_data_audit_snapshot(store, &node_ids));
+            Ok::<_, String>((node_ids, report, before, after))
+        })
         .await;
-    (StatusCode::OK, Json(report)).into_response()
+    let (_node_ids, report, before, after) = match outcome {
+        Ok(result) => result,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response();
+        }
+    };
+    let mut response = (StatusCode::OK, Json(report)).into_response();
+    if let (Some(before), Some(after)) = (before, after) {
+        let (node_ids, edge_ids) = audit_entity_ids(&before, &after);
+        response.extensions_mut().insert(AuditedChange {
+            statement,
+            node_ids,
+            edge_ids,
+            before,
+            after,
+        });
+    }
+    response
+}
+
+/// Snapshot the selected nodes and model-generated outgoing subgraph for the
+/// before/after record attached to an agent retraction audit entry.
+fn agent_data_audit_snapshot(
+    store: &crate::graph::GraphStore,
+    roots: &[crate::graph::NodeId],
+) -> serde_json::Value {
+    fn node_snapshot(
+        store: &crate::graph::GraphStore,
+        id: crate::graph::NodeId,
+    ) -> Option<serde_json::Value> {
+        let node = store.get_node(id)?;
+        let labels: BTreeSet<String> = node.labels.iter().map(|label| label.as_str().to_owned()).collect();
+        Some(json!({
+            "id": id.0,
+            "labels": labels,
+            "properties": store.node_properties_merged(id),
+        }))
+    }
+
+    let mut nodes = BTreeMap::<u64, serde_json::Value>::new();
+    let mut edges = BTreeMap::<u64, serde_json::Value>::new();
+    for &root in roots {
+        let agent_state = store.node_properties_merged(root);
+        let generated_edges: Vec<_> = store
+            .get_outgoing_edges(root)
+            .into_iter()
+            .filter(|edge| {
+                store
+                    .edge_properties_merged(edge.id)
+                    .contains_key(enrich::GENERATED_PROPERTY)
+            })
+            .collect();
+        if !agent_state.contains_key(enrich::ENRICHMENT_PROPERTY)
+            && !agent_state.contains_key(enrich::GENERATED_PROPERTY)
+            && generated_edges.is_empty()
+        {
+            continue;
+        }
+        if let Some(node) = node_snapshot(store, root) {
+            nodes.insert(root.0, node);
+        }
+        for edge in generated_edges {
+            edges.insert(
+                edge.id.0,
+                json!({
+                    "id": edge.id.0,
+                    "source": edge.source.0,
+                    "target": edge.target.0,
+                    "type": edge.edge_type.as_str(),
+                    "properties": store.edge_properties_merged(edge.id),
+                }),
+            );
+            if let Some(target) = node_snapshot(store, edge.target) {
+                nodes.insert(edge.target.0, target);
+            }
+        }
+    }
+    json!({
+        "nodes": nodes.into_values().collect::<Vec<_>>(),
+        "edges": edges.into_values().collect::<Vec<_>>(),
+    })
+}
+
+/// Explicit IDs for every node and edge represented on either side of an
+/// agent-change snapshot. Taking the union preserves IDs for entities that
+/// were created or removed by the operation.
+fn audit_entity_ids(
+    before: &serde_json::Value,
+    after: &serde_json::Value,
+) -> (Vec<u64>, Vec<u64>) {
+    fn ids<'a>(snapshot: &'a serde_json::Value, key: &str) -> impl Iterator<Item = u64> + 'a {
+        snapshot
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|entity| entity.get("id").and_then(serde_json::Value::as_u64))
+    }
+
+    let node_ids = ids(before, "nodes")
+        .chain(ids(after, "nodes"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let edge_ids = ids(before, "edges")
+        .chain(ids(after, "edges"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    (node_ids, edge_ids)
+}
+
+/// POST /api/retract — withdraw only model-generated properties and edges
+/// from nodes selected by a read-only Cypher query. The audit entry includes
+/// the selection statement, affected node IDs, and entity snapshots on both
+/// sides of the operation.
+pub async fn retract_handler(
+    State(state): State<AppState>,
+    audit_enabled: Option<Extension<AuditEnabled>>,
+    Json(req): Json<EnrichRequest>,
+) -> axum::response::Response {
+    let capture_audit = audit_enabled.is_some();
+    if state.engine.statement_is_write(&req.query).unwrap_or(true) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "retract query must be read-only" })),
+        )
+            .into_response();
+    }
+    if let Some(refusal) = state.writes_refused() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": refusal })),
+        )
+            .into_response();
+    }
+
+    let statement = req.query;
+    let engine = state.engine.clone();
+    // Select and retract under one writer lock. Otherwise a concurrent update
+    // between the selection read and retract could change what this request
+    // withdraws, while the audit entry describes the earlier selection.
+    let outcome = state
+        .mutate("default", |store| {
+            let batch = engine.execute(&statement, store).map_err(|err| format!("{:?}", err))?;
+            let mut node_ids = enrich::collect_result_nodes(&batch);
+            node_ids.sort_unstable();
+            let before = capture_audit.then(|| agent_data_audit_snapshot(store, &node_ids));
+            let report = enrich::retract(store, &node_ids);
+            let after = capture_audit.then(|| agent_data_audit_snapshot(store, &node_ids));
+            Ok::<_, String>((node_ids, report, before, after))
+        })
+        .await;
+    let (node_ids, report, before, after) = match outcome {
+        Ok(result) => result,
+        Err(err) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": err }))).into_response();
+        }
+    };
+    let ids_for_audit: Vec<u64> = node_ids.iter().map(|id| id.0).collect();
+
+    let mut response = (
+        StatusCode::OK,
+        Json(json!({ "selected_node_ids": ids_for_audit.clone(), "report": report })),
+    )
+        .into_response();
+    if let (Some(before), Some(after)) = (before, after) {
+        let (node_ids, edge_ids) = audit_entity_ids(&before, &after);
+        response.extensions_mut().insert(AuditedChange {
+            statement,
+            node_ids,
+            edge_ids,
+            before,
+            after,
+        });
+    }
+    response
 }
 
 /// Seconds to milliseconds, for `llm_latency_ms`.
