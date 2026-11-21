@@ -87,6 +87,20 @@ pub struct PlanDiagnostics {
 thread_local! {
     /// Thread-local storage for planner diagnostics, consumed by EXPLAIN
     pub static PLAN_DIAGNOSTICS: RefCell<Option<PlanDiagnostics>> = RefCell::new(None);
+    /// How many plans `CYPHER plan=N` can force for the whole query being
+    /// planned (LANG-06, #2252): the fewest candidates any of its MATCH
+    /// clauses has, since `plan=N` picks the N-th of each. `None` when the
+    /// cost-based planner planned nothing, so there is nothing to force.
+    ///
+    /// `PLAN_DIAGNOSTICS` describes one MATCH -- the last one planned -- so on
+    /// a query with several its count is not the range a harness may loop
+    /// `plan=1..` over. This is.
+    pub static FORCEABLE_PLANS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Fold one MATCH clause's plan count into [`FORCEABLE_PLANS`].
+fn note_forceable_plans(n: usize) {
+    FORCEABLE_PLANS.with(|f| f.set(Some(f.get().map_or(n, |m| m.min(n)))));
 }
 
 /// Recursively extract aggregate function calls (sum, avg, count, min, max, collect)
@@ -908,6 +922,7 @@ fn plan_return_projection(
 /// `every_listed_procedure_plans` keeps the list honest.
 pub const KNOWN_DB_PROCEDURES: &[&str] = &[
     "db.checkIntegrity",
+    "db.hybrid.search",
     "db.index.fulltext.queryNodes",
     "db.index.point.nearest",
     "db.index.vector.queryNodes",
@@ -1314,6 +1329,7 @@ impl QueryPlanner {
         // Diagnostics are left for EXPLAIN to take; a query that ran without
         // EXPLAIN would otherwise leave its candidates for the next one to print.
         PLAN_DIAGNOSTICS.with(|d| d.borrow_mut().take());
+        FORCEABLE_PLANS.with(|f| f.set(None));
         let options = &query.plan_options;
         *self.forcing.lock().unwrap() = Forcing {
             graph_native: match options.planner {
@@ -4096,6 +4112,19 @@ impl QueryPlanner {
             )?));
         }
 
+        // BM25 + vector + local expansion, fused and reranked (#1279).
+        if super::hybrid_ops::is_procedure(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::hybrid_ops::HybridSearchOperator::new(
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
+        }
+
         // Similarity graphs from a vector index (#1979).
         if let Some(procedure) = super::vector_ops::VectorProcedure::from_name(&call_clause.procedure_name) {
             let yields: Vec<(String, Option<String>)> = call_clause
@@ -4271,6 +4300,9 @@ impl QueryPlanner {
                 Some((scope, subtree)) => (Some(scope), Some(subtree)),
                 None => (None, None),
             };
+            // The width each strategy is priced at is the one the search
+            // would use: the query's, else the index's, else `max(2k, 64)`,
+            // as `VectorIndex::search_ef` picks it (#1999).
             let plan = if let Some(subtree) = subtree {
                 let filter_selectivity = vector_filter
                     .as_ref()
@@ -4285,7 +4317,7 @@ impl QueryPlanner {
                         ));
                     }
                     Some(crate::vector::strategy::FilterPlan::estimate_enumerated(
-                        index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, subtree, filter_selectivity,
+                        index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or((2 * k).max(64)), params.m, subtree, filter_selectivity,
                     ))
                 })
             } else {
@@ -4300,7 +4332,7 @@ impl QueryPlanner {
                         ));
                     }
                     Some(crate::vector::strategy::FilterPlan::estimate(
-                        index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or(64), params.m, selectivity,
+                        index.len(), index.dimensions(), k, ef.or(params.ef).unwrap_or((2 * k).max(64)), params.m, selectivity,
                     ))
                 })
             };
@@ -4828,6 +4860,7 @@ impl QueryPlanner {
             // plan with itself and could never fail.
             if let Some(why) = Self::not_enumerable(match_clause) {
                 if n == 1 {
+                    note_forceable_plans(1);
                     return self.plan_match(match_clause, where_clause, store);
                 }
                 return Err(ExecutionError::PlanningError(format!(
@@ -4835,19 +4868,37 @@ impl QueryPlanner {
                      cost-based enumerator does not plan {why}"
                 )));
             }
-            return self.plan_match_native(match_clause, where_clause, store, n - 1);
+            let plan = self.plan_match_native(match_clause, where_clause, store, n - 1)?;
+            Self::note_native_plan_count();
+            return Ok(plan);
         }
         if graph_native {
             match self.plan_match_native(match_clause, where_clause, store, 0) {
-                Ok(plan) => Ok(plan),
+                Ok(plan) => {
+                    Self::note_native_plan_count();
+                    Ok(plan)
+                }
                 Err(_) => {
                     // Fallback to legacy planner for patterns the graph-native
                     // planner can't handle (e.g., no labels, variable-length paths)
+                    //
+                    // `plan=1` takes the same fallback for a pattern the
+                    // enumerator does not plan, so that MATCH has one plan.
+                    // Any other refusal fails `plan=1` too: it has none.
+                    note_forceable_plans(usize::from(Self::not_enumerable(match_clause).is_some()));
                     self.plan_match(match_clause, where_clause, store)
                 }
             }
         } else {
             self.plan_match(match_clause, where_clause, store)
+        }
+    }
+
+    /// Fold the candidate count of the MATCH `plan_match_native` just planned
+    /// into [`FORCEABLE_PLANS`]; it left that count in `PLAN_DIAGNOSTICS`.
+    fn note_native_plan_count() {
+        if let Some(n) = PLAN_DIAGNOSTICS.with(|d| d.borrow().as_ref().map(|d| d.candidates_evaluated)) {
+            note_forceable_plans(n);
         }
     }
 
