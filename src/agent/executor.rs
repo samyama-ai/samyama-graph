@@ -2,28 +2,36 @@
 //! one `(:Question)-[:USED_TOOL]->(:Tool)` edge per call with timing and
 //! cost telemetry. The same Question node is reused across runs sharing
 //! the same prompt (qid = sha256(prompt) prefix).
+//!
+//! The telemetry is written through [`PersistedWriter`], under the tenant the
+//! executor was built for, as one transaction per run (#2241). It used to be
+//! written straight into the `GraphStore`, which never reached disk on its own
+//! and could be saved later by an unrelated write, under that write's tenant.
 
 use crate::agent::planner::{PlanRunResult, ToolCall, ToolCallRecord, ToolPlan};
 use crate::agent::{AgentError, AgentResult, Tool};
-use crate::graph::{GraphStore, Label, NodeId, PropertyValue};
+use crate::graph::{GraphStore, Label, NodeId, PropertyMap, PropertyValue};
+use crate::persistence::PersistedWriter;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::RwLock;
 
-/// Owns the registered tools + a graph handle for telemetry writes.
+/// Owns the registered tools + a writer for telemetry.
 pub struct PlanExecutor {
     tools: HashMap<String, Arc<dyn Tool>>,
-    store: Arc<RwLock<GraphStore>>,
+    writer: PersistedWriter,
+    /// Whose telemetry this is: the tenant its rows persist under.
+    tenant: String,
 }
 
 impl PlanExecutor {
     pub fn new(
         tools: HashMap<String, Arc<dyn Tool>>,
-        store: Arc<RwLock<GraphStore>>,
+        writer: PersistedWriter,
+        tenant: impl Into<String>,
     ) -> Self {
-        Self { tools, store }
+        Self { tools, writer, tenant: tenant.into() }
     }
 
     /// Stable identifier for a question — sha256 prefix, hex-encoded.
@@ -34,7 +42,8 @@ impl PlanExecutor {
 
     /// Execute a plan. Each parallel group runs concurrently; groups
     /// run sequentially. After execution, telemetry edges are written
-    /// in plan order under a single write lock.
+    /// in plan order as one persisted write; if that write does not reach
+    /// disk, the run is reported as an error.
     pub async fn execute(
         &self,
         prompt: &str,
@@ -69,8 +78,13 @@ impl PlanExecutor {
             .collect();
         let total_token_cost: u64 = records.iter().map(|r| r.token_cost).sum();
 
-        // Write telemetry. Holds a single write lock for atomicity within a run.
-        write_telemetry(&self.store, &qid, prompt, &records).await?;
+        // One write for the whole run: it persists, or rolls back, as a unit.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let tenant = self.tenant.as_str();
+        self.writer
+            .write(tenant, |store| write_telemetry(store, tenant, &qid, prompt, &records, now_ms))
+            .await
+            .map_err(|e| AgentError::ExecutionError(format!("telemetry was not recorded: {e}")))?;
 
         Ok(PlanRunResult {
             question_id: qid,
@@ -145,64 +159,69 @@ fn estimate_tokens(args: &serde_json::Value, result: Option<&serde_json::Value>)
     ((bytes as f64) / 4.0).ceil() as u64
 }
 
-async fn write_telemetry(
-    store: &RwLock<GraphStore>,
+/// The rows one run adds. Runs inside [`PersistedWriter::write`], so it uses
+/// only journalled writes and admits each node before creating it.
+fn write_telemetry(
+    store: &mut GraphStore,
+    tenant: &str,
     qid: &str,
     prompt: &str,
     records: &[ToolCallRecord],
-) -> AgentResult<()> {
-    let mut guard = store.write().await;
-
+    now_ms: i64,
+) -> Result<(), String> {
     // Find-or-create Question node by qid.
-    let q_node = find_node_by_property(&guard, "Question", "qid", qid)
-        .unwrap_or_else(|| {
-            let nid = guard.create_node("Question");
-            if let Some(node) = guard.get_node_mut(nid) {
-                node.set_property("qid", qid);
-                node.set_property("text", prompt);
-            }
-            nid
-        });
+    let q_node = match find_node_by_property(store, "Question", "qid", qid) {
+        Some(nid) => nid,
+        None => create_node(store, tenant, "Question", &[("qid", qid), ("text", prompt)])?,
+    };
 
     // Find-or-create one Tool node per distinct tool referenced.
     let mut tool_nodes: HashMap<String, NodeId> = HashMap::new();
     for rec in records {
         if tool_nodes.contains_key(&rec.tool) { continue; }
-        let nid = find_node_by_property(&guard, "Tool", "tid", &rec.tool)
-            .unwrap_or_else(|| {
-                let nid = guard.create_node("Tool");
-                if let Some(node) = guard.get_node_mut(nid) {
-                    node.set_property("tid", rec.tool.as_str());
-                }
-                nid
-            });
+        let nid = match find_node_by_property(store, "Tool", "tid", &rec.tool) {
+            Some(nid) => nid,
+            None => create_node(store, tenant, "Tool", &[("tid", rec.tool.as_str())])?,
+        };
         tool_nodes.insert(rec.tool.clone(), nid);
     }
 
     // Append one USED_TOOL edge per call, in plan order.
-    let now_ms = chrono::Utc::now().timestamp_millis();
     for (slot, rec) in records.iter().enumerate() {
         let tnode = tool_nodes[&rec.tool];
-        let eid = guard
-            .create_edge(q_node, tnode, "USED_TOOL")
-            .map_err(|e| AgentError::ExecutionError(format!("create_edge: {e}")))?;
-        guard.set_edge_property(eid, "latency_ms", rec.latency_ms as i64)
-            .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
-        guard.set_edge_property(eid, "token_cost", rec.token_cost as i64)
-            .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
-        guard.set_edge_property(eid, "hit_rate", rec.hit_rate)
-            .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
-        guard.set_edge_property(eid, "slot", slot as i64)
-            .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
-        guard.set_edge_property(eid, "ts_ms", now_ms)
-            .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
+        let mut props = PropertyMap::new();
+        props.insert("latency_ms".into(), PropertyValue::Integer(rec.latency_ms as i64));
+        props.insert("token_cost".into(), PropertyValue::Integer(rec.token_cost as i64));
+        props.insert("hit_rate".into(), PropertyValue::Float(rec.hit_rate));
+        props.insert("slot".into(), PropertyValue::Integer(slot as i64));
+        props.insert("ts_ms".into(), PropertyValue::Integer(now_ms));
         if let Some(err) = &rec.error {
-            guard.set_edge_property(eid, "error", err.as_str())
-                .map_err(|e| AgentError::ExecutionError(format!("set_edge_property: {e}")))?;
+            props.insert("error".into(), PropertyValue::String(err.clone()));
         }
+        store
+            .create_edge_with_properties(q_node, tnode, "USED_TOOL", props)
+            .map_err(|e| format!("create_edge: {e}"))?;
     }
 
     Ok(())
+}
+
+/// A node with string properties, admitted against the tenant's quota first:
+/// `create_node*` cannot refuse, so the check is the caller's.
+fn create_node(
+    store: &mut GraphStore,
+    tenant: &str,
+    label: &str,
+    properties: &[(&str, &str)],
+) -> Result<NodeId, String> {
+    store.admit_node().map_err(|e| format!("create_node: {e}"))?;
+    let properties: PropertyMap = properties
+        .iter()
+        .map(|(k, v)| (k.to_string(), PropertyValue::String(v.to_string())))
+        .collect();
+    store
+        .try_create_node_with_properties(tenant, vec![Label::new(label)], properties)
+        .map_err(|e| format!("create_node: {e}"))
 }
 
 fn find_node_by_property(
@@ -234,6 +253,7 @@ fn hex_prefix(bytes: &[u8], n_chars: usize) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::sync::RwLock;
 
     #[test]
     fn question_id_is_stable() {
@@ -316,7 +336,8 @@ mod tests {
         tools.insert("echo".into(), Arc::new(Echo));
         tools.insert("fails".into(), Arc::new(Fails));
         let store = Arc::new(RwLock::new(GraphStore::new()));
-        (PlanExecutor::new(tools, store.clone()), store)
+        let writer = PersistedWriter::in_memory(store.clone());
+        (PlanExecutor::new(tools, writer, "default"), store)
     }
 
     fn call(tool: &str, parallel: bool) -> ToolCall {

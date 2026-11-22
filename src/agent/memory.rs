@@ -1,6 +1,7 @@
 //! Graph-native decision trace primitives for agent memory (#2099).
 
 use crate::graph::{EdgeType, GraphStore, Label, NodeId, PropertyValue};
+use crate::persistence::PersistedWriter;
 
 /// `AgentDecision` is agent memory, so it belongs in the single memory label
 /// list (#2242) once that exists -- export exclusion and the publish gate read
@@ -51,17 +52,28 @@ pub struct DecisionInput<'a> {
 
 /// Record one decision and its causal/evidence edges in the graph.
 ///
-/// `tenant` names the tenant whose index events this write publishes under; it
-/// is not where the rows persist, because nothing here persists them yet. A
-/// decision trace does not reach WAL or RocksDB until this moves onto the
-/// shared persisted-write helper (#2241), so today it is lost on restart or
-/// saved by whichever unrelated write happens to drain the log next.
+/// Written through `writer` as one transaction under `tenant` (#2241): the
+/// rows persist under that tenant, the same tenant names the index events
+/// they publish, and the decision node and its edges land together or not at
+/// all. A failure part-way -- an edge that cannot be created, a write that
+/// does not reach disk -- leaves nothing behind.
+pub async fn record_decision(
+    writer: &PersistedWriter,
+    tenant: &str,
+    input: DecisionInput<'_>,
+) -> Result<DecisionStep, String> {
+    writer
+        .write(tenant, |store| record_decision_in(store, tenant, input))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// The writes of [`record_decision`], run inside its transaction.
 ///
-/// Inputs are checked before the first node is created. That covers a missing
-/// evidence node and a parent in another trace; it does not make the whole
-/// record atomic, since an edge that fails mid-loop leaves the node and the
-/// edges before it in the store.
-pub fn record_decision(
+/// Inputs are checked before the first node is created, so a missing evidence
+/// node or a parent in another trace is refused without writing anything; the
+/// transaction is what undoes a failure after that point.
+fn record_decision_in(
     store: &mut GraphStore,
     tenant: &str,
     input: DecisionInput<'_>,
@@ -108,6 +120,9 @@ pub fn record_decision(
         .map(|step| step.step_order)
         .max()
         .map_or(0, |last| last.saturating_add(1));
+    store
+        .admit_node()
+        .map_err(|error| format!("could not store decision: {error}"))?;
     let node_id = store.create_node(DECISION_LABEL);
     let fields = [
         ("session_id", PropertyValue::String(session_id.to_owned())),
@@ -229,7 +244,7 @@ mod tests {
     #[test]
     fn the_tenant_argument_reaches_the_index_event() {
         let (mut store, mut rx) = GraphStore::with_async_indexing();
-        record_decision(
+        record_decision_in(
             &mut store,
             "tenant-b",
             DecisionInput {
@@ -258,7 +273,7 @@ mod tests {
     fn records_and_inspects_a_causal_trace_with_evidence() {
         let mut store = GraphStore::new();
         let evidence = store.create_node("Observation");
-        let first = record_decision(
+        let first = record_decision_in(
             &mut store,
             "default",
             DecisionInput {
@@ -272,7 +287,7 @@ mod tests {
             },
         )
         .unwrap();
-        let second = record_decision(
+        let second = record_decision_in(
             &mut store,
             "default",
             DecisionInput {
@@ -301,7 +316,7 @@ mod tests {
     #[test]
     fn refuses_missing_evidence_and_cross_trace_parents_without_mutating() {
         let mut store = GraphStore::new();
-        let parent = record_decision(
+        let parent = record_decision_in(
             &mut store,
             "default",
             DecisionInput {
@@ -316,7 +331,7 @@ mod tests {
         )
         .unwrap();
         let before = store.node_count();
-        assert!(record_decision(
+        assert!(record_decision_in(
             &mut store,
             "default",
             DecisionInput {
@@ -331,7 +346,7 @@ mod tests {
         )
         .unwrap_err()
         .contains("evidence node"));
-        assert!(record_decision(
+        assert!(record_decision_in(
             &mut store,
             "default",
             DecisionInput {
@@ -349,10 +364,56 @@ mod tests {
         assert_eq!(store.node_count(), before);
     }
 
+    #[tokio::test]
+    async fn record_decision_writes_through_the_writer_as_one_transaction() {
+        let store = std::sync::Arc::new(tokio::sync::RwLock::new(GraphStore::new()));
+        let writer = PersistedWriter::in_memory(store.clone());
+        let step = record_decision(
+            &writer,
+            "default",
+            DecisionInput {
+                session_id: "session-a",
+                trace_id: Some("trace-a"),
+                parent_step_id: None,
+                action: "observe",
+                rationale: "first step",
+                evidence_node_ids: &[],
+                outcome: "done",
+            },
+        )
+        .await
+        .unwrap();
+        let g = store.read().await;
+        assert!(
+            g.session_transaction_version().is_none(),
+            "the transaction was left open"
+        );
+        assert_eq!(inspect_trace(&g, "trace-a").steps, vec![step]);
+        drop(g);
+
+        let err = record_decision(
+            &writer,
+            "default",
+            DecisionInput {
+                session_id: "session-a",
+                trace_id: Some("trace-a"),
+                parent_step_id: None,
+                action: "answer",
+                rationale: "missing evidence",
+                evidence_node_ids: &[NodeId::new(999_999)],
+                outcome: "done",
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("evidence node"), "{err}");
+        assert_eq!(store.read().await.node_count(), 1);
+    }
+
     #[test]
     fn creates_a_unique_trace_when_none_is_supplied() {
         let mut store = GraphStore::new();
-        let step = record_decision(
+        let step = record_decision_in(
             &mut store,
             "default",
             DecisionInput {

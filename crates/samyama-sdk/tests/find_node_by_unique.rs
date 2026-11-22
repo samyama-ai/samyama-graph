@@ -112,3 +112,24 @@ async fn the_remote_client_finds_a_node_by_its_key() {
         .await
         .is_err());
 }
+
+/// Another graph name is refused, as `query` refuses it (#2139). It used to be
+/// ignored, so asking `analytics` for a key answered from `default`.
+#[tokio::test]
+async fn the_embedded_client_refuses_a_graph_it_does_not_hold() {
+    let client = EmbeddedClient::new();
+    for q in SETUP {
+        client.query("default", q).await.expect(q);
+    }
+    let err = client
+        .find_node_by_unique("analytics", "Acct", "krid", 1i64)
+        .await
+        .expect_err("a key that exists in `default` was answered for `analytics`");
+    assert!(err.to_string().contains("'analytics'"), "{err}");
+    // The same key under the graph it is in is still found.
+    assert!(client
+        .find_node_by_unique("default", "Acct", "krid", 1i64)
+        .await
+        .unwrap()
+        .is_some());
+}

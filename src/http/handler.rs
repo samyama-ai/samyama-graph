@@ -58,6 +58,57 @@ pub struct QueryRequest {
     /// before anything runs.
     #[serde(default)]
     pub read_only: bool,
+    /// Return `snapshot_hash`, the content hash of the graph the statement saw
+    /// (TRUST-06, #1706). Opt-in: the hash is one pass over the graph the first
+    /// time after a write, so it is computed only for a caller that asks.
+    #[serde(default)]
+    pub include_snapshot_hash: bool,
+    /// `CYPHER plan=N` as a body field (LANG-06, #2252): run the N-th
+    /// candidate plan of each MATCH. Exactly as if the query began with
+    /// `CYPHER plan=N`, so a plan the query does not have is refused, never
+    /// run as plan 1.
+    ///
+    /// The field used to be absent, and serde dropped it: a `plan` key came
+    /// back 200 with the default plan, which reads exactly like a forced plan
+    /// that happened to equal it.
+    #[serde(default)]
+    pub plan: Option<usize>,
+    /// `CYPHER planner=…` as a body field: `cost` or `legacy` (#2252).
+    #[serde(default)]
+    pub planner: Option<String>,
+    /// `CYPHER runtime=…` as a body field: `volcano`, the one runtime (#2252).
+    #[serde(default)]
+    pub runtime: Option<String>,
+}
+
+/// Fold the body's `plan`, `planner` and `runtime` fields into the query
+/// text as a `CYPHER` prefix (#2252), so they are checked by the same code
+/// as the prefix and cannot mean anything it does not.
+///
+/// A value is spliced into the statement, so it must be the shape an option
+/// value is (letters, digits, `_`, `-`, `.`); anything else is refused here
+/// rather than parsed as Cypher.
+fn apply_plan_fields(payload: &mut QueryRequest) -> Result<(), String> {
+    let mut opts = Vec::new();
+    for (key, value) in [("planner", &payload.planner), ("runtime", &payload.runtime)] {
+        if let Some(v) = value {
+            let shaped = !v.is_empty()
+                && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+            if !shaped {
+                return Err(format!(
+                    "`{key}` must be a bare word such as \"cost\"; got {v:?}"
+                ));
+            }
+            opts.push(format!("{key}={v}"));
+        }
+    }
+    if let Some(n) = payload.plan {
+        opts.push(format!("plan={n}"));
+    }
+    if !opts.is_empty() {
+        payload.query = format!("CYPHER {} {}", opts.join(" "), payload.query);
+    }
+    Ok(())
 }
 
 /// The request's parameters as bound values, or the 400 the caller gets.
@@ -504,6 +555,14 @@ pub struct QueryResponse {
     /// CALL subquery).
     #[serde(skip_serializing_if = "Option::is_none")]
     plan_hash: Option<String>,
+    /// Content hash of the graph the statement saw, `sha256:<hex>` (TRUST-06,
+    /// #1706), when the request set `include_snapshot_hash`. The same value
+    /// `snapshot export` reports for the same data, and the same after a
+    /// restart, because it is computed from the data, not from a counter.
+    /// Taken while the statement's lock is still held, so it is the data this
+    /// result was computed against.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    snapshot_hash: Option<String>,
     /// What this statement cost (#2079, COST-06).
     stats: QueryStats,
 }
@@ -591,11 +650,20 @@ pub async fn query_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
     headers: axum::http::HeaderMap,
-    Json(payload): Json<QueryRequest>,
+    Json(mut payload): Json<QueryRequest>,
 ) -> axum::response::Response {
     // The graph is in the body, which the request layer never reads; name it
     // on the request's span here so every event below carries it (#2076).
     tracing::Span::current().record("tenant", crate::logging::loggable_name(&payload.graph));
+    // Before anything reads the statement: authorization, the read-only check
+    // and the audit hash all see the query that runs (#2252).
+    if let Err(e) = apply_plan_fields(&mut payload) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e, "code": crate::query::error_code::BAD_ARGUMENT })),
+        )
+            .into_response();
+    }
     // What the audit layer cannot see from outside: it never reads the body,
     // so the statement's kind, graph and hash travel back on the response
     // (#2081). A statement that does not parse counts as a write, as on RESP.
@@ -706,6 +774,8 @@ async fn run_query(
     }
 
     let snapshot_version: u64;
+    let snapshot_hash: Option<String>;
+    let want_hash = payload.include_snapshot_hash;
     let mut stats = QueryStats { is_write, ..QueryStats::default() };
     let asked = std::time::Instant::now();
     let (result, full_props) = if is_write {
@@ -727,10 +797,11 @@ async fn run_query(
                     .as_ref()
                     .map(|b| merged_node_properties(&b.records, store))
                     .unwrap_or_default();
-                (result, store.current_version, props)
+                let hash = want_hash.then(|| crate::snapshot::content_hash::cached_content_hash(store));
+                (result, (store.current_version, hash), props)
             })
             .await;
-        snapshot_version = version;
+        (snapshot_version, snapshot_hash) = version;
         (result, props)
     } else {
         let store_guard = {
@@ -774,6 +845,7 @@ async fn run_query(
         // version this result was not computed against, which is worse than
         // no provenance at all.
         snapshot_version = store_guard.current_version;
+        snapshot_hash = want_hash.then(|| crate::snapshot::content_hash::cached_content_hash(&store_guard));
         let props = result
             .as_ref()
             .map(|b| merged_node_properties(&b.records, &store_guard))
@@ -781,7 +853,7 @@ async fn run_query(
         (result, props)
     };
 
-    render_query_result(result, &full_props, served_from_cache, snapshot_version, stats)
+    render_query_result(result, &full_props, served_from_cache, snapshot_version, snapshot_hash, stats)
 }
 
 /// The media type a client sends in `Accept` to ask for a streamed result.
@@ -907,6 +979,7 @@ async fn stream_query(
     let time_limit = state.query_time_limit(&payload.graph);
     let runtime = tokio::runtime::Handle::current();
     let stall = stream_stall_budget();
+    let want_hash = payload.include_snapshot_hash;
     let query = payload.query;
     // A blocking thread inherits neither the caller's span nor its subscriber;
     // carry both across, so a slow streamed query is logged under its request
@@ -930,12 +1003,19 @@ async fn stream_query(
             }
         };
         let snapshot_version = guard.current_version;
+        // Opt-in, as on the buffered path (#1706); computed under the same read
+        // lock the rows are streamed from.
+        let snapshot_hash = want_hash.then(|| crate::snapshot::content_hash::cached_content_hash(&guard));
         let header = |columns: &[String]| {
-            let mut line = serde_json::to_vec(&json!({
+            let mut head = json!({
                 "columns": columns,
                 "snapshot_version": snapshot_version,
                 "engine_version": crate::VERSION,
-            }))
+            });
+            if let Some(h) = &snapshot_hash {
+                head["snapshot_hash"] = json!(h);
+            }
+            let mut line = serde_json::to_vec(&head)
             .unwrap_or_default();
             line.push(b'\n');
             line
@@ -1082,7 +1162,11 @@ async fn query_in_transaction(
         .map(|b| merged_node_properties(&b.records, store))
         .unwrap_or_default();
     let version = store.current_version;
-    render_query_result(result, &props, false, version, stats)
+    // Inside a transaction: the data this transaction sees, uncommitted writes included.
+    let hash = payload
+        .include_snapshot_hash
+        .then(|| crate::snapshot::content_hash::cached_content_hash(store));
+    render_query_result(result, &props, false, version, hash, stats)
 }
 
 /// One result row as JSON, in column order.
@@ -1223,6 +1307,7 @@ fn render_query_result(
     full_props: &HashMap<u64, HashMap<String, PropertyValue>>,
     served_from_cache: bool,
     snapshot_version: u64,
+    snapshot_hash: Option<String>,
     stats: QueryStats,
 ) -> axum::response::Response {
     match result {
@@ -1263,6 +1348,7 @@ fn render_query_result(
                 notifications: crate::query::executor::operator::notifications::take(),
                 snapshot_version,
                 plan_hash: batch.plan_hash.map(|h| format!("{h:016x}")),
+                snapshot_hash,
                 stats,
             })
             .into_response()
@@ -4407,6 +4493,67 @@ mod tests {
             Some(&PropertyValue::String("p0".to_string()))
         );
         assert_eq!(merged.get("age"), Some(&PropertyValue::Integer(0)));
+    }
+
+    /// A state with an empty store and nothing else, for `snapshot_hash`.
+    fn bare_state() -> AppState {
+        AppState {
+            store: Arc::new(RwLock::new(GraphStore::new())),
+            engine: Arc::new(QueryEngine::new()),
+            data_path: None,
+            tenant_manager: None,
+            embed_pipeline: None,
+            embed_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            persistence: None,
+            snapshot_key: None,
+            transactions: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_hash_is_returned_when_asked_and_names_the_data() {
+        // TRUST-06 (#1706): engine version, plan hash and a content hash of the
+        // snapshot, the last on request.
+        let state = bare_state();
+        let store = Arc::clone(&state.store);
+        let app = Router::new()
+            .route("/api/query", axum::routing::post(query_handler))
+            .with_state(state);
+        let hash_of = |s: &GraphStore| crate::snapshot::content_hash::content_hash(s);
+
+        let (status, j) = post_query(app.clone(), r#"{"query":"CREATE (:T {n: 1})"}"#).await;
+        assert_eq!(status, StatusCode::OK, "{j}");
+        assert!(j.get("snapshot_hash").is_none(), "not asked for, so not computed: {j}");
+        assert!(j["snapshot_version"].is_u64(), "{j}");
+
+        let (_, j) = post_query(
+            app.clone(),
+            r#"{"query":"MATCH (t:T) RETURN t.n","include_snapshot_hash":true}"#,
+        )
+        .await;
+        let read = j["snapshot_hash"].as_str().expect("asked for").to_string();
+        assert!(read.starts_with("sha256:") && read.len() == 7 + 64, "{read}");
+        assert_eq!(read, hash_of(&*store.read().await), "the hash of the data the read saw");
+        assert!(j["snapshot_version"].is_u64(), "snapshot_version stays on every response: {j}");
+
+        let (_, j) = post_query(
+            app.clone(),
+            r#"{"query":"CREATE (:T {n: 2})","include_snapshot_hash":true}"#,
+        )
+        .await;
+        let written = j["snapshot_hash"].as_str().expect("asked for").to_string();
+        assert_ne!(written, read, "a write changes the data, so the hash");
+        assert_eq!(written, hash_of(&*store.read().await), "the data after the write");
+
+        // Derived from the data, not a counter: another server holding the same
+        // graph answers the same hash, as the same server would after a restart.
+        let other = Router::new()
+            .route("/api/query", axum::routing::post(query_handler))
+            .with_state(bare_state());
+        post_query(other.clone(), r#"{"query":"CREATE (:T {n: 1})"}"#).await;
+        post_query(other.clone(), r#"{"query":"CREATE (:T {n: 2})"}"#).await;
+        let (_, j) = post_query(other, r#"{"query":"RETURN 1","include_snapshot_hash":true}"#).await;
+        assert_eq!(j["snapshot_hash"].as_str(), Some(written.as_str()), "{j}");
     }
 
     /// Helper: send a POST /api/query with the given body and return (status, json).
