@@ -86,6 +86,7 @@ pub mod feature_ops;
 pub mod projection_ops;
 pub mod structure_ops;
 pub mod point_ops;
+pub mod hybrid_ops;
 pub mod vector_ops;
 pub mod semi_join_detector;
 pub mod leapfrog;
@@ -539,7 +540,8 @@ impl<'a> QueryExecutor<'a> {
             return whole(plan_json::batch(doc, plan_hash), sink);
         }
         if query.explain {
-            let mut batch = Self::explain_plan_with_stats(&mut plan, Some(self.store), self.row_budget);
+            let mut batch =
+                Self::explain_plan_with_stats(&mut plan, Some(self.store), self.row_budget, &query.hints);
             batch.plan_hash = plan_hash;
             return whole(batch, sink);
         }
@@ -632,6 +634,7 @@ impl<'a> QueryExecutor<'a> {
         plan: &mut ExecutionPlan,
         store: Option<&GraphStore>,
         row_budget: u64,
+        hints: &[crate::query::ast::PlanHint],
     ) -> RecordBatch {
         use crate::graph::PropertyValue;
         use crate::query::executor::planner::PLAN_DIAGNOSTICS;
@@ -647,6 +650,12 @@ impl<'a> QueryExecutor<'a> {
 
         // Append planner diagnostics (candidate plans) if available
         let diagnostics = PLAN_DIAGNOSTICS.with(|diag: &std::cell::RefCell<Option<planner::PlanDiagnostics>>| diag.borrow_mut().take());
+        let forceable = planner::FORCEABLE_PLANS.with(|f| f.take());
+        if diagnostics.is_none() && forceable.is_some() {
+            // Cost-based planning was asked for and every MATCH fell back to
+            // the default planner: no candidates to list, but still a count.
+            plan_text.push_str("\n--- Planner Diagnostics ---\n");
+        }
         if let Some(diag) = diagnostics {
             plan_text.push_str("\n--- Planner Diagnostics ---\n");
             plan_text.push_str(&format!(
@@ -673,6 +682,45 @@ impl<'a> QueryExecutor<'a> {
                         "  ... and {} more\n", diag.candidate_costs.len() - 6
                     ));
                 }
+            }
+        }
+
+        // The range a plan-equivalence harness loops over (LANG-06, #2252):
+        // `Candidates evaluated` above counts one MATCH, and `plan=N` picks
+        // the N-th of every MATCH, so the query has as many plans as its
+        // MATCH with the fewest. Past it, `plan=N` is refused, never run as
+        // some other plan.
+        if let Some(k) = forceable {
+            plan_text.push_str(&match k {
+                0 => "Forceable plans: 0 -- the cost-based enumerator cannot plan this query, \
+                      so CYPHER plan=N is refused for every N\n"
+                    .to_string(),
+                1 => "Forceable plans: 1 -- CYPHER plan=1 runs it\n".to_string(),
+                k => format!("Forceable plans: {k} -- CYPHER plan=1 .. plan={k} runs each\n"),
+            });
+        }
+
+        // The `USING` hints, each with what it did (LANG-13). Listing them
+        // here is a statement of fact, not a hope: a hint is mandatory, and
+        // planning fails on one no scan choice took, so a plan that reached
+        // EXPLAIN honoured every INDEX and SCAN hint it names. The operator
+        // tree above shows where; this says why it starts there.
+        if !hints.is_empty() {
+            use crate::query::ast::PlanHint;
+            plan_text.push_str("\n--- Planner hints ---\n");
+            for h in hints {
+                let effect = match h {
+                    PlanHint::Index { variable, .. } => {
+                        format!("applied: `{variable}` starts its pattern with an IndexScan on that index")
+                    }
+                    PlanHint::Scan { variable, .. } => {
+                        format!("applied: `{variable}` starts its pattern with a label NodeScan, no index")
+                    }
+                    PlanHint::Join { .. } => {
+                        "accepted: comma-separated patterns are joined on their shared variables".to_string()
+                    }
+                };
+                plan_text.push_str(&format!("{h} -- {effect}\n"));
             }
         }
 
@@ -891,7 +939,8 @@ impl<'a> MutQueryExecutor<'a> {
         }
         if query.explain {
             let store_ref: &GraphStore = self.store;
-            let mut batch = QueryExecutor::explain_plan_with_stats(&mut plan, Some(store_ref), self.row_budget);
+            let mut batch =
+                QueryExecutor::explain_plan_with_stats(&mut plan, Some(store_ref), self.row_budget, &query.hints);
             batch.plan_hash = plan_hash;
             return Ok(batch);
         }

@@ -41,6 +41,7 @@ eight of eighteen documents (#1450).
 - **[CYPHER-COMPATIBILITY.md](./CYPHER-COMPATIBILITY.md)** — OpenCypher coverage against the TCK, with the pass rate quoted beside its coverage.
 - **[GQL-GAP-ANALYSIS.md](./GQL-GAP-ANALYSIS.md)** — a historical planning analysis of possible GQL gaps, explicitly not a GQL conformance claim.
 - **[FULL-TEXT-SEARCH.md](./FULL-TEXT-SEARCH.md)** — the full-text index and how it is queried.
+- **[HYBRID-RETRIEVAL.md](./HYBRID-RETRIEVAL.md)** — `db.hybrid.search`: BM25 and vector search fused, a bounded graph expansion around the hits, a rerank, and per-stage timings.
 - **[INDEX-CONTRACT.md](./INDEX-CONTRACT.md)** — the six clauses every index structure implements (build, maintain under MVCC, cost, plan, persist, snapshot), and how to add one.
 - **[GDS-COMPATIBILITY.md](./GDS-COMPATIBILITY.md)** — which `gds.*` names resolve here, and which deliberately do not.
 - **[ALGORITHM-CONVENTIONS.md](./ALGORITHM-CONVENTIONS.md)** — directedness, weights, self-loops, disconnected components, tie-breaking.
@@ -100,4 +101,4 @@ Retired 2026-10-14 because it no longer described anything in the repository (#1
 
 ### Vector benchmark methodology
 
-- **[benchmarks/](./benchmarks/)** — vector benchmark protocols, filtered-search strategy costs and checkpoint methodology; documents distinguish implemented scope from measurements still required.
+- **[benchmarks/](./benchmarks/)** — vector benchmark protocols, filtered-search strategy costs, graph + vector hybrid queries and checkpoint methodology; documents distinguish implemented scope from measurements still required.
