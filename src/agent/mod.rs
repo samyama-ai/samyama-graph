@@ -12,6 +12,7 @@ pub mod tools;
 use crate::graph::GraphStore;
 use crate::nlq::client::NLQClient;
 use crate::persistence::tenant::{AgentConfig, NLQConfig};
+use crate::persistence::PersistedWriter;
 use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::Value;
@@ -62,10 +63,11 @@ pub trait Tool: Send + Sync {
 pub struct AgentRuntime {
     config: AgentConfig,
     tools: HashMap<String, Arc<dyn Tool>>,
-    /// Optional graph store for telemetry writes from plan execution.
-    /// When set, `execute_plan` / `plan_and_execute` record each tool
-    /// call as a `(:Question)-[:USED_TOOL]->(:Tool)` edge.
-    store: Option<Arc<RwLock<GraphStore>>>,
+    /// Optional writer for telemetry from plan execution, and the tenant
+    /// the telemetry belongs to. When set, `execute_plan` /
+    /// `plan_and_execute` record each tool call as a
+    /// `(:Question)-[:USED_TOOL]->(:Tool)` edge.
+    telemetry: Option<(PersistedWriter, String)>,
 }
 
 impl AgentRuntime {
@@ -73,13 +75,21 @@ impl AgentRuntime {
         Self {
             config,
             tools: HashMap::new(),
-            store: None,
+            telemetry: None,
         }
     }
 
-    /// Attach a graph store handle so plan execution emits telemetry edges.
-    pub fn with_store(mut self, store: Arc<RwLock<GraphStore>>) -> Self {
-        self.store = Some(store);
+    /// Attach a graph store handle so plan execution emits telemetry edges,
+    /// in memory only and under the `default` tenant. A server with
+    /// persistence uses [`Self::with_writer`], or the telemetry does not
+    /// survive a restart.
+    pub fn with_store(self, store: Arc<RwLock<GraphStore>>) -> Self {
+        self.with_writer(PersistedWriter::in_memory(store), "default")
+    }
+
+    /// Record telemetry through `writer`, persisted under `tenant` (#2241).
+    pub fn with_writer(mut self, writer: PersistedWriter, tenant: impl Into<String>) -> Self {
+        self.telemetry = Some((writer, tenant.into()));
         self
     }
 
@@ -114,12 +124,13 @@ impl AgentRuntime {
     /// Execute a pre-built plan against the registered tools, writing
     /// telemetry edges to the attached store.
     pub async fn execute_plan(&self, prompt: &str, plan: &ToolPlan) -> AgentResult<PlanRunResult> {
-        let store = self.store.as_ref().ok_or_else(|| {
+        let (writer, tenant) = self.telemetry.as_ref().ok_or_else(|| {
             AgentError::ConfigError(
-                "AgentRuntime has no store; call with_store() before execute_plan".into(),
+                "AgentRuntime has no store; call with_store() or with_writer() before execute_plan"
+                    .into(),
             )
         })?;
-        let exec = PlanExecutor::new(self.tools.clone(), store.clone());
+        let exec = PlanExecutor::new(self.tools.clone(), writer.clone(), tenant.clone());
         exec.execute(prompt, plan).await
     }
 
@@ -366,6 +377,40 @@ mod tests {
         let runtime = AgentRuntime::new(ollama_config(&dead_base_url()));
         let err = runtime.plan_and_execute("p", "c").await.unwrap_err();
         assert!(matches!(err, AgentError::LLMError(_)), "{err:?}");
+    }
+
+    /// #2241: the plan executor took the store's write lock itself and wrote
+    /// telemetry that no persist step followed. `PersistedWriter` is the one
+    /// place an agent writer gets the lock; this keeps it that way. Functions
+    /// that take `&mut GraphStore` (`enrich::quarantine`, `verify`, `retract`)
+    /// are bodies: whoever calls them already holds a persisted write path
+    /// (`AppState::mutate` on HTTP).
+    #[test]
+    fn no_agent_writer_takes_the_write_lock_outside_the_persisted_writer() {
+        let sources = [
+            ("enrich.rs", include_str!("enrich.rs")),
+            ("executor.rs", include_str!("executor.rs")),
+            ("memory.rs", include_str!("memory.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("planner.rs", include_str!("planner.rs")),
+            ("signature.rs", include_str!("signature.rs")),
+            ("tools.rs", include_str!("tools.rs")),
+        ];
+        let lock_calls = [".write()", "write_owned(", "blocking_write(", "try_write("];
+        let mut offenders = Vec::new();
+        for (file, source) in sources {
+            let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+            for (i, line) in production.lines().enumerate() {
+                if lock_calls.iter().any(|call| line.contains(call)) {
+                    offenders.push(format!("{file}:{}: {}", i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these take a write lock directly, so what they write is not journalled \
+             and does not survive a restart; write through `PersistedWriter`: {offenders:?}"
+        );
     }
 
     #[test]
