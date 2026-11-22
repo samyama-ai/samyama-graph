@@ -277,3 +277,132 @@ impl PhysicalOperator for PointNearestOperator {
         }
     }
 }
+
+/// The property and centre of a `point.distance(var.p, c)` sort key, either
+/// operand order, when `c` is a constant point. `None` for any other key.
+pub fn distance_sort_key(var: &str, key: &Expression, store: &GraphStore) -> Option<(String, (f64, f64, bool))> {
+    let Expression::Function { name, args, .. } = key else { return None };
+    if !(name.eq_ignore_ascii_case("point.distance") || name.eq_ignore_ascii_case("distance")) || args.len() != 2 {
+        return None;
+    }
+    let property_of_var = |e: &Expression| match e {
+        Expression::Property { variable, property } if variable == var => Some(property.clone()),
+        _ => None,
+    };
+    let (property, centre) = match (property_of_var(&args[0]), property_of_var(&args[1])) {
+        (Some(p), None) => (p, &args[1]),
+        (None, Some(p)) => (p, &args[0]),
+        _ => return None,
+    };
+    let mut vars = std::collections::HashSet::new();
+    crate::query::executor::planner::QueryPlanner::collect_vars(centre, &mut vars);
+    if !vars.is_empty() {
+        return None;
+    }
+    let centre = match eval_expression(centre, &Record::new(), store).ok()? {
+        Value::Property(v) => point_coords(&v)?,
+        _ => return None,
+    };
+    if !(centre.0.is_finite() && centre.1.is_finite()) {
+        return None;
+    }
+    Some((property, centre))
+}
+
+/// The nodes a point index ranks nearest a centre, as the scan under a
+/// single-node `ORDER BY point.distance(n.p, c) LIMIT k` (#2255).
+///
+/// A superset of the answer, not the answer: the `Sort` and `Limit` the query
+/// wrote stay above this, so the rows they keep are the ones they would keep
+/// over the whole label. It emits the `k` nearest and every node tied with
+/// the `k`-th, with a little slack for the last bit of a float, which is what
+/// lets a second `ORDER BY` key still choose among a tie at the boundary.
+pub struct PointNearestScanOperator {
+    variable: String,
+    label: Label,
+    property: String,
+    centre: (f64, f64, bool),
+    k: usize,
+    ids: Option<std::vec::IntoIter<NodeId>>,
+}
+
+impl PointNearestScanOperator {
+    pub fn new(variable: String, label: Label, property: String, centre: (f64, f64, bool), k: usize) -> Self {
+        Self { variable, label, property, centre, k, ids: None }
+    }
+
+    fn candidates(&self, store: &GraphStore) -> Vec<NodeId> {
+        let (cx, cy, geographic) = self.centre;
+        let ranked = |want: usize| {
+            store
+                .point_index
+                .with(self.label.as_str(), &self.property, |i| {
+                    if geographic {
+                        i.nearest_geographic(cx, cy, want)
+                    } else {
+                        i.nearest(cx, cy, want)
+                    }
+                })
+                .unwrap_or_default()
+        };
+        let mut want = self.k.max(1);
+        let mut r = ranked(want);
+        loop {
+            if r.len() < self.k {
+                // Fewer points than k: every one of them.
+                break;
+            }
+            let kth = r[self.k - 1].1;
+            let edge = kth + kth.abs() * 1e-9 + 1e-9;
+            let last = r.last().map_or(f64::INFINITY, |(_, d)| *d);
+            if r.len() < want || last > edge {
+                r.retain(|(_, d)| *d <= edge);
+                break;
+            }
+            // The last one fetched is still tied with the k-th; there may be more.
+            want = want.saturating_mul(2);
+            r = ranked(want);
+        }
+        r.into_iter().map(|(id, _)| id).collect()
+    }
+}
+
+impl PhysicalOperator for PointNearestScanOperator {
+    fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        if self.ids.is_none() {
+            self.ids = Some(self.candidates(store).into_iter());
+        }
+        for id in self.ids.as_mut().unwrap().by_ref() {
+            if store.get_node(id).is_some_and(|n| n.labels.contains(&self.label)) {
+                let mut r = Record::new();
+                r.bind(self.variable.clone(), Value::NodeRef(id));
+                return Ok(Some(r));
+            }
+        }
+        Ok(None)
+    }
+
+    fn reset(&mut self) {
+        self.ids = None;
+    }
+
+    fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
+        Some(self.k as f64)
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        let (x, y, geographic) = self.centre;
+        OperatorDescription {
+            name: "PointIndexNearest".to_string(),
+            details: format!(
+                "var={}, {}.{} nearest ({x}, {y}){} k={}",
+                self.variable,
+                self.label.as_str(),
+                self.property,
+                if geographic { " wgs-84" } else { "" },
+                self.k
+            ),
+            children: Vec::new(),
+        }
+    }
+}

@@ -141,7 +141,7 @@ We loaded the entire PubMed corpus plus ClinicalTrials.gov, Reactome pathways an
 DrugBank into **one graph** — 74M nodes, 1B edges on a single machine — then
 asked *"what drugs are most tested in cancer clinical trials?"*
 
-```cypher
+```cypher graph=pubmed-sample
 MATCH (m:MeSHTerm)<-[:ANNOTATED_WITH]-(a:Article)
       -[:REFERENCED_IN]->(t:ClinicalTrial)-[:TESTS]->(i:Intervention)
 WHERE m.name = 'Neoplasms'
@@ -204,7 +204,7 @@ judgments, bank model risk and football.
 coverage of the 3,897-scenario corpus, measured 2026-09-15) —
 [docs/CYPHER-COMPATIBILITY.md](docs/CYPHER-COMPATIBILITY.md).
 
-```cypher
+```cypher graph=people
 MATCH p = shortestPath((a:Person)-[:KNOWS*1..3]->(b:Person))
 WHERE a.name = 'Alice'
 RETURN b.name, length(p)
@@ -214,9 +214,11 @@ RETURN b.name, length(p)
 query language as the traversal. `quantization: 'fp16'` halves the index's
 memory.
 
-```cypher
+```cypher graph=papers
+// `dimensions` is your embeddings' width (384 for a typical sentence model);
+// the query vector must have the same width. 3 keeps the example short.
 CREATE VECTOR INDEX paper_idx FOR (p:Paper) ON (p.embedding)
-  OPTIONS {dimensions: 384, similarity: 'cosine'}
+  OPTIONS {dimensions: 3, similarity: 'cosine'}
 
 CALL db.index.vector.queryNodes('Paper', 'embedding', [0.1, 0.2, 0.3], 10)
   YIELD node, score
@@ -226,9 +228,9 @@ CALL db.index.vector.queryNodes('Paper', 'embedding', [0.1, 0.2, 0.3], 10)
 count. PageRank, LCC, CDLP and triangle counting are Rayon-parallel and scale
 with cores; WCC, betweenness and closeness run on one thread.
 
-```cypher
-CALL pagerank('social') YIELD nodeId, score
-RETURN nodeId, score ORDER BY score DESC LIMIT 10
+```cypher graph=people
+CALL pagerank('Person', 'KNOWS') YIELD node, score
+RETURN node.name, score ORDER BY score DESC LIMIT 10
 ```
 
 **Natural language and AI agents** — `NLQ "Who are Alice's friends of friends

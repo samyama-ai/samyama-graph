@@ -47,7 +47,8 @@ const KNOWN_REFUSALS: &[(&str, &str)] = &[
     ),
     (
         "MATCH (p:Person) USING INDEX",
-        "a query hint — LANG-13, not implemented",
+        "a query hint on an index the empty judging store does not have; hints are \
+         mandatory, so that is refused, as in Neo4j (LANG-13, #1675)",
     ),
 ];
 

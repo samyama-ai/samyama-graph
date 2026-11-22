@@ -234,6 +234,28 @@ impl MultiObjectiveProblem for UC2DosingProblem {
             })
             .collect()
     }
+
+    fn can_repair(&self) -> bool {
+        true
+    }
+
+    /// `constraint_handling: 'repair'` (OPT-10, #2266): for each
+    /// contraindicated pair given together, drop the smaller dose to 0, which
+    /// is the change that clears the pair at the least cost to the plan. A
+    /// plan that breaks no pair comes back unchanged.
+    fn repair(&self, x: &Array1<f64>) -> Option<Array1<f64>> {
+        let mut y = x.clone();
+        for &(a, b) in &self.contraindicated {
+            if y[a] >= ACTIVE_DOSE && y[b] >= ACTIVE_DOSE {
+                if y[a] <= y[b] {
+                    y[a] = 0.0;
+                } else {
+                    y[b] = 0.0;
+                }
+            }
+        }
+        Some(y)
+    }
 }
 
 #[cfg(test)]
