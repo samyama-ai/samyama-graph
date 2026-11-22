@@ -9,9 +9,10 @@
 //! | [`article_rank`] | PageRank that discounts votes from prolific linkers |
 
 use std::cmp::Reverse;
-use std::collections::{BinaryHeap, HashSet, VecDeque};
+use std::collections::{BinaryHeap, HashSet};
 
 use crate::common::{GraphView, NodeId};
+use crate::frontier::{self, Direction, Visit};
 use crate::pathfinding::NegativeWeight;
 
 /// Edge weight of the `slot`-th out-edge, or 1.0 when the view is unweighted.
@@ -43,22 +44,15 @@ pub fn all_shortest_paths(
         return Vec::new();
     }
     // BFS layering, keeping every predecessor at the shortest distance.
-    let mut dist = vec![usize::MAX; n];
     let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
-    dist[source] = 0;
-    let mut q = VecDeque::from([source]);
-    while let Some(v) = q.pop_front() {
-        for &w in view.successors(v) {
-            if dist[w] == usize::MAX {
-                dist[w] = dist[v] + 1;
-                q.push_back(w);
-            }
-            if dist[w] == dist[v] + 1 {
-                preds[w].push(v);
-            }
+    let mut bfs = frontier::Bfs::new(n);
+    bfs.walk(&[source], |v, _| frontier::neighbours(view, v, Direction::Out), |e| {
+        if e.is_shortest() {
+            preds[e.to].push(e.from);
         }
-    }
-    if dist[target] == usize::MAX {
+        Visit::Continue
+    });
+    if bfs.depth(target).is_none() {
         return Vec::new();
     }
 

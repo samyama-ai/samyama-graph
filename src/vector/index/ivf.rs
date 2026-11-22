@@ -347,9 +347,9 @@ impl VectorIndex {
     /// The vector at `pos` at f32, whichever precision is stored.
     fn vector_f32(&self, pos: usize) -> Cow<'_, [f32]> {
         match self.quantization {
-            Quantization::None => Cow::Borrowed(&self.stored_f32[pos].vector),
+            Quantization::None => Cow::Borrowed(&self.ivf_f32[pos]),
             Quantization::Fp16 => {
-                Cow::Owned(self.stored_f16[pos].1.iter().map(|v| v.to_f32()).collect())
+                Cow::Owned(self.ivf_f16[pos].iter().map(|v| v.to_f32()).collect())
             }
         }
     }
@@ -488,8 +488,8 @@ impl VectorIndex {
                         continue;
                     }
                     let d = match self.quantization {
-                        Quantization::None => distance.eval(query, &self.stored_f32[pos].vector),
-                        Quantization::Fp16 => distance.eval(&q16, &self.stored_f16[pos].1),
+                        Quantization::None => distance.eval(query, &self.ivf_f32[pos]),
+                        Quantization::Fp16 => distance.eval(&q16, &self.ivf_f16[pos]),
                     };
                     if d.is_finite() {
                         scored.push((pos, node, d));
