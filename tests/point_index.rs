@@ -276,3 +276,159 @@ fn geographic_nearest_matches_a_sort_by_point_distance() {
         assert_eq!(ids(&s, &q), want(k), "k={k}");
     }
 }
+
+/// The ids a query returns, in the order it returns them.
+fn ordered_ids(s: &GraphStore, q: &str) -> Vec<i64> {
+    let b = QueryExecutor::new(s).execute(&parse_query(q).unwrap()).unwrap_or_else(|e| panic!("{q}: {e}"));
+    b.records
+        .iter()
+        .map(|r| match r.get("id") {
+            Some(Value::Property(PropertyValue::Integer(i))) => *i,
+            other => panic!("{q}: {other:?}"),
+        })
+        .collect()
+}
+
+/// `(query, k)`: single-node top-k by distance, each of which the planner can
+/// answer from the index (#2255). The grid has many ties -- `(11, 7)` is 1 from
+/// two points and sqrt 2 from four -- and a `LIMIT` that cuts a tie in half is
+/// where a scan that stopped at exactly k rows would pick the wrong one.
+const NEAREST: &[(&str, usize)] = &[
+    ("MATCH (n:Site) RETURN n.id AS id, point.distance(n.loc, point({x: 11, y: 7})) AS d ORDER BY d, id LIMIT 3", 3),
+    ("MATCH (n:Site) RETURN n.id AS id, point.distance(n.loc, point({x: 11, y: 7})) AS d ORDER BY d, id DESC LIMIT 5", 5),
+    ("MATCH (n:Site) RETURN n.id AS id ORDER BY point.distance(n.loc, point({x: 30.4, y: 15.2})) LIMIT 4", 4),
+    ("MATCH (n:Site) RETURN n.id AS id, point.distance(point({x: 11, y: 7}), n.loc) AS d ORDER BY d, id SKIP 2 LIMIT 3", 3),
+    ("MATCH (n:Site) RETURN n.id AS id, distance(n.loc, point({x: 0, y: 0})) AS d ORDER BY d, id LIMIT 1", 1),
+    ("MATCH (n:City) RETURN n.id AS id, point.distance(n.at, point({latitude: 12.951, longitude: 77.553})) AS d ORDER BY d, id LIMIT 6", 6),
+];
+
+#[test]
+fn order_by_distance_limit_k_reads_the_index_and_answers_as_the_scan() {
+    let (scan, index) = (store(false), store(true));
+    for (q, k) in NEAREST {
+        assert!(!plan(&scan, q).contains("PointIndexNearest"), "{q}");
+        assert!(plan(&index, q).contains("PointIndexNearest"), "{q}: {}", plan(&index, q));
+        let want = ordered_ids(&scan, q);
+        assert_eq!(want.len(), *k, "{q}: the fixture has fewer than k rows");
+        assert_eq!(ordered_ids(&index, q), want, "{q}");
+    }
+}
+
+#[test]
+fn a_tie_at_the_kth_distance_is_decided_by_the_next_key_not_by_the_index() {
+    // Four points sqrt 2 from (11, 7); LIMIT 3 keeps the two at distance 1 and
+    // one of the four. Only the second key says which, so the scan has to hand
+    // the sort all four, not whichever the R-tree reached first.
+    let s = store(true);
+    let q = "MATCH (n:Site) RETURN n.id AS id, point.distance(n.loc, point({x: 11, y: 7})) AS d ORDER BY d, id DESC LIMIT 3";
+    assert!(plan(&s, q).contains("PointIndexNearest"), "{}", plan(&s, q));
+    // Site ids are 30 * (x / 2) + y: (10, 7) = 157, (12, 7) = 187, and the
+    // largest id of (10, 6), (10, 8), (12, 6), (12, 8) is (12, 8) = 188.
+    assert_eq!(ordered_ids(&s, q), vec![187, 157, 188]);
+}
+
+/// Shapes where the k nearest are not a superset of the answer. Each must plan
+/// without the nearest scan and still give the scan's answer.
+const NOT_NEAREST: &[&str] = &[
+    // Descending: the farthest, which the index does not rank.
+    "MATCH (n:Site) RETURN n.id AS id, point.distance(n.loc, point({x: 11, y: 7})) AS d ORDER BY d DESC, id LIMIT 3",
+    // A filter would drop some of the k nearest.
+    "MATCH (n:Site) WHERE n.id > 160 RETURN n.id AS id, point.distance(n.loc, point({x: 11, y: 7})) AS d ORDER BY d, id LIMIT 3",
+    "MATCH (n:Site {id: 157}) RETURN n.id AS id ORDER BY point.distance(n.loc, point({x: 11, y: 7})) LIMIT 3",
+    // A WITH between the MATCH and the sort.
+    "MATCH (n:Site) WITH n, point.distance(n.loc, point({x: 11, y: 7})) AS d RETURN n.id AS id ORDER BY d, id LIMIT 3",
+    // DISTINCT changes the row count between the scan and the sort.
+    "MATCH (n:Site) RETURN DISTINCT n.id AS id, point.distance(n.loc, point({x: 11, y: 7})) AS d ORDER BY d, id LIMIT 3",
+    // The first key is not the distance.
+    "MATCH (n:Site) RETURN n.id AS id, point.distance(n.loc, point({x: 11, y: 7})) AS d ORDER BY id, d LIMIT 3",
+    // No LIMIT: every row is in the answer.
+    "MATCH (n:Site) WHERE n.id < 40 RETURN n.id AS id ORDER BY point.distance(n.loc, point({x: 11, y: 7})), id",
+    // More rows asked for than the index holds (900 points).
+    "MATCH (n:Site) RETURN n.id AS id, point.distance(n.loc, point({x: 11, y: 7})) AS d ORDER BY d, id LIMIT 901",
+    // A property with no point index.
+    "MATCH (n:Site) RETURN n.id AS id, point.distance(n.other, point({x: 11, y: 7})) AS d ORDER BY d, id LIMIT 3",
+];
+
+#[test]
+fn shapes_the_nearest_scan_cannot_answer_run_as_a_scan() {
+    let (scan, index) = (store(false), store(true));
+    for q in NOT_NEAREST {
+        assert!(!plan(&index, q).contains("PointIndexNearest"), "{q}: {}", plan(&index, q));
+        let want = ordered_ids(&scan, q);
+        assert!(!want.is_empty(), "{q}: the fixture matches nothing");
+        assert_eq!(ordered_ids(&index, q), want, "{q}");
+    }
+}
+
+#[test]
+fn nodes_with_no_point_are_answered_as_the_scan_answers_them() {
+    // Five `:Site` rows with no `loc`: a null distance, sorted last, and not
+    // in the index. Under 900 the nearest scan is safe; at 905 the nulls are
+    // in the answer, and the index cannot produce them, so it must decline.
+    let (mut scan, mut index) = (store(false), store(true));
+    for s in [&mut scan, &mut index] {
+        for id in 5000..5005 {
+            run(s, &format!("CREATE (:Site {{id: {id}}})"));
+        }
+    }
+    let near = "MATCH (n:Site) RETURN n.id AS id, point.distance(n.loc, point({x: 11, y: 7})) AS d ORDER BY d, id LIMIT 10";
+    assert!(plan(&index, near).contains("PointIndexNearest"));
+    assert_eq!(ordered_ids(&index, near), ordered_ids(&scan, near));
+
+    let all = "MATCH (n:Site) RETURN n.id AS id, point.distance(n.loc, point({x: 11, y: 7})) AS d ORDER BY d, id LIMIT 905";
+    assert!(!plan(&index, all).contains("PointIndexNearest"));
+    let got = ordered_ids(&index, all);
+    assert_eq!(got, ordered_ids(&scan, all));
+    assert_eq!(got[900..].to_vec(), vec![5000, 5001, 5002, 5003, 5004]);
+}
+
+#[test]
+fn the_nearest_scan_follows_writes() {
+    let mut s = store(true);
+    let q = "MATCH (n:Site) RETURN n.id AS id, point.distance(n.loc, point({x: 500, y: 500})) AS d ORDER BY d, id LIMIT 1";
+    assert!(plan(&s, q).contains("PointIndexNearest"));
+    // The far corner of the grid, (58, 29).
+    assert_eq!(ordered_ids(&s, q), vec![899]);
+    run(&mut s, "MATCH (n:Site {id: 7}) SET n.loc = point({x: 499, y: 499})");
+    assert_eq!(ordered_ids(&s, q), vec![7]);
+    run(&mut s, "MATCH (n:Site {id: 7}) REMOVE n:Site");
+    assert_eq!(ordered_ids(&s, q), vec![899]);
+}
+
+/// The NDS-04 rows of `examples/nds_probes.rs`, which CH-NDS-GEO runs, and
+/// both DDL spellings. The harness records each as working or not from
+/// whether it runs, so a statement here that errors is a probe that fails.
+#[test]
+fn the_nds04_probe_statements_run() {
+    let fixture = || {
+        let mut s = GraphStore::new();
+        run(&mut s, "CREATE (:N {x: 1, loc: point({latitude: 12.97, longitude: 77.59})})");
+        run(&mut s, "CREATE (:N {x: 2, loc: point({latitude: 13.5, longitude: 77.9})})");
+        s
+    };
+    let probes: &[&[&str]] = &[
+        &["RETURN point({latitude: 12.9, longitude: 77.6}) AS p"],
+        &["RETURN point.distance(point({latitude: 12.9, longitude: 77.6}), point({latitude: 13.0, longitude: 77.7})) AS d"],
+        &["RETURN distance(point({latitude: 12.9, longitude: 77.6}), point({latitude: 13.0, longitude: 77.7})) AS d"],
+        &["MATCH (n:N) WHERE point.withinBBox(n.loc, point({latitude: 12.0, longitude: 77.0}), point({latitude: 14.0, longitude: 78.0})) RETURN count(n)"],
+        &["CREATE POINT INDEX ON :N(loc)"],
+        &["CREATE POINT INDEX n_loc ON :N(loc)", "DROP POINT INDEX n_loc"],
+        &["CREATE POINT INDEX FOR (n:N) ON (n.loc)"],
+        &["CREATE POINT INDEX n_loc FOR (n:N) ON (n.loc)", "DROP POINT INDEX n_loc"],
+    ];
+    for statements in probes {
+        let mut s = fixture();
+        for q in *statements {
+            run(&mut s, q);
+        }
+    }
+
+    // And the box probe reads the index once there is one.
+    let mut s = fixture();
+    let bbox = probes[3][0];
+    assert!(!plan(&s, bbox).contains("PointIndexScan"));
+    run(&mut s, "CREATE POINT INDEX ON :N(loc)");
+    assert!(plan(&s, bbox).contains("PointIndexScan"), "{}", plan(&s, bbox));
+    let b = QueryExecutor::new(&s).execute(&parse_query(bbox).unwrap()).unwrap();
+    assert_eq!(b.records[0].get("count(n)"), Some(&Value::Property(PropertyValue::Integer(2))));
+}

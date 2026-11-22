@@ -25,6 +25,32 @@ Conventions are stated for the algorithm as the engine calls it. `algo.*`,
 the namespace and lower-cases, so `algo.pageRank`, `pagerank` and
 `gds.pageRank` are the same row.
 
+## One walk, two neighbour readings
+
+Fifteen of the algorithms below walk the graph through one shared module,
+`samyama_graph_algorithms::frontier` (ALGO-13): closeness, harmonic,
+betweenness, eccentricity (and so diameter and radius), average neighbour
+degree, all-pairs shortest path (and so the Wiener index), transitive closure,
+global efficiency, bipartite, shortest path (unweighted), all shortest paths
+and k-hop negative sampling. Where the rows below say "BFS", it is that walk:
+breadth-first, nodes expanded in the order they were reached, neighbours in
+stored order with successors before predecessors.
+
+Two readings of "neighbour" are in use, and the rows say which:
+
+- **Every edge** (`neighbours`): a parallel relationship is two neighbours.
+  Betweenness, closeness and harmonic read the graph this way, so two
+  parallel edges are two shortest paths.
+- **Each neighbour once** (`distinct_neighbours`): a parallel pair or a
+  reciprocal `a -> b`, `b -> a` is one adjacency and a self-loop none, as in
+  NetworkX's `nx.Graph(D)`. Bipartite, matching and global efficiency read the
+  graph this way. Average neighbour degree and degree assortativity do too when
+  undirected (the default); with `undirected: false` they count every outgoing
+  edge except a self-loop, so a parallel pair still counts twice.
+
+Moving these algorithms onto the shared walk changed no answer:
+`frontier_parity_tests` holds each to the output it gave before, bit for bit.
+
 ## How to read the columns
 
 | Column | Means |
@@ -209,6 +235,7 @@ returns, and `node` in those rows carries the written property.
 | Greedy colouring | colouring | colour |
 | Effective size, Burt's constraint | effectiveSize, constraint | value |
 | Bellman-Ford | bellmanFord | distance |
+| Train/val/test split | split, trainTestSplit | split |
 
 The list is `AlgorithmOperator::WRITE_BACK`; `tests/algorithm_write_back.rs`
 runs every entry, under every alias, and fails if this table misses one.
@@ -353,6 +380,36 @@ drop-in replacement for a from-scratch SGNS-trained node2vec.
 |---|---|---|---|---|---|---|---|
 | FastRP | fastRP | Both, symmetrised: successors and predecessors are merged into one neighbour list before propagating | Ignored | Counted twice: a self-loop's target appears in both the out- and in-neighbour list that gets merged | An isolated node's row is the zero vector: nothing propagates into it at any depth | Not applicable: one row per node, no ranking | L2-normalised per row by default (`normalize: true`); deterministic given `seed`, no RNG |
 | node2vec | node2vec | Both, symmetrised, the same way as FastRP, for both the walk and the co-occurrence projection | Ignored | A self-loop is a neighbour like any other and can be walked to and from | An isolated node's walk never leaves it, so it records no co-occurrence pair and its row is the zero vector | Not applicable: one row per node, no ranking | L2-normalised per row; deterministic given `seed`, no RNG. **Not skip-gram-trained (differs)** -- see above |
+
+## Training datasets
+
+A split that puts the same entity, the same community, the same source or a
+later timestamp on both sides of the train/test boundary lets a model score
+well by recognising what it was trained on (ML-05). `split` keeps whole groups
+on one side; `splitLeakage` reads a stored split back and lists every leak
+across it, so a clean split returns no rows and a naive one is measured.
+
+```cypher
+CALL algo.split({strategy: 'entity', label: 'Record', edgeType: 'SAME_AS',
+                 ratios: [0.8, 0.1, 0.1], seed: 7, writeProperty: 'split'})
+YIELD node, split RETURN split, count(*);
+
+CALL algo.splitLeakage({strategy: 'entity', label: 'Record', edgeType: 'SAME_AS', hops: 3})
+YIELD node1, node2, split1, split2, reason RETURN count(*) AS leaks;
+```
+
+Strategies: `entity` (components of `edgeType`), `community` (Louvain),
+`source` (a value of `property`), `time` (`property` as a number or a
+date/datetime: earliest to train, latest to test) and `random`, the negative
+control, which `splitLeakage` refuses because it keeps nothing together.
+A node missing the `property` a strategy reads is refused, not dropped.
+**Sizes are approximate when groups are large**: a group is never cut to hit a
+ratio, and placing them largest first keeps the overshoot to one group per split.
+
+| Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
+|---|---|---|---|---|---|---|---|
+| Train/val/test split | split, trainTestSplit | entity: weak components of `edgeType`, direction ignored; community: Louvain's symmetrised graph; time, source, random: edges unused | Ignored | entity: a self-loop links a record to itself, so it changes no group | Each component, community or source is a group of its own; an isolated node is a group of one | Groups are shuffled by `seed`, placed largest first, each into the split furthest below its target, the earlier split on a tie; time: ordered by time then node id, and equal times share a split | Ratios must sum to 1; `[train, test]` or `[train, val, test]`. Reproducible from `seed` |
+| Split leakage check | splitLeakage, leakageCheck | entity: walks `edgeType` in both directions up to `hops` (default 3); community: Louvain recomputed on the graph as it is now; time, source: edges unused | Ignored | entity: a self-loop is walked like any edge and never pairs a node with itself | Nodes in different components are never a leak; every node in scope must hold a split, or the call is refused | Rows ordered by node ids; community and source report one row per group and pair of splits it spans, with its smallest node on each side | None: one row per leak, so `count(*)` is the leakage figure; an equal time across a boundary is not a leak |
 
 ## Not a graph algorithm
 

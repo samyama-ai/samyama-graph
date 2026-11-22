@@ -1,0 +1,983 @@
+{
+  "format": "samyama.queries/1",
+  "generated_by": "samyama 1.14.0",
+  "provenance": "authored",
+  "tenant": "default",
+  "publishable": true,
+  "entries": [
+    {
+      "id": "im_movie_count",
+      "question": "How many movies does the graph hold, counting TV movies?",
+      "paraphrases": [
+        "How many films are in the IMDB graph?"
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Movie) RETURN count(m) AS movies",
+      "rows": 1,
+      "hash": "fnv1a64:5346f7c6aeaee779",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "im_series_count",
+      "question": "How many TV series are in the graph?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (s:Series) RETURN count(s) AS series",
+      "rows": 1,
+      "hash": "fnv1a64:8a9347fdf515451d",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "im_person_count",
+      "question": "How many people (actors, directors, writers and producers) are in the graph?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Person) RETURN count(p) AS people",
+      "rows": 1,
+      "hash": "fnv1a64:ee90f5bcc6dd3259",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "im_genre_list",
+      "question": "Which genres are there, in alphabetical order?",
+      "paraphrases": [
+        "List every genre in the graph."
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (g:Genre) RETURN g.name AS genre ORDER BY genre",
+      "rows": 28,
+      "hash": "fnv1a64:bbe8f735281b69e6",
+      "unanswerable": false,
+      "params": [],
+      "work": 84
+    },
+    {
+      "id": "im_movies_by_type",
+      "question": "How many of the movies are feature films and how many are TV movies?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Movie) RETURN m.title_type AS kind, count(*) AS movies ORDER BY movies DESC",
+      "rows": 2,
+      "hash": "fnv1a64:ff916c7377f7e335",
+      "unanswerable": false,
+      "params": [],
+      "work": 49638
+    },
+    {
+      "id": "im_year_range",
+      "question": "What are the earliest and the latest release years of the movies in the graph?",
+      "paraphrases": [
+        "Which years do the movies cover?"
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Movie) RETURN min(m.year) AS first_year, max(m.year) AS last_year",
+      "rows": 1,
+      "hash": "fnv1a64:5d3e8a4857eb2bf7",
+      "unanswerable": false,
+      "params": [],
+      "work": 49634
+    },
+    {
+      "id": "im_movie_year",
+      "question": "In which year was {title} released?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Movie {title: $title}) RETURN m.year AS year",
+      "rows": 1,
+      "hash": "fnv1a64:3ff4fadbf9b407b2",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "Inception",
+          "enum_values": null
+        }
+      ],
+      "work": 49634
+    },
+    {
+      "id": "im_movie_runtime",
+      "question": "How long is {title}, in minutes?",
+      "paraphrases": [
+        "What is the running time of {title}?"
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Movie {title: $title}) RETURN m.runtime_minutes AS minutes",
+      "rows": 1,
+      "hash": "fnv1a64:5a099b10996236e8",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "The Godfather",
+          "enum_values": null
+        }
+      ],
+      "work": 49634
+    },
+    {
+      "id": "im_movie_rating",
+      "question": "What is the IMDB rating of {title}, and how many votes does it have?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Movie {title: $title})-[:HAS_RATING]->(r:Rating) RETURN r.average_rating AS rating, r.num_votes AS votes",
+      "rows": 1,
+      "hash": "fnv1a64:36367e8cdea1a798",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "Pulp Fiction",
+          "enum_values": null
+        }
+      ],
+      "work": 49635
+    },
+    {
+      "id": "im_person_birth_year",
+      "question": "In which year was {person} born?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Person {name: $person}) RETURN p.birth_year AS born",
+      "rows": 1,
+      "hash": "fnv1a64:eb54b7c7360a4e14",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Akira Kurosawa",
+          "enum_values": null
+        }
+      ],
+      "work": 293552
+    },
+    {
+      "id": "im_movie_genres",
+      "question": "Which genres is {title} listed under?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Movie {title: $title})-[:HAS_GENRE]->(g:Genre) RETURN g.name AS genre",
+      "rows": 2,
+      "hash": "fnv1a64:a3132ec2b20f5818",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "The Matrix",
+          "enum_values": null
+        }
+      ],
+      "work": 34
+    },
+    {
+      "id": "im_movie_directors",
+      "question": "Who directed {title}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Person)-[:DIRECTED]->(m:Movie {title: $title}) RETURN p.name AS director",
+      "rows": 1,
+      "hash": "fnv1a64:6d0b22184c94cd42",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "Seven Samurai",
+          "enum_values": null
+        }
+      ],
+      "work": 49635
+    },
+    {
+      "id": "im_director_film_count",
+      "question": "How many movies has {person} directed?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Person {name: $person})-[:DIRECTED]->(m:Movie) RETURN count(DISTINCT m) AS movies",
+      "rows": 1,
+      "hash": "fnv1a64:419e13eeb5f94f92",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Christopher Nolan",
+          "enum_values": null
+        }
+      ],
+      "work": 49658
+    },
+    {
+      "id": "im_movies_in_year",
+      "question": "How many movies were released in {year}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Movie) WHERE m.year = $year RETURN count(m) AS movies",
+      "rows": 1,
+      "hash": "fnv1a64:c57940b82d72da91",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 1994,
+          "enum_values": null
+        }
+      ],
+      "work": 50067
+    },
+    {
+      "id": "im_movies_rated_nine_plus",
+      "question": "Which movies with at least 100,000 votes are rated 9.0 or higher?",
+      "paraphrases": [
+        "List the movies rated 9 or above that have 100k or more votes."
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie)-[:HAS_RATING]->(r:Rating) WHERE r.num_votes >= 100000 AND r.average_rating >= 9.0 RETURN m.title AS title, m.year AS year, r.average_rating AS rating ORDER BY rating DESC, title",
+      "rows": 7,
+      "hash": "fnv1a64:d1896f92f56bc0ee",
+      "unanswerable": false,
+      "params": [],
+      "work": 99285
+    },
+    {
+      "id": "im_most_voted_movies",
+      "question": "Which ten movies have received the most votes?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie)-[:HAS_RATING]->(r:Rating) RETURN m.title AS title, m.year AS year, r.num_votes AS votes ORDER BY votes DESC, title LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:8a5761af98035796",
+      "unanswerable": false,
+      "params": [],
+      "work": 99294
+    },
+    {
+      "id": "im_movies_per_genre",
+      "question": "How many movies are there in each genre?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie)-[:HAS_GENRE]->(g:Genre) RETURN g.name AS genre, count(m) AS movies ORDER BY movies DESC, genre",
+      "rows": 25,
+      "hash": "fnv1a64:cdbb1a3dcc5c451b",
+      "unanswerable": false,
+      "params": [],
+      "work": 75
+    },
+    {
+      "id": "im_longest_movies",
+      "question": "What are the five longest movies by running time?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie) WHERE m.runtime_minutes IS NOT NULL RETURN m.title AS title, m.year AS year, m.runtime_minutes AS minutes ORDER BY minutes DESC, title LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:e33e41b2d9f39169",
+      "unanswerable": false,
+      "params": [],
+      "work": 99195
+    },
+    {
+      "id": "im_actor_filmography",
+      "question": "Which movies has {person} acted in, from earliest to latest?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person {name: $person})-[:ACTED_IN]->(m:Movie) RETURN m.title AS title, m.year AS year ORDER BY year, title",
+      "rows": 35,
+      "hash": "fnv1a64:ce92713f00aecb4e",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Leonardo DiCaprio",
+          "enum_values": null
+        }
+      ],
+      "work": 49772
+    },
+    {
+      "id": "im_director_films_by_rating",
+      "question": "List the movies {person} directed, from highest to lowest rated.",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person {name: $person})-[:DIRECTED]->(m:Movie)-[:HAS_RATING]->(r:Rating) RETURN m.title AS title, m.year AS year, r.average_rating AS rating ORDER BY rating DESC, year, title",
+      "rows": 12,
+      "hash": "fnv1a64:22b483fd67ec5f99",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Christopher Nolan",
+          "enum_values": null
+        }
+      ],
+      "work": 49692
+    },
+    {
+      "id": "im_movie_cast",
+      "question": "Who acted in {title}, and which characters did they play?",
+      "paraphrases": [
+        "Give me the cast of {title}."
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person)-[a:ACTED_IN]->(m:Movie {title: $title}) RETURN p.name AS actor, a.characters AS character",
+      "rows": 10,
+      "hash": "fnv1a64:e9d384056690da0d",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "Pulp Fiction",
+          "enum_values": null
+        }
+      ],
+      "work": 49653
+    },
+    {
+      "id": "im_movie_writers",
+      "question": "Who wrote {title}?",
+      "paraphrases": [
+        "Who are the credited writers of {title}?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person)-[:WROTE]->(m:Movie {title: $title}) RETURN p.name AS writer",
+      "rows": 2,
+      "hash": "fnv1a64:51546a10f1da51e0",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "The Godfather",
+          "enum_values": null
+        }
+      ],
+      "work": 49637
+    },
+    {
+      "id": "im_character_played",
+      "question": "Which character did {person} play in {title}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person {name: $person})-[a:ACTED_IN]->(m:Movie {title: $title}) RETURN a.characters AS character",
+      "rows": 1,
+      "hash": "fnv1a64:a7f6b1fbf58e231d",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Samuel L. Jackson",
+          "enum_values": null
+        },
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "Pulp Fiction",
+          "enum_values": null
+        }
+      ],
+      "work": 49636
+    },
+    {
+      "id": "im_genre_avg_rating",
+      "question": "What is the average rating of {genre} movies, to two decimal places?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie)-[:HAS_GENRE]->(g:Genre {name: $genre}) MATCH (m)-[:HAS_RATING]->(r:Rating) RETURN count(m) AS movies, round(avg(r.average_rating) * 100) / 100.0 AS avg_rating",
+      "rows": 1,
+      "hash": "fnv1a64:49fb54fa7c5629ce",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "genre",
+          "type": "string",
+          "sample": "Horror",
+          "enum_values": [
+            "Action",
+            "Adventure",
+            "Animation",
+            "Biography",
+            "Comedy",
+            "Crime",
+            "Documentary",
+            "Drama",
+            "Family",
+            "Fantasy",
+            "Film-Noir",
+            "History",
+            "Horror",
+            "Music",
+            "Musical",
+            "Mystery",
+            "Romance",
+            "Sci-Fi",
+            "Sport",
+            "Thriller",
+            "War",
+            "Western"
+          ]
+        }
+      ],
+      "work": 13385
+    },
+    {
+      "id": "im_genre_top_movies",
+      "question": "What are the five highest-rated {genre} movies with at least 50,000 votes?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie)-[:HAS_GENRE]->(g:Genre {name: $genre}) MATCH (m)-[:HAS_RATING]->(r:Rating) WHERE r.num_votes >= 50000 RETURN m.title AS title, m.year AS year, r.average_rating AS rating ORDER BY rating DESC, r.num_votes DESC, title LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:6947806d45116194",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "genre",
+          "type": "string",
+          "sample": "Western",
+          "enum_values": [
+            "Action",
+            "Adventure",
+            "Animation",
+            "Biography",
+            "Comedy",
+            "Crime",
+            "Drama",
+            "Family",
+            "Fantasy",
+            "History",
+            "Horror",
+            "Music",
+            "Musical",
+            "Mystery",
+            "Romance",
+            "Sci-Fi",
+            "Sport",
+            "Thriller",
+            "War",
+            "Western"
+          ]
+        }
+      ],
+      "work": 1258
+    },
+    {
+      "id": "im_movies_per_decade",
+      "question": "How many movies were released in each decade?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie) RETURN (m.year / 10) * 10 AS decade, count(*) AS movies ORDER BY decade",
+      "rows": 8,
+      "hash": "fnv1a64:464cff4585ddb123",
+      "unanswerable": false,
+      "params": [],
+      "work": 49656
+    },
+    {
+      "id": "im_series_rated_highest",
+      "question": "Which TV series with at least 50,000 votes are rated 9.2 or higher?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (s:Series)-[:HAS_RATING]->(r:Rating) WHERE r.num_votes >= 50000 AND r.average_rating >= 9.2 RETURN s.title AS series, s.year AS start_year, r.average_rating AS rating ORDER BY rating DESC, series",
+      "rows": 7,
+      "hash": "fnv1a64:39d05a7bee0f93c0",
+      "unanswerable": false,
+      "params": [],
+      "work": 29737
+    },
+    {
+      "id": "im_longest_running_series",
+      "question": "Which ten TV series ran for the most years between their first and last year?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (s:Series) WHERE s.end_year IS NOT NULL RETURN s.title AS series, s.year AS start_year, s.end_year AS end_year, s.end_year - s.year AS years ORDER BY years DESC, series, start_year LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:373d7ccfee1b64db",
+      "unanswerable": false,
+      "params": [],
+      "work": 26140
+    },
+    {
+      "id": "im_most_prolific_directors",
+      "question": "Which ten people have directed the most movies?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person)-[:DIRECTED]->(m:Movie) RETURN p.name AS director, count(DISTINCT m) AS movies ORDER BY movies DESC, director LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:88450cc769e2c60c",
+      "unanswerable": false,
+      "params": [],
+      "work": 337998
+    },
+    {
+      "id": "im_director_avg_rating",
+      "question": "What is the average rating of the movies {person} directed, to two decimal places?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person {name: $person})-[:DIRECTED]->(m:Movie)-[:HAS_RATING]->(r:Rating) RETURN count(m) AS movies, round(avg(r.average_rating) * 100) / 100.0 AS avg_rating",
+      "rows": 1,
+      "hash": "fnv1a64:393154f222de60c6",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Alfred Hitchcock",
+          "enum_values": null
+        }
+      ],
+      "work": 49688
+    },
+    {
+      "id": "im_alt_title_regions",
+      "question": "In how many different regions is {title} listed with a release title?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie {title: $title})-[:HAS_ALTERNATE_TITLE]->(a:AlternateTitle) WHERE a.region IS NOT NULL RETURN count(DISTINCT a.region) AS regions",
+      "rows": 1,
+      "hash": "fnv1a64:c7e735e9dc9225a5",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "Spirited Away",
+          "enum_values": null
+        }
+      ],
+      "work": 49837
+    },
+    {
+      "id": "im_alt_title_in_region",
+      "question": "What is {title} called in the region with country code {region}?",
+      "paraphrases": [
+        "Under which title was {title} released in region {region}?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie {title: $title})-[:HAS_ALTERNATE_TITLE]->(a:AlternateTitle {region: $region}) RETURN DISTINCT a.title AS local_title",
+      "rows": 1,
+      "hash": "fnv1a64:ab5fc269f994a19e",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "Spirited Away",
+          "enum_values": null
+        },
+        {
+          "name": "region",
+          "type": "string",
+          "sample": "FR",
+          "enum_values": null
+        }
+      ],
+      "work": 49637
+    },
+    {
+      "id": "im_movies_over_three_hours",
+      "question": "How many movies run longer than three hours?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie) WHERE m.runtime_minutes > 180 RETURN count(m) AS movies",
+      "rows": 1,
+      "hash": "fnv1a64:a0791b71abf7a1ae",
+      "unanswerable": false,
+      "params": [],
+      "work": 49976
+    },
+    {
+      "id": "im_person_series",
+      "question": "Which TV series has {person} appeared in as a cast member?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person {name: $person})-[:ACTED_IN]->(s:Series) RETURN s.title AS series, s.year AS start_year ORDER BY start_year, series",
+      "rows": 8,
+      "hash": "fnv1a64:ce98d257ea9ed567",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Bryan Cranston",
+          "enum_values": null
+        }
+      ],
+      "work": 14890
+    },
+    {
+      "id": "im_directed_and_acted",
+      "question": "In which movies did {person} both direct and act?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person {name: $person})-[:DIRECTED]->(m:Movie)<-[:ACTED_IN]-(p) RETURN DISTINCT m.title AS title, m.year AS year ORDER BY year, title",
+      "rows": 24,
+      "hash": "fnv1a64:a28f26c0ccbd96a3",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Clint Eastwood",
+          "enum_values": null
+        }
+      ],
+      "work": 50232
+    },
+    {
+      "id": "im_year_top_movies",
+      "question": "What were the five highest-rated movies of {year} with at least 10,000 votes?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie)-[:HAS_RATING]->(r:Rating) WHERE m.year = $year AND r.num_votes >= 10000 RETURN m.title AS title, r.average_rating AS rating ORDER BY rating DESC, r.num_votes DESC, title LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:a06069a36484ae6e",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "year",
+          "type": "int",
+          "sample": 1994,
+          "enum_values": null
+        }
+      ],
+      "work": 50669
+    },
+    {
+      "id": "im_decade_avg_rating",
+      "question": "What is the average movie rating in each decade, to two decimal places?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie)-[:HAS_RATING]->(r:Rating) RETURN (m.year / 10) * 10 AS decade, round(avg(r.average_rating) * 100) / 100.0 AS avg_rating ORDER BY decade",
+      "rows": 8,
+      "hash": "fnv1a64:2123611cec227bfb",
+      "unanswerable": false,
+      "params": [],
+      "work": 99288
+    },
+    {
+      "id": "im_series_per_genre",
+      "question": "Which five genres have the most TV series?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (s:Series)-[:HAS_GENRE]->(g:Genre) RETURN g.name AS genre, count(s) AS series ORDER BY series DESC, genre LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:bd0ed27eb2397b06",
+      "unanswerable": false,
+      "params": [],
+      "work": 62
+    },
+    {
+      "id": "im_director_actor_pairs",
+      "question": "Which five director and actor pairs have made the most movies together?",
+      "paraphrases": [
+        "Which directors keep casting the same actor most often?"
+      ],
+      "difficulty": "hard",
+      "cypher": "MATCH (d:Person)-[:DIRECTED]->(m:Movie)<-[:ACTED_IN]-(a:Person) WHERE d <> a RETURN d.name AS director, a.name AS actor, count(DISTINCT m) AS movies ORDER BY movies DESC, director, actor LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:71f72e89deeaebbb",
+      "unanswerable": false,
+      "params": [],
+      "work": 2027452
+    },
+    {
+      "id": "im_actor_frequent_directors",
+      "question": "Which three directors has {person} worked with most often as an actor?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (a:Person {name: $person})-[:ACTED_IN]->(m:Movie)<-[:DIRECTED]-(d:Person) WHERE d <> a RETURN d.name AS director, count(DISTINCT m) AS movies ORDER BY movies DESC, director LIMIT 3",
+      "rows": 3,
+      "hash": "fnv1a64:44adec53ee867636",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Robert De Niro",
+          "enum_values": null
+        }
+      ],
+      "work": 50222
+    },
+    {
+      "id": "im_director_regular_actors",
+      "question": "Which actors have appeared in at least four movies directed by {person}?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (d:Person {name: $person})-[:DIRECTED]->(m:Movie)<-[:ACTED_IN]-(a:Person) WHERE a <> d WITH a, count(DISTINCT m) AS movies WHERE movies >= 4 RETURN a.name AS actor, movies ORDER BY movies DESC, actor",
+      "rows": 4,
+      "hash": "fnv1a64:31db055a2e97cf57",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Martin Scorsese",
+          "enum_values": null
+        }
+      ],
+      "work": 294164
+    },
+    {
+      "id": "im_frequent_costars",
+      "question": "Which three actors has {person} shared the most movies with?",
+      "paraphrases": [
+        "Who are {person}'s three most frequent co-stars?"
+      ],
+      "difficulty": "hard",
+      "cypher": "MATCH (p:Person {name: $person})-[:ACTED_IN]->(m:Movie)<-[:ACTED_IN]-(c:Person) WHERE c <> p RETURN c.name AS costar, count(DISTINCT m) AS movies ORDER BY movies DESC, costar LIMIT 3",
+      "rows": 3,
+      "hash": "fnv1a64:9838c65a5a7f443b",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Tom Hanks",
+          "enum_values": null
+        }
+      ],
+      "work": 296033
+    },
+    {
+      "id": "im_two_actors_together",
+      "question": "Which movies feature both {actor_a} and {actor_b} in the cast?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (a:Person {name: $actor_a})-[:ACTED_IN]->(m:Movie)<-[:ACTED_IN]-(b:Person {name: $actor_b}) RETURN DISTINCT m.title AS title, m.year AS year ORDER BY year, title",
+      "rows": 6,
+      "hash": "fnv1a64:56ad69958bcf8e4e",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "actor_a",
+          "type": "string",
+          "sample": "Robert De Niro",
+          "enum_values": null
+        },
+        {
+          "name": "actor_b",
+          "type": "string",
+          "sample": "Joe Pesci",
+          "enum_values": null
+        }
+      ],
+      "work": 49870
+    },
+    {
+      "id": "im_director_genre_mix",
+      "question": "Across the movies {person} directed, how many fall in each genre?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (p:Person {name: $person})-[:DIRECTED]->(m:Movie)-[:HAS_GENRE]->(g:Genre) RETURN g.name AS genre, count(DISTINCT m) AS movies ORDER BY movies DESC, genre",
+      "rows": 9,
+      "hash": "fnv1a64:7a120202d11cbf04",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Alfred Hitchcock",
+          "enum_values": null
+        }
+      ],
+      "work": 115159
+    },
+    {
+      "id": "im_actor_top_rated_movies",
+      "question": "Which of {person}'s movies as an actor are rated 7.8 or higher, among those with at least 10,000 votes?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (p:Person {name: $person})-[:ACTED_IN]->(m:Movie)-[:HAS_RATING]->(r:Rating) WHERE r.num_votes >= 10000 AND r.average_rating >= 7.8 RETURN m.title AS title, m.year AS year, r.average_rating AS rating ORDER BY rating DESC, title",
+      "rows": 4,
+      "hash": "fnv1a64:18852ff0c9aa5de9",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Meryl Streep",
+          "enum_values": null
+        }
+      ],
+      "work": 49824
+    },
+    {
+      "id": "im_shared_actors_two_directors",
+      "question": "Which actors have appeared in movies directed by {director_a} and also in movies directed by {director_b}?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (:Person {name: $director_a})-[:DIRECTED]->(:Movie)<-[:ACTED_IN]-(a:Person) MATCH (a)-[:ACTED_IN]->(:Movie)<-[:DIRECTED]-(:Person {name: $director_b}) RETURN DISTINCT a.name AS actor ORDER BY actor",
+      "rows": 5,
+      "hash": "fnv1a64:9cd5e8103b6c3047",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "director_a",
+          "type": "string",
+          "sample": "Martin Scorsese",
+          "enum_values": null
+        },
+        {
+          "name": "director_b",
+          "type": "string",
+          "sample": "Quentin Tarantino",
+          "enum_values": null
+        }
+      ],
+      "work": 301891
+    },
+    {
+      "id": "im_top_directors_min_films",
+      "question": "Among directors with at least ten rated movies, which ten have the highest average rating?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (p:Person)-[:DIRECTED]->(m:Movie)-[:HAS_RATING]->(r:Rating) WITH p, count(DISTINCT m) AS movies, avg(r.average_rating) AS avg_rating WHERE movies >= 10 RETURN p.name AS director, movies, round(avg_rating * 100) / 100.0 AS avg_rating ORDER BY avg_rating DESC, director LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:d10d150e99e9e171",
+      "unanswerable": false,
+      "params": [],
+      "work": 157046
+    },
+    {
+      "id": "im_movie_writer_director_overlap",
+      "question": "For movies in the {genre} genre, how many were written by their own director?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (g:Genre {name: $genre})<-[:HAS_GENRE]-(m:Movie) OPTIONAL MATCH (p:Person)-[:DIRECTED]->(m)<-[:WROTE]-(p) WITH m, count(p) AS self_written RETURN count(m) AS movies, sum(CASE WHEN self_written > 0 THEN 1 ELSE 0 END) AS written_by_director",
+      "rows": 1,
+      "hash": "fnv1a64:afec1c5a663d163f",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "genre",
+          "type": "string",
+          "sample": "Film-Noir",
+          "enum_values": null
+        }
+      ],
+      "work": 239979
+    },
+    {
+      "id": "im_series_creator_cast",
+      "question": "Who wrote for {series}, and which of those writers also appeared in its cast?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (w:Person)-[:WROTE]->(s:Series {title: $series}) OPTIONAL MATCH (w)-[a:ACTED_IN]->(s) RETURN w.name AS writer, a IS NOT NULL AS also_acted",
+      "rows": 2,
+      "hash": "fnv1a64:b2cf3117bf715e6a",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "series",
+          "type": "string",
+          "sample": "Seinfeld",
+          "enum_values": null
+        }
+      ],
+      "work": 14865
+    },
+    {
+      "id": "im_director_cowriters",
+      "question": "Apart from the director, which writers have written at least two movies directed by {person}?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (d:Person {name: $person})-[:DIRECTED]->(m:Movie)<-[:WROTE]-(w:Person) WHERE w <> d WITH w, count(DISTINCT m) AS movies WHERE movies >= 2 RETURN w.name AS writer, movies ORDER BY movies DESC, writer",
+      "rows": 2,
+      "hash": "fnv1a64:a6b75ffa9eb75f31",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Billy Wilder",
+          "enum_values": null
+        }
+      ],
+      "work": 49775
+    },
+    {
+      "id": "im_unanswerable_box_office",
+      "question": "How much money did {title} make at the box office?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (m:Movie {title: $title}) WHERE m.box_office IS NOT NULL RETURN m.box_office AS box_office",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "title",
+          "type": "string",
+          "sample": "Inception",
+          "enum_values": null
+        }
+      ],
+      "work": 49632
+    },
+    {
+      "id": "im_unanswerable_oscars",
+      "question": "How many Academy Awards has {person} won?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Person {name: $person})-[:WON_AWARD]->(a:Award) RETURN a.name AS award, a.year AS year ORDER BY year",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Meryl Streep",
+          "enum_values": null
+        }
+      ],
+      "work": 293551
+    },
+    {
+      "id": "im_unanswerable_birthplace",
+      "question": "In which city was {person} born?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Person {name: $person}) WHERE p.birth_place IS NOT NULL RETURN p.birth_place AS birthplace",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "person",
+          "type": "string",
+          "sample": "Christopher Nolan",
+          "enum_values": null
+        }
+      ],
+      "work": 293550
+    },
+    {
+      "id": "im_unanswerable_age_certificate",
+      "question": "Which movies are rated PG-13 for age?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (m:Movie) WHERE m.certificate = 'PG-13' RETURN m.title AS title ORDER BY title",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [],
+      "work": 49632
+    }
+  ]
+}
