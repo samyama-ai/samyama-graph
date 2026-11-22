@@ -1,0 +1,58 @@
+# Samyama as a system service (#2203). Installed by the .deb and .rpm to
+# /usr/lib/systemd/system/samyama.service. Not started on install:
+#
+#   sudo systemctl enable --now samyama
+#
+# Options go in /etc/samyama/samyama.env, which an upgrade does not replace.
+# Graph data is in /var/lib/samyama, which removing the package does not delete.
+[Unit]
+Description=Samyama graph database
+Documentation=https://github.com/samyama-ai/samyama-graph
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=samyama
+Group=samyama
+EnvironmentFile=-/etc/samyama/samyama.env
+# $SAMYAMA_ARGS is split into words, so it can carry several flags.
+ExecStart=/usr/bin/samyama --data-path /var/lib/samyama $SAMYAMA_ARGS
+WorkingDirectory=/var/lib/samyama
+# Created on start, owned by User=, and the only place the service may write.
+StateDirectory=samyama
+StateDirectoryMode=0750
+Restart=on-failure
+RestartSec=5
+# RocksDB keeps many files open; `samyama-cli doctor` warns under 4096.
+LimitNOFILE=65536
+UMask=0027
+
+# Hardening: no privileges, nothing writable but the state directory, and only
+# the system calls and socket families a network service uses.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

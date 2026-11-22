@@ -1,0 +1,843 @@
+{
+  "format": "samyama.queries/1",
+  "generated_by": "samyama 1.14.0",
+  "provenance": "authored",
+  "tenant": "default",
+  "publishable": true,
+  "entries": [
+    {
+      "id": "pw_pathway_count",
+      "question": "How many pathways does the graph hold?",
+      "paraphrases": [
+        "How many Reactome pathways are in the graph?"
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Pathway) RETURN count(p) AS pathways",
+      "rows": 1,
+      "hash": "fnv1a64:1d51f6220067702f",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "pw_go_term_count",
+      "question": "How many Gene Ontology terms are in the graph?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (g:GOTerm) RETURN count(g) AS go_terms",
+      "rows": 1,
+      "hash": "fnv1a64:75eddc5137846700",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "pw_go_terms_per_namespace",
+      "question": "How many Gene Ontology terms are there in each namespace (biological process, molecular function, cellular component)?",
+      "paraphrases": [
+        "Break the GO terms down by namespace."
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (g:GOTerm) WHERE g.namespace IS NOT NULL RETURN g.namespace AS namespace, count(*) AS terms ORDER BY terms DESC",
+      "rows": 3,
+      "hash": "fnv1a64:849c58d39620aef1",
+      "unanswerable": false,
+      "params": [],
+      "work": 100157
+    },
+    {
+      "id": "pw_complex_count",
+      "question": "How many protein complexes are in the graph?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (c:Complex) RETURN count(c) AS complexes",
+      "rows": 1,
+      "hash": "fnv1a64:617a2eba55162b38",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "pw_reaction_count",
+      "question": "How many reactions does the graph record?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (r:Reaction) RETURN count(r) AS reactions",
+      "rows": 1,
+      "hash": "fnv1a64:a96c76aab496a5da",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "pw_interaction_count",
+      "question": "How many protein-protein interactions are recorded?",
+      "paraphrases": [
+        "How many protein interaction links does the graph have?"
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (:Protein)-[i:INTERACTS_WITH]->(:Protein) RETURN count(i) AS interactions",
+      "rows": 1,
+      "hash": "fnv1a64:980d714a1d55d26d",
+      "unanswerable": false,
+      "params": [],
+      "work": 265810
+    },
+    {
+      "id": "pw_pathway_name_by_id",
+      "question": "What is the name of the Reactome pathway {pathway_id}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Pathway {pathway_id: $pathway_id}) RETURN p.name AS pathway",
+      "rows": 1,
+      "hash": "fnv1a64:f4ba62bdc5bd7177",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "pathway_id",
+          "type": "string",
+          "sample": "R-HSA-109581",
+          "enum_values": null
+        }
+      ],
+      "work": 2850
+    },
+    {
+      "id": "pw_go_term_lookup",
+      "question": "What is the GO term GO:0006915 called, and which namespace is it in?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (g:GOTerm {go_id: 'GO:0006915'}) RETURN g.name AS name, g.namespace AS namespace",
+      "rows": 1,
+      "hash": "fnv1a64:e77abfb303910ae7",
+      "unanswerable": false,
+      "params": [],
+      "work": 51899
+    },
+    {
+      "id": "pw_protein_accession",
+      "question": "What is the UniProt accession of the protein {protein}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Protein {name: $protein}) RETURN p.uniprot_id AS accession",
+      "rows": 1,
+      "hash": "fnv1a64:5369b59e65f51ebd",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "protein",
+          "type": "string",
+          "sample": "MAPK1",
+          "enum_values": null
+        }
+      ],
+      "work": 37992
+    },
+    {
+      "id": "pw_protein_name_by_accession",
+      "question": "Which gene name does the protein with UniProt accession Q09472 carry?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Protein {uniprot_id: 'Q09472'}) RETURN p.name AS gene_name",
+      "rows": 1,
+      "hash": "fnv1a64:352c00ed9bf82f82",
+      "unanswerable": false,
+      "params": [],
+      "work": 37992
+    },
+    {
+      "id": "pw_top_level_pathways",
+      "question": "Which pathways are top-level, with no parent pathway above them?",
+      "paraphrases": [
+        "List the root pathways of the Reactome hierarchy."
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Pathway) WHERE NOT (p)-[:CHILD_OF]->(:Pathway) RETURN p.name AS pathway ORDER BY pathway",
+      "rows": 29,
+      "hash": "fnv1a64:73fbcb6082217a3e",
+      "unanswerable": false,
+      "params": [],
+      "work": 2935
+    },
+    {
+      "id": "pw_protein_partner_count",
+      "question": "How many interaction partners does {protein} have?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Protein {name: $protein})-[:INTERACTS_WITH]-(o:Protein) RETURN count(DISTINCT o) AS partners",
+      "rows": 1,
+      "hash": "fnv1a64:ac861c43048387a2",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "protein",
+          "type": "string",
+          "sample": "TP53",
+          "enum_values": null
+        }
+      ],
+      "work": 38732
+    },
+    {
+      "id": "pw_pathway_protein_count",
+      "question": "How many proteins take part in the {pathway} pathway?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Protein)-[:PARTICIPATES_IN]->(pw:Pathway {name: $pathway}) RETURN count(DISTINCT p) AS proteins",
+      "rows": 1,
+      "hash": "fnv1a64:2b9134867402f4ea",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "pathway",
+          "type": "string",
+          "sample": "Apoptosis",
+          "enum_values": null
+        }
+      ],
+      "work": 3020
+    },
+    {
+      "id": "pw_obsolete_go_terms",
+      "question": "How many Gene Ontology terms are obsolete, that is, have a name starting with 'obsolete'?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (g:GOTerm) WHERE g.name STARTS WITH 'obsolete' RETURN count(g) AS obsolete_terms",
+      "rows": 1,
+      "hash": "fnv1a64:827e201e78381db2",
+      "unanswerable": false,
+      "params": [],
+      "work": 61411
+    },
+    {
+      "id": "pw_unanswerable_sequence_length",
+      "question": "How many amino acids long is the MAPK1 protein?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (p:Protein {name: 'MAPK1'}) WHERE p.sequence_length IS NOT NULL RETURN p.sequence_length AS length",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [],
+      "work": 37990
+    },
+    {
+      "id": "pw_top_interaction_hubs",
+      "question": "Which ten proteins have the most interaction partners?",
+      "paraphrases": [
+        "What are the ten biggest hubs in the protein interaction network?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Protein)-[:INTERACTS_WITH]-(o:Protein) RETURN p.name AS protein, count(DISTINCT o) AS partners ORDER BY partners DESC, protein LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:7561450553ebd21d",
+      "unanswerable": false,
+      "params": [],
+      "work": 525562
+    },
+    {
+      "id": "pw_most_pathways_proteins",
+      "question": "Which ten proteins, by UniProt accession, take part in the most pathways?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Protein)-[:PARTICIPATES_IN]->(pw:Pathway) RETURN p.uniprot_id AS accession, count(DISTINCT pw) AS pathways ORDER BY pathways DESC, accession LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:5977b2fdec07ebfd",
+      "unanswerable": false,
+      "params": [],
+      "work": 62232
+    },
+    {
+      "id": "pw_largest_pathways",
+      "question": "Which ten pathways involve the most proteins?",
+      "paraphrases": [
+        "What are the ten largest pathways by number of proteins?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Protein)-[:PARTICIPATES_IN]->(pw:Pathway) RETURN pw.name AS pathway, count(DISTINCT p) AS proteins ORDER BY proteins DESC, pathway LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:0108da5162998d8c",
+      "unanswerable": false,
+      "params": [],
+      "work": 8494
+    },
+    {
+      "id": "pw_sub_pathways",
+      "question": "Which pathways sit directly under {pathway}?",
+      "paraphrases": [
+        "What are the immediate sub-pathways of {pathway}?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Pathway)-[:CHILD_OF]->(:Pathway {name: $pathway}) RETURN c.name AS sub_pathway ORDER BY sub_pathway",
+      "rows": 17,
+      "hash": "fnv1a64:2df349f393891780",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "pathway",
+          "type": "string",
+          "sample": "Signal Transduction",
+          "enum_values": null
+        }
+      ],
+      "work": 2916
+    },
+    {
+      "id": "pw_parent_pathways",
+      "question": "Which pathway or pathways is {pathway} directly part of?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Pathway {name: $pathway})-[:CHILD_OF]->(p:Pathway) RETURN p.name AS parent ORDER BY parent",
+      "rows": 2,
+      "hash": "fnv1a64:d60a61b789ca99dd",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "pathway",
+          "type": "string",
+          "sample": "Meiosis",
+          "enum_values": null
+        }
+      ],
+      "work": 2855
+    },
+    {
+      "id": "pw_protein_pathways",
+      "question": "Which pathways does the protein with UniProt accession {accession} take part in?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Protein {uniprot_id: $accession})-[:PARTICIPATES_IN]->(pw:Pathway) RETURN pw.name AS pathway ORDER BY pathway",
+      "rows": 22,
+      "hash": "fnv1a64:53674b176a505db4",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "accession",
+          "type": "string",
+          "sample": "Q07812",
+          "enum_values": null
+        }
+      ],
+      "work": 2936
+    },
+    {
+      "id": "pw_protein_go_by_namespace",
+      "question": "How many GO terms is the protein with UniProt accession {accession} annotated with in each namespace?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Protein {uniprot_id: $accession})-[:ANNOTATED_WITH]->(g:GOTerm) RETURN g.namespace AS namespace, count(DISTINCT g) AS terms ORDER BY terms DESC, namespace",
+      "rows": 3,
+      "hash": "fnv1a64:7b4014be93ba8855",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "accession",
+          "type": "string",
+          "sample": "P04637",
+          "enum_values": null
+        }
+      ],
+      "work": 38129
+    },
+    {
+      "id": "pw_confident_partners",
+      "question": "Which proteins interact with {protein} with a confidence score of at least {min_score}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Protein {name: $protein})-[i:INTERACTS_WITH]-(o:Protein) WHERE i.combined_score >= $min_score RETURN DISTINCT o.name AS partner ORDER BY partner",
+      "rows": 26,
+      "hash": "fnv1a64:42a95f963e79613e",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "protein",
+          "type": "string",
+          "sample": "TP53",
+          "enum_values": null
+        },
+        {
+          "name": "min_score",
+          "type": "int",
+          "sample": 999,
+          "enum_values": null
+        }
+      ],
+      "work": 38834
+    },
+    {
+      "id": "pw_go_parents",
+      "question": "Which broader GO terms is 'apoptotic process' directly a kind of, one level up?",
+      "paraphrases": [
+        "What are the direct is-a parents of the GO term apoptotic process?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (:GOTerm {name: 'apoptotic process'})-[:IS_A]->(p:GOTerm) RETURN p.go_id AS go_id, p.name AS name ORDER BY go_id",
+      "rows": 1,
+      "hash": "fnv1a64:3f47077db666b0ba",
+      "unanswerable": false,
+      "params": [],
+      "work": 51901
+    },
+    {
+      "id": "pw_go_subtype_count",
+      "question": "How many GO terms are direct subtypes of 'programmed cell death'?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:GOTerm)-[:IS_A]->(:GOTerm {name: 'programmed cell death'}) RETURN count(DISTINCT c) AS subtypes",
+      "rows": 1,
+      "hash": "fnv1a64:e7eece3a08379c74",
+      "unanswerable": false,
+      "params": [],
+      "work": 51923
+    },
+    {
+      "id": "pw_term_protein_count",
+      "question": "How many proteins are annotated with the GO term 'apoptotic process'?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Protein)-[:ANNOTATED_WITH]->(:GOTerm {name: 'apoptotic process'}) RETURN count(DISTINCT p) AS proteins",
+      "rows": 1,
+      "hash": "fnv1a64:ed5865a64afff311",
+      "unanswerable": false,
+      "params": [],
+      "work": 39088
+    },
+    {
+      "id": "pw_pathway_evidence_split",
+      "question": "How many protein-to-pathway memberships are traceable author statements (TAS) and how many are electronically inferred (IEA)?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Protein)-[r:PARTICIPATES_IN]->(:Pathway) RETURN r.evidence AS evidence, count(*) AS memberships ORDER BY memberships DESC",
+      "rows": 2,
+      "hash": "fnv1a64:9cb32f97999a0f7f",
+      "unanswerable": false,
+      "params": [],
+      "work": 143007
+    },
+    {
+      "id": "pw_top_go_terms",
+      "question": "Which ten GO terms are used to annotate the most proteins?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Protein)-[:ANNOTATED_WITH]->(g:GOTerm) RETURN g.name AS term, count(DISTINCT p) AS proteins ORDER BY proteins DESC, term LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:daf8d660f15607c8",
+      "unanswerable": false,
+      "params": [],
+      "work": 86237
+    },
+    {
+      "id": "pw_top_go_terms_in_namespace",
+      "question": "Which five {namespace} GO terms annotate the most proteins?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Protein)-[:ANNOTATED_WITH]->(g:GOTerm {namespace: $namespace}) RETURN g.name AS term, count(DISTINCT p) AS proteins ORDER BY proteins DESC, term LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:9b3eb5e502f92bf3",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "namespace",
+          "type": "string",
+          "sample": "biological_process",
+          "enum_values": [
+            "biological_process",
+            "molecular_function",
+            "cellular_component"
+          ]
+        }
+      ],
+      "work": 290064
+    },
+    {
+      "id": "pw_avg_interaction_score",
+      "question": "What are the lowest, highest and average confidence scores of the protein interactions, with the average rounded to one decimal?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Protein)-[i:INTERACTS_WITH]->(:Protein) RETURN min(i.combined_score) AS lowest, max(i.combined_score) AS highest, round(avg(i.combined_score) * 10) / 10.0 AS average",
+      "rows": 1,
+      "hash": "fnv1a64:881411529954e3ed",
+      "unanswerable": false,
+      "params": [],
+      "work": 265810
+    },
+    {
+      "id": "pw_pathways_most_children",
+      "question": "Which five pathways have the most direct sub-pathways?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Pathway)-[:CHILD_OF]->(p:Pathway) RETURN p.name AS pathway, count(DISTINCT c) AS sub_pathways ORDER BY sub_pathways DESC, pathway LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:baec604a07d41803",
+      "unanswerable": false,
+      "params": [],
+      "work": 4522
+    },
+    {
+      "id": "pw_largest_complexes",
+      "question": "Which five protein complexes have the most protein components?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Protein)-[:COMPONENT_OF]->(c:Complex) RETURN c.name AS complex, count(DISTINCT p) AS components ORDER BY components DESC, complex LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:8f01e05367803c1a",
+      "unanswerable": false,
+      "params": [],
+      "work": 25723
+    },
+    {
+      "id": "pw_complex_component_count",
+      "question": "How many protein components does the complex with Reactome identifier R-HSA-749445 have?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Protein)-[:COMPONENT_OF]->(:Complex {complex_id: 'R-HSA-749445'}) RETURN count(DISTINCT p) AS components",
+      "rows": 1,
+      "hash": "fnv1a64:3e137b836fc54983",
+      "unanswerable": false,
+      "params": [],
+      "work": 16000
+    },
+    {
+      "id": "pw_annotations_by_evidence",
+      "question": "How many GO annotations are there for each evidence code?",
+      "paraphrases": [
+        "Break the protein GO annotations down by evidence code."
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Protein)-[a:ANNOTATED_WITH]->(:GOTerm) RETURN a.evidence_code AS evidence_code, count(*) AS annotations ORDER BY annotations DESC, evidence_code",
+      "rows": 21,
+      "hash": "fnv1a64:5f826d5608446964",
+      "unanswerable": false,
+      "params": [],
+      "work": 303545
+    },
+    {
+      "id": "pw_proteins_with_evidence",
+      "question": "How many proteins have at least one GO annotation backed by evidence code {code}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Protein)-[a:ANNOTATED_WITH]->(:GOTerm) WHERE a.evidence_code = $code RETURN count(DISTINCT p) AS proteins",
+      "rows": 1,
+      "hash": "fnv1a64:fe98f978e56e3a64",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "code",
+          "type": "string",
+          "sample": "IDA",
+          "enum_values": [
+            "IEA",
+            "IDA",
+            "ISS",
+            "IBA",
+            "TAS",
+            "IPI",
+            "IMP",
+            "NAS",
+            "HDA",
+            "IGI",
+            "IC",
+            "ISA",
+            "IEP",
+            "EXP"
+          ]
+        }
+      ],
+      "work": 344872
+    },
+    {
+      "id": "pw_signaling_pathway_count",
+      "question": "How many pathways have the word 'signaling' in their name, ignoring case?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Pathway) WHERE toLower(p.name) CONTAINS 'signaling' RETURN count(p) AS pathways",
+      "rows": 1,
+      "hash": "fnv1a64:90c4ae8be3adc395",
+      "unanswerable": false,
+      "params": [],
+      "work": 3145
+    },
+    {
+      "id": "pw_multi_parent_pathways",
+      "question": "How many pathways sit directly under more than one parent pathway?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (c:Pathway)-[:CHILD_OF]->(p:Pathway) WITH c, count(DISTINCT p) AS parents WHERE parents > 1 RETURN count(c) AS pathways",
+      "rows": 1,
+      "hash": "fnv1a64:44c50e153893de70",
+      "unanswerable": false,
+      "params": [],
+      "work": 5748
+    },
+    {
+      "id": "pw_go_part_of",
+      "question": "Which larger GO terms is 'mitotic spindle elongation' directly part of?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:GOTerm {name: 'mitotic spindle elongation'})-[:PART_OF]->(w:GOTerm) RETURN w.name AS whole ORDER BY whole",
+      "rows": 2,
+      "hash": "fnv1a64:f4965f0b39990cc0",
+      "unanswerable": false,
+      "params": [],
+      "work": 51904
+    },
+    {
+      "id": "pw_unanswerable_drug_targets",
+      "question": "Which approved drugs target {protein}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[:TARGETS]->(:Protein {name: $protein}) RETURN d.name AS drug ORDER BY drug",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "protein",
+          "type": "string",
+          "sample": "EGFR",
+          "enum_values": null
+        }
+      ],
+      "work": 37991
+    },
+    {
+      "id": "pw_unanswerable_tissue_expression",
+      "question": "In which tissue is TP53 most highly expressed?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (p:Protein {name: 'TP53'}) WHERE p.top_tissue IS NOT NULL RETURN p.top_tissue AS tissue",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [],
+      "work": 37990
+    },
+    {
+      "id": "pw_pathway_descendant_count",
+      "question": "How many pathways lie anywhere beneath {pathway} in the pathway hierarchy?",
+      "paraphrases": [
+        "Counting every level, how many sub-pathways does {pathway} have?"
+      ],
+      "difficulty": "hard",
+      "cypher": "MATCH (c:Pathway)-[:CHILD_OF*1..]->(:Pathway {name: $pathway}) RETURN count(DISTINCT c) AS pathways",
+      "rows": 1,
+      "hash": "fnv1a64:f8809b0f2d78c5f1",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "pathway",
+          "type": "string",
+          "sample": "Signal Transduction",
+          "enum_values": null
+        }
+      ],
+      "work": 3708
+    },
+    {
+      "id": "pw_pathway_top_level",
+      "question": "Which top-level pathways does 'Retinoid metabolism and transport' ultimately belong to?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (:Pathway {name: 'Retinoid metabolism and transport'})-[:CHILD_OF*1..]->(r:Pathway) WHERE NOT (r)-[:CHILD_OF]->(:Pathway) RETURN DISTINCT r.name AS top_level ORDER BY top_level",
+      "rows": 2,
+      "hash": "fnv1a64:f480a120dce655f2",
+      "unanswerable": false,
+      "params": [],
+      "work": 2862
+    },
+    {
+      "id": "pw_go_ancestors",
+      "question": "Following is-a links all the way up, which GO terms is GO:0006915 a kind of?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (:GOTerm {go_id: 'GO:0006915'})-[:IS_A*1..]->(a:GOTerm) RETURN DISTINCT a.go_id AS go_id, a.name AS name ORDER BY go_id",
+      "rows": 4,
+      "hash": "fnv1a64:557ad66e2e384549",
+      "unanswerable": false,
+      "params": [],
+      "work": 51914
+    },
+    {
+      "id": "pw_shared_partners",
+      "question": "How many interaction partners do {protein_a} and {protein_b} have in common?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (:Protein {name: $protein_a})-[:INTERACTS_WITH]-(x:Protein)-[:INTERACTS_WITH]-(:Protein {name: $protein_b}) RETURN count(DISTINCT x) AS shared_partners",
+      "rows": 1,
+      "hash": "fnv1a64:959574c1b460a7fc",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "protein_a",
+          "type": "string",
+          "sample": "TP53",
+          "enum_values": null
+        },
+        {
+          "name": "protein_b",
+          "type": "string",
+          "sample": "EGFR",
+          "enum_values": null
+        }
+      ],
+      "work": 39020
+    },
+    {
+      "id": "pw_pathway_overlap",
+      "question": "How many proteins take part in both {pathway_a} and {pathway_b}?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (:Pathway {name: $pathway_a})<-[:PARTICIPATES_IN]-(p:Protein)-[:PARTICIPATES_IN]->(:Pathway {name: $pathway_b}) RETURN count(DISTINCT p) AS proteins",
+      "rows": 1,
+      "hash": "fnv1a64:a854c593192fa405",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "pathway_a",
+          "type": "string",
+          "sample": "Apoptosis",
+          "enum_values": null
+        },
+        {
+          "name": "pathway_b",
+          "type": "string",
+          "sample": "Cell Cycle",
+          "enum_values": null
+        }
+      ],
+      "work": 3136
+    },
+    {
+      "id": "pw_partners_in_pathway",
+      "question": "Which interaction partners of {protein} also take part in the {pathway} pathway?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (:Protein {name: $protein})-[:INTERACTS_WITH]-(o:Protein)-[:PARTICIPATES_IN]->(:Pathway {name: $pathway}) RETURN DISTINCT o.name AS partner ORDER BY partner",
+      "rows": 46,
+      "hash": "fnv1a64:957a3fa3abf9e1b9",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "protein",
+          "type": "string",
+          "sample": "CDK1",
+          "enum_values": null
+        },
+        {
+          "name": "pathway",
+          "type": "string",
+          "sample": "Cell Cycle",
+          "enum_values": null
+        }
+      ],
+      "work": 3744
+    },
+    {
+      "id": "pw_partner_top_processes",
+      "question": "Which five biological-process GO terms are most common among the interaction partners of {protein}?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (:Protein {name: $protein})-[:INTERACTS_WITH]-(o:Protein)-[:ANNOTATED_WITH]->(g:GOTerm {namespace: 'biological_process'}) RETURN g.name AS process, count(DISTINCT o) AS partners ORDER BY partners DESC, process LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:bcb95c30c8e001e3",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "protein",
+          "type": "string",
+          "sample": "CDK1",
+          "enum_values": null
+        }
+      ],
+      "work": 40997
+    },
+    {
+      "id": "pw_pathway_top_functions",
+      "question": "Which five molecular-function GO terms are most common among the proteins in the {pathway} pathway?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (:Pathway {name: $pathway})<-[:PARTICIPATES_IN]-(p:Protein)-[:ANNOTATED_WITH]->(g:GOTerm {namespace: 'molecular_function'}) RETURN g.name AS function, count(DISTINCT p) AS proteins ORDER BY proteins DESC, function LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:b7d741a74ad7c465",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "pathway",
+          "type": "string",
+          "sample": "Apoptosis",
+          "enum_values": null
+        }
+      ],
+      "work": 6328
+    },
+    {
+      "id": "pw_pathway_crosstalk",
+      "question": "Which five other pathways share the most proteins with {pathway}?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (:Pathway {name: $pathway})<-[:PARTICIPATES_IN]-(p:Protein)-[:PARTICIPATES_IN]->(o:Pathway) WHERE o.name <> $pathway RETURN o.name AS pathway, count(DISTINCT p) AS shared_proteins ORDER BY shared_proteins DESC, pathway LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:975607d1c43cd10e",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "pathway",
+          "type": "string",
+          "sample": "Apoptosis",
+          "enum_values": null
+        }
+      ],
+      "work": 27176
+    },
+    {
+      "id": "pw_interactions_within_pathway",
+      "question": "How many protein interactions are there in which both partners take part in the {pathway} pathway?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (pw:Pathway {name: $pathway})<-[:PARTICIPATES_IN]-(a:Protein)-[i:INTERACTS_WITH]->(b:Protein)-[:PARTICIPATES_IN]->(pw) RETURN count(DISTINCT i) AS interactions",
+      "rows": 1,
+      "hash": "fnv1a64:24a228009d2f78fa",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "pathway",
+          "type": "string",
+          "sample": "Apoptosis",
+          "enum_values": null
+        }
+      ],
+      "work": 7253
+    },
+    {
+      "id": "pw_top_level_subtree_sizes",
+      "question": "For each top-level pathway, how many pathways lie anywhere beneath it? List the five largest.",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (r:Pathway) WHERE NOT (r)-[:CHILD_OF]->(:Pathway) MATCH (c:Pathway)-[:CHILD_OF*1..]->(r) RETURN r.name AS top_level, count(DISTINCT c) AS pathways ORDER BY pathways DESC, top_level LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:56aded2d05f6bf75",
+      "unanswerable": false,
+      "params": [],
+      "work": 19033
+    },
+    {
+      "id": "pw_unanswerable_partners_in_tissue",
+      "question": "Which interaction partners of {protein} are expressed in the liver?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (:Protein {name: $protein})-[:INTERACTS_WITH]-(o:Protein)-[:EXPRESSED_IN]->(:Tissue {name: 'liver'}) RETURN DISTINCT o.name AS partner ORDER BY partner",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "protein",
+          "type": "string",
+          "sample": "TP53",
+          "enum_values": null
+        }
+      ],
+      "work": 38730
+    }
+  ]
+}
