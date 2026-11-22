@@ -1,0 +1,655 @@
+[
+  {
+    "id": "bm_model_count",
+    "difficulty": "easy",
+    "question": "How many models are in the bank's model inventory?",
+    "paraphrases": [
+      "How many models does the bank have?"
+    ],
+    "cypher": "MATCH (m:Model) RETURN count(m) AS models"
+  },
+  {
+    "id": "bm_models_by_tier",
+    "difficulty": "easy",
+    "question": "How many models are there in each risk tier?",
+    "paraphrases": [
+      "Break the model inventory down by tier."
+    ],
+    "cypher": "MATCH (m:Model) RETURN m.tier AS tier, count(m) AS models ORDER BY tier"
+  },
+  {
+    "id": "bm_models_by_status",
+    "difficulty": "easy",
+    "question": "How many models are in production, in development, and retired?",
+    "paraphrases": [
+      "Count the models by lifecycle status."
+    ],
+    "cypher": "MATCH (m:Model) RETURN m.status AS status, count(m) AS models ORDER BY models DESC"
+  },
+  {
+    "id": "bm_models_in_category",
+    "difficulty": "easy",
+    "question": "How many {category} models are in the inventory?",
+    "cypher": "MATCH (m:Model {category: $category}) RETURN count(m) AS models",
+    "params": [
+      {
+        "name": "category",
+        "type": "string",
+        "sample": "IFRS9 ECL",
+        "enum_values": [
+          "CCAR PPNR",
+          "IFRS9 ECL",
+          "Credit Scorecard",
+          "Customer Churn",
+          "Market Risk VaR",
+          "CCAR Loss Projection",
+          "EAD — Exposure at Default",
+          "Next-Best-Product",
+          "LGD — Loss Given Default",
+          "Liquidity Stress",
+          "AML Transaction Monitoring",
+          "LLM Adverse-Media Screening",
+          "Fraud Detection",
+          "PD — Probability of Default"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_regulatory_frameworks",
+    "difficulty": "easy",
+    "question": "Which regulatory frameworks are recorded in the graph?",
+    "paraphrases": [
+      "List the regulations the model-risk graph tracks."
+    ],
+    "cypher": "MATCH (r:RegulatoryRequirement) RETURN DISTINCT r.framework AS framework"
+  },
+  {
+    "id": "bm_pii_features",
+    "difficulty": "easy",
+    "question": "Which model input features contain personally identifiable information?",
+    "paraphrases": [
+      "Which features are flagged as PII?"
+    ],
+    "cypher": "MATCH (f:Feature) WHERE f.pii = 1 RETURN f.name AS feature"
+  },
+  {
+    "id": "bm_sources_by_sensitivity",
+    "difficulty": "easy",
+    "question": "Which data sources are classified as {sensitivity}?",
+    "cypher": "MATCH (d:DataSource {sensitivity: $sensitivity}) RETURN d.name AS data_source",
+    "params": [
+      {
+        "name": "sensitivity",
+        "type": "string",
+        "sample": "Restricted",
+        "enum_values": [
+          "Confidential",
+          "Restricted",
+          "Public",
+          "Internal"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_submission_due",
+    "difficulty": "easy",
+    "question": "When is the {submission} submission next due, and which regulator receives it?",
+    "cypher": "MATCH (s:Submission {name: $submission}) RETURN s.next_due AS next_due, s.regulator AS regulator",
+    "params": [
+      {
+        "name": "submission",
+        "type": "string",
+        "sample": "ICAAP 2026",
+        "enum_values": [
+          "CCAR 2026",
+          "DFAST 2026",
+          "IFRS9 ECL Q2 2026",
+          "ICAAP 2026",
+          "AML SAR Program",
+          "Pillar 3 Disclosure 2026"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_findings_by_status",
+    "difficulty": "easy",
+    "question": "How many validation findings are open, closed, and overdue?",
+    "paraphrases": [
+      "Count the validation findings by status."
+    ],
+    "cypher": "MATCH (f:ValidationFinding) RETURN f.status AS status, count(f) AS findings ORDER BY findings DESC"
+  },
+  {
+    "id": "bm_invalid_assumptions",
+    "difficulty": "easy",
+    "question": "Which modelling assumptions are marked as stale or breached?",
+    "paraphrases": [
+      "Which assumptions are no longer valid?"
+    ],
+    "cypher": "MATCH (a:Assumption) WHERE a.status IN ['Stale', 'Breached'] RETURN a.description AS assumption, a.status AS status"
+  },
+  {
+    "id": "bm_people_with_role",
+    "difficulty": "easy",
+    "question": "Who holds the role of {role}?",
+    "cypher": "MATCH (p:Person {role: $role}) RETURN p.name AS person",
+    "params": [
+      {
+        "name": "role",
+        "type": "string",
+        "sample": "CRO",
+        "enum_values": [
+          "Model Owner",
+          "Model Validator",
+          "Model Risk Officer",
+          "Developer",
+          "CRO"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_non_regulatory_models",
+    "difficulty": "easy",
+    "question": "How many models are flagged as having no regulatory use?",
+    "cypher": "MATCH (m:Model) WHERE m.regulatory_use = 0 RETURN count(m) AS models"
+  },
+  {
+    "id": "bm_model_owner",
+    "difficulty": "easy",
+    "question": "Who owns the model {model}?",
+    "cypher": "MATCH (m:Model {name: $model})-[:OWNED_BY]->(p:Person) RETURN p.name AS owner, p.role AS role",
+    "params": [
+      {
+        "name": "model",
+        "type": "string",
+        "sample": "IFRS9 ECL · Sovereign #34"
+      }
+    ]
+  },
+  {
+    "id": "bm_controls_with_status",
+    "difficulty": "easy",
+    "question": "Which model controls are rated {status}?",
+    "cypher": "MATCH (c:Control {status: $status}) RETURN c.name AS control",
+    "params": [
+      {
+        "name": "status",
+        "type": "string",
+        "sample": "Not tested",
+        "enum_values": [
+          "Effective",
+          "Needs improvement",
+          "Not tested"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_bu_model_counts",
+    "difficulty": "medium",
+    "question": "How many models does each business unit own?",
+    "paraphrases": [
+      "Break the model inventory down by business unit."
+    ],
+    "cypher": "MATCH (m:Model)-[:BELONGS_TO]->(b:BusinessUnit) RETURN b.name AS business_unit, count(m) AS models ORDER BY models DESC, business_unit"
+  },
+  {
+    "id": "bm_production_models_in_bu",
+    "difficulty": "medium",
+    "question": "Which production models belong to the {business_unit} business unit?",
+    "cypher": "MATCH (m:Model {status: 'Production'})-[:BELONGS_TO]->(:BusinessUnit {name: $business_unit}) RETURN m.name AS model",
+    "params": [
+      {
+        "name": "business_unit",
+        "type": "string",
+        "sample": "Financial Crime",
+        "enum_values": [
+          "Retail Credit",
+          "Wholesale Credit",
+          "Cards & Unsecured",
+          "Markets",
+          "Treasury & ALM",
+          "Financial Crime",
+          "Capital Management",
+          "Model Risk"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_open_high_findings",
+    "difficulty": "medium",
+    "question": "How many high-severity findings are still open or overdue?",
+    "paraphrases": [
+      "How many unresolved high-severity validation findings are there?"
+    ],
+    "cypher": "MATCH (f:ValidationFinding {severity: 'High'}) WHERE f.status IN ['Open', 'Overdue'] RETURN count(f) AS findings"
+  },
+  {
+    "id": "bm_model_features",
+    "difficulty": "medium",
+    "question": "Which input features does the model {model} use?",
+    "cypher": "MATCH (:Model {name: $model})-[:USES_FEATURE]->(f:Feature) RETURN f.name AS feature",
+    "params": [
+      {
+        "name": "model",
+        "type": "string",
+        "sample": "AML Transaction Monitoring · SME #73"
+      }
+    ]
+  },
+  {
+    "id": "bm_feature_source",
+    "difficulty": "medium",
+    "question": "Which data source is the feature {feature} derived from?",
+    "cypher": "MATCH (:Feature {name: $feature})-[:DERIVED_FROM]->(d:DataSource) RETURN d.name AS data_source, d.system AS system",
+    "params": [
+      {
+        "name": "feature",
+        "type": "string",
+        "sample": "cash_intensity"
+      }
+    ]
+  },
+  {
+    "id": "bm_models_under_framework",
+    "difficulty": "medium",
+    "question": "How many models are governed by {framework}?",
+    "cypher": "MATCH (m:Model)-[:GOVERNED_BY]->(:RegulatoryRequirement {framework: $framework}) RETURN count(DISTINCT m) AS models",
+    "params": [
+      {
+        "name": "framework",
+        "type": "string",
+        "sample": "EU AI Act",
+        "enum_values": [
+          "SR 11-7",
+          "Basel III",
+          "IFRS 9",
+          "ECB TRIM",
+          "EU AI Act",
+          "RBI",
+          "CCAR/DFAST",
+          "FRTB"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_controls_for_framework",
+    "difficulty": "medium",
+    "question": "Which controls help satisfy {framework} requirements?",
+    "cypher": "MATCH (c:Control)-[:SATISFIES]->(:RegulatoryRequirement {framework: $framework}) RETURN DISTINCT c.name AS control",
+    "params": [
+      {
+        "name": "framework",
+        "type": "string",
+        "sample": "SR 11-7",
+        "enum_values": [
+          "SR 11-7",
+          "Basel III",
+          "IFRS 9",
+          "ECB TRIM",
+          "EU AI Act",
+          "BCBS 239"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_submission_direct_feeders",
+    "difficulty": "medium",
+    "question": "How many models feed directly into the {submission} submission?",
+    "cypher": "MATCH (m:Model)-[:FEEDS]->(:Submission {name: $submission}) RETURN count(m) AS models",
+    "params": [
+      {
+        "name": "submission",
+        "type": "string",
+        "sample": "CCAR 2026",
+        "enum_values": [
+          "CCAR 2026",
+          "DFAST 2026",
+          "IFRS9 ECL Q2 2026",
+          "ICAAP 2026",
+          "AML SAR Program",
+          "Pillar 3 Disclosure 2026"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_decision_model_counts",
+    "difficulty": "medium",
+    "question": "How many models support each business decision?",
+    "paraphrases": [
+      "Which business decisions rely on the most models?"
+    ],
+    "cypher": "MATCH (m:Model)-[:USED_IN]->(d:Decision) RETURN d.name AS decision, count(m) AS models ORDER BY models DESC, decision"
+  },
+  {
+    "id": "bm_top_validators",
+    "difficulty": "medium",
+    "question": "Which two people have performed the most model validations?",
+    "cypher": "MATCH (v:Validation)-[:PERFORMED_BY]->(p:Person) RETURN p.name AS validator, count(v) AS validations ORDER BY validations DESC, validator LIMIT 2"
+  },
+  {
+    "id": "bm_open_findings_top_category",
+    "difficulty": "medium",
+    "question": "Which category of finding has the most findings with status Open?",
+    "cypher": "MATCH (f:ValidationFinding {status: 'Open'}) RETURN f.category AS category, count(f) AS findings ORDER BY findings DESC, category LIMIT 1"
+  },
+  {
+    "id": "bm_top_tier1_owner",
+    "difficulty": "medium",
+    "question": "Who owns the most tier-1 models?",
+    "cypher": "MATCH (m:Model {tier: 1})-[:OWNED_BY]->(p:Person) RETURN p.name AS owner, count(m) AS tier1_models ORDER BY tier1_models DESC, owner LIMIT 1"
+  },
+  {
+    "id": "bm_developer_models",
+    "difficulty": "medium",
+    "question": "Which models did {developer} develop?",
+    "cypher": "MATCH (m:Model)-[:DEVELOPED_BY]->(:Person {name: $developer}) RETURN m.name AS model",
+    "params": [
+      {
+        "name": "developer",
+        "type": "string",
+        "sample": "Felix Park"
+      }
+    ]
+  },
+  {
+    "id": "bm_production_models_failed",
+    "difficulty": "medium",
+    "question": "Which production models have failed at least one validation?",
+    "cypher": "MATCH (m:Model {status: 'Production'})-[:VALIDATED_BY]->(v:Validation {outcome: 'Fail'}) RETURN DISTINCT m.name AS model"
+  },
+  {
+    "id": "bm_never_validated",
+    "difficulty": "medium",
+    "question": "Which models have never been validated?",
+    "paraphrases": [
+      "Which models have no validation on record?"
+    ],
+    "cypher": "MATCH (m:Model) WHERE NOT (m)-[:VALIDATED_BY]->(:Validation) RETURN m.name AS model"
+  },
+  {
+    "id": "bm_top_data_sources",
+    "difficulty": "medium",
+    "question": "Which three data sources do the most models depend on?",
+    "paraphrases": [
+      "What are the bank's biggest data concentration points?"
+    ],
+    "cypher": "MATCH (m:Model)-[:DEPENDS_ON]->(d:DataSource) RETURN d.name AS data_source, count(m) AS models ORDER BY models DESC, data_source LIMIT 3"
+  },
+  {
+    "id": "bm_last_validated_mismatch",
+    "difficulty": "medium",
+    "question": "For how many validated models does the recorded last-validated date differ from the date of their most recent validation?",
+    "cypher": "MATCH (m:Model)-[:VALIDATED_BY]->(v:Validation) WITH m, max(v.date) AS latest WHERE m.last_validated <> latest RETURN count(m) AS models"
+  },
+  {
+    "id": "bm_validations_per_year",
+    "difficulty": "medium",
+    "question": "How many validations were carried out in each year?",
+    "cypher": "MATCH (v:Validation) RETURN substring(v.date, 0, 4) AS year, count(v) AS validations ORDER BY year"
+  },
+  {
+    "id": "bm_validation_history",
+    "difficulty": "medium",
+    "question": "Show the validation history of {model}: date, type and outcome, oldest first.",
+    "cypher": "MATCH (:Model {name: $model})-[:VALIDATED_BY]->(v:Validation) RETURN v.date AS date, v.type AS type, v.outcome AS outcome ORDER BY date",
+    "params": [
+      {
+        "name": "model",
+        "type": "string",
+        "sample": "CCAR PPNR · Commercial Real Estate #62"
+      }
+    ]
+  },
+  {
+    "id": "bm_upstream_models",
+    "difficulty": "medium",
+    "question": "Which models feed their outputs into {model}?",
+    "cypher": "MATCH (u:Model)-[:FEEDS]->(:Model {name: $model}) RETURN u.name AS upstream_model",
+    "params": [
+      {
+        "name": "model",
+        "type": "string",
+        "sample": "CCAR PPNR · Commercial Real Estate #62"
+      }
+    ]
+  },
+  {
+    "id": "bm_ungoverning_requirement",
+    "difficulty": "medium",
+    "question": "Which regulatory requirement does not govern any model?",
+    "cypher": "MATCH (r:RegulatoryRequirement) WHERE NOT (:Model)-[:GOVERNED_BY]->(r) RETURN r.framework AS framework, r.clause AS clause, r.title AS title"
+  },
+  {
+    "id": "bm_people_in_bu",
+    "difficulty": "medium",
+    "question": "Who works in the {business_unit} business unit, and in what role?",
+    "cypher": "MATCH (p:Person)-[:MEMBER_OF]->(:BusinessUnit {name: $business_unit}) RETURN p.name AS person, p.role AS role",
+    "params": [
+      {
+        "name": "business_unit",
+        "type": "string",
+        "sample": "Markets",
+        "enum_values": [
+          "Retail Credit",
+          "Wholesale Credit",
+          "Markets",
+          "Treasury & ALM",
+          "Financial Crime",
+          "Model Risk"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_submission_all_feeders",
+    "difficulty": "hard",
+    "question": "How many distinct models contribute to the {submission} submission, either directly or by feeding another model that does?",
+    "cypher": "MATCH (m:Model)-[:FEEDS*1..2]->(:Submission {name: $submission}) RETURN count(DISTINCT m) AS models",
+    "params": [
+      {
+        "name": "submission",
+        "type": "string",
+        "sample": "CCAR 2026",
+        "enum_values": [
+          "CCAR 2026",
+          "DFAST 2026",
+          "IFRS9 ECL Q2 2026",
+          "ICAAP 2026",
+          "AML SAR Program",
+          "Pillar 3 Disclosure 2026"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_source_submission_exposure",
+    "difficulty": "hard",
+    "question": "If the {data_source} changed, which regulatory submissions would be affected, and through how many dependent models each?",
+    "cypher": "MATCH (:DataSource {name: $data_source})<-[:DEPENDS_ON]-(m:Model)-[:FEEDS]->(s:Submission) RETURN s.name AS submission, count(DISTINCT m) AS models ORDER BY models DESC, submission",
+    "params": [
+      {
+        "name": "data_source",
+        "type": "string",
+        "sample": "Credit Bureau Feed",
+        "enum_values": [
+          "Core Banking Ledger",
+          "Loan Origination System",
+          "Credit Bureau Feed",
+          "Macroeconomic Scenarios",
+          "Market Data Feed",
+          "Transaction Monitoring Store",
+          "KYC / Customer Master",
+          "Collateral Register",
+          "Payments Switch Log",
+          "Sanctions & Watchlists",
+          "Adverse Media Corpus",
+          "Treasury Positions",
+          "Deposits Behavioural Store",
+          "Vendor Macro Forecasts",
+          "Internal Ratings Repository"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_bu_open_high_findings",
+    "difficulty": "hard",
+    "question": "How many open or overdue high-severity findings does each business unit carry across its models?",
+    "cypher": "MATCH (b:BusinessUnit)<-[:BELONGS_TO]-(m:Model)-[:VALIDATED_BY]->(:Validation)-[:RAISED]->(f:ValidationFinding {severity: 'High'}) WHERE f.status IN ['Open', 'Overdue'] RETURN b.name AS business_unit, count(f) AS findings ORDER BY findings DESC, business_unit"
+  },
+  {
+    "id": "bm_owner_open_findings",
+    "difficulty": "hard",
+    "question": "How many open or overdue findings sit on models owned by {owner}?",
+    "cypher": "MATCH (:Person {name: $owner})<-[:OWNED_BY]-(m:Model)-[:VALIDATED_BY]->(:Validation)-[:RAISED]->(f:ValidationFinding) WHERE f.status IN ['Open', 'Overdue'] RETURN count(f) AS findings",
+    "params": [
+      {
+        "name": "owner",
+        "type": "string",
+        "sample": "Felix Okafor"
+      }
+    ]
+  },
+  {
+    "id": "bm_source_feature_decisions",
+    "difficulty": "hard",
+    "question": "Which business decisions are made by models that use a feature derived from the {data_source}?",
+    "cypher": "MATCH (:DataSource {name: $data_source})<-[:DERIVED_FROM]-(:Feature)<-[:USES_FEATURE]-(m:Model)-[:USED_IN]->(d:Decision) RETURN DISTINCT d.name AS decision",
+    "params": [
+      {
+        "name": "data_source",
+        "type": "string",
+        "sample": "Core Banking Ledger",
+        "enum_values": [
+          "Core Banking Ledger",
+          "Loan Origination System",
+          "Credit Bureau Feed",
+          "Macroeconomic Scenarios",
+          "Market Data Feed",
+          "Transaction Monitoring Store",
+          "KYC / Customer Master",
+          "Collateral Register",
+          "Payments Switch Log",
+          "Sanctions & Watchlists",
+          "Treasury Positions",
+          "Deposits Behavioural Store",
+          "Vendor Macro Forecasts",
+          "Internal Ratings Repository"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_framework_validation_evidence",
+    "difficulty": "hard",
+    "question": "How many validations provide evidence for controls that satisfy {framework} requirements?",
+    "cypher": "MATCH (v:Validation)-[:EVIDENCES]->(:Control)-[:SATISFIES]->(:RegulatoryRequirement {framework: $framework}) RETURN count(DISTINCT v) AS validations",
+    "params": [
+      {
+        "name": "framework",
+        "type": "string",
+        "sample": "EU AI Act",
+        "enum_values": [
+          "SR 11-7",
+          "Basel III",
+          "IFRS 9",
+          "ECB TRIM",
+          "EU AI Act",
+          "BCBS 239"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_failed_models_feeding_submission",
+    "difficulty": "hard",
+    "question": "Which production models that feed directly into {submission} have failed a validation?",
+    "cypher": "MATCH (v:Validation {outcome: 'Fail'})<-[:VALIDATED_BY]-(m:Model {status: 'Production'})-[:FEEDS]->(:Submission {name: $submission}) RETURN DISTINCT m.name AS model",
+    "params": [
+      {
+        "name": "submission",
+        "type": "string",
+        "sample": "ICAAP 2026",
+        "enum_values": [
+          "CCAR 2026",
+          "DFAST 2026",
+          "IFRS9 ECL Q2 2026",
+          "ICAAP 2026",
+          "AML SAR Program",
+          "Pillar 3 Disclosure 2026"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "bm_cross_bu_feeds",
+    "difficulty": "hard",
+    "question": "How many model-to-model feeds cross from one business unit to another?",
+    "cypher": "MATCH (b1:BusinessUnit)<-[:BELONGS_TO]-(a:Model)-[:FEEDS]->(c:Model)-[:BELONGS_TO]->(b2:BusinessUnit) WHERE b1 <> b2 RETURN count(*) AS cross_unit_feeds"
+  },
+  {
+    "id": "bm_same_unit_validations",
+    "difficulty": "hard",
+    "question": "How many validations were performed by a colleague of the model's owner, someone other than the owner who works in the same business unit?",
+    "cypher": "MATCH (val:Person)<-[:PERFORMED_BY]-(v:Validation)<-[:VALIDATED_BY]-(m:Model)-[:OWNED_BY]->(o:Person) WHERE val <> o MATCH (val)-[:MEMBER_OF]->(b:BusinessUnit), (o)-[:MEMBER_OF]->(b) RETURN count(DISTINCT v) AS validations"
+  },
+  {
+    "id": "bm_owner_self_validations",
+    "difficulty": "hard",
+    "question": "Which models were validated by their own owner, and by whom?",
+    "paraphrases": [
+      "Where did a model owner validate their own model?"
+    ],
+    "cypher": "MATCH (p:Person)<-[:PERFORMED_BY]-(v:Validation)<-[:VALIDATED_BY]-(m:Model)-[:OWNED_BY]->(p) RETURN m.name AS model, p.name AS owner, count(v) AS validations"
+  },
+  {
+    "id": "bm_pii_models_without_transparency",
+    "difficulty": "hard",
+    "question": "How many production models use at least one personal-data feature but are not governed by the EU AI Act transparency requirement (Art.13)?",
+    "cypher": "MATCH (m:Model {status: 'Production'})-[:USES_FEATURE]->(:Feature {pii: 1}) WHERE NOT (m)-[:GOVERNED_BY]->(:RegulatoryRequirement {framework: 'EU AI Act', clause: 'Art.13'}) RETURN count(DISTINCT m) AS models"
+  },
+  {
+    "id": "bm_unanswerable_scorecard_auc",
+    "difficulty": "easy",
+    "question": "What is the AUC of each credit scorecard model?",
+    "unanswerable": true,
+    "cypher": "MATCH (m:Model {category: 'Credit Scorecard'}) WHERE m.auc IS NOT NULL RETURN m.name AS model, m.auc AS auc"
+  },
+  {
+    "id": "bm_unanswerable_remediation_due",
+    "difficulty": "medium",
+    "question": "By what date must each overdue finding be remediated?",
+    "unanswerable": true,
+    "cypher": "MATCH (f:ValidationFinding {status: 'Overdue'}) WHERE f.due_date IS NOT NULL RETURN f.title AS finding, f.due_date AS due_date"
+  },
+  {
+    "id": "bm_unanswerable_validation_cost",
+    "difficulty": "medium",
+    "question": "How much did the validations of {model} cost?",
+    "unanswerable": true,
+    "cypher": "MATCH (:Model {name: $model})-[:VALIDATED_BY]->(v:Validation) WHERE v.cost IS NOT NULL RETURN v.date AS date, v.cost AS cost",
+    "params": [
+      {
+        "name": "model",
+        "type": "string",
+        "sample": "CCAR PPNR · Commercial Real Estate #62"
+      }
+    ]
+  },
+  {
+    "id": "bm_unanswerable_capital_charge",
+    "difficulty": "hard",
+    "question": "Which business unit's models carry the largest risk-weighted-asset charge?",
+    "unanswerable": true,
+    "cypher": "MATCH (m:Model)-[:BELONGS_TO]->(b:BusinessUnit) WHERE m.rwa IS NOT NULL RETURN b.name AS business_unit, sum(m.rwa) AS rwa ORDER BY rwa DESC, business_unit LIMIT 1"
+  }
+]

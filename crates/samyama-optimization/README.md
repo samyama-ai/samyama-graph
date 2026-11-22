@@ -63,7 +63,7 @@ We support 15+ algorithms across various families:
 ## Features
 - **Parallel Evaluation**: Automatic multi-threaded fitness calculation via `rayon`.
 - **Zero-Copy**: Minimal overhead when operating on large vectors.
-- **Constraints**: Support for penalty-based constraint handling (`min_total`, `budget`).
+- **Constraints**: three selectable strategies (`penalty`, `repair`, `feasibility`) for `min_total` and `budget`; see "Constraint handling" below.
 - **History Tracking**: Solvers yield convergence history for visualization.
 
 ## What a problem is here, and why there is no MPS/LP export
@@ -167,11 +167,61 @@ the node values, and the two constraints are the two keys below.
 | `populationSize`, `maxIterations` | Solver settings. | `50`, `100` |
 | `bestKnown` | A reference objective to report `gap` against (single-objective only). | none |
 
-The constraints are penalties, not hard limits: a solver can return a point
-that breaks them, and `feasible` says whether it did. In a multi-objective
-solve they are not part of the search at all; `feasible` still reports whether
-the point written back meets them. `budget` is measured with the first cost
+How the constraints act on the search is chosen with `constraintHandling`
+(next section). Under the default for a single-objective solve, `penalty`, they
+are not hard limits: a solver can return a point that breaks them, and
+`feasible` says whether it did. `budget` is measured with the first cost
 property. A label with no nodes returns no rows and writes nothing.
+
+### Constraint handling
+
+`constraintHandling` (OPT-10, #2266) chooses what a solver does with a
+candidate that breaks `budget` or `minTotal`. Every solver takes all three; the
+strategy wraps the problem (`samyama_optimization::constraints::Constrained`),
+not the solver.
+
+| Value | What the solver sees | Default for |
+|---|---|---|
+| `penalty` | objective plus penalty (budget overrun squared, minimum shortfall squared × 100) | single-objective solvers |
+| `repair` | the candidate repaired first, then scored; the repaired point is the one written back | -- |
+| `feasibility` | Deb's rules: any feasible point beats any infeasible one, a smaller violation beats a larger | multi-objective solvers |
+
+```cypher
+CALL algo.or.solve({label: 'Item', property: 'qty', costProperty: 'cost',
+                    minTotal: 6, budget: 10, constraintHandling: 'repair'})
+YIELD objective, feasible
+```
+
+- **The penalty is inexact.** A quadratic penalty is smaller than the saving
+  near the boundary, so the penalised optimum can sit just outside a
+  constraint and come back `feasible: false`. `repair` and `feasibility` do not
+  trade a violation for objective that way
+  (`tests/constraint_handling_strategies.rs` shows the three disagreeing).
+- **The repair** is greedy and deterministic: clamp to the bounds, raise the
+  cheapest variables to reach `minTotal`, lower the most expensive to meet
+  `budget`, then shift quantity from expensive to cheap. It aims a hair (1e-9
+  relative) inside each limit, because `feasible` is strict. When the
+  constraints cannot all be met it gets as close as those steps do, and the
+  answer says `feasible: false`.
+- **Feasibility rules are not feasibility-preserving operators.** OPT-10 names
+  operators that cannot leave the feasible region; that would mean changing
+  every solver's crossover and mutation. Deb's rules give the guarantee that
+  matters for the answer -- a feasible point, once found, is never displaced
+  by an infeasible one -- without touching a solver. For a single-objective
+  solve they are encoded in the fitness (an infeasible point scores `1e12`
+  plus its violation), which assumes feasible objectives stay below `1e12`.
+- **Multi-objective solves now see the constraints.** Before, `budget` and
+  `minTotal` were checked only after a multi-objective run, to report
+  `feasible`; the solvers searched without them.
+- `fitness` is what the solver minimised under the chosen strategy, so under
+  `feasibility` an infeasible answer's fitness is `1e12` plus its violation;
+  `objective` is always the plan's own objective.
+
+`/optimize/solve` takes the same choice as `constraint_handling`. Of its
+benchmarks only `uc2_dosing` is constrained; its repair drops the smaller dose
+of any contraindicated pair given together. `repair` on a benchmark with no
+repair (`sphere`, say) fails the solve with that reason rather than running a
+penalty.
 
 ### Writing the solution back
 
@@ -192,7 +242,7 @@ Every row reports how good the answer is, not only the answer (OPT-09):
 
 | Column | Meaning |
 |---|---|
-| `fitness` | Objective plus constraint penalty: what the solver minimised. A list for a multi-objective solve. |
+| `fitness` | What the solver minimised under the constraint strategy: objective plus penalty under `penalty`. A list for a multi-objective solve. |
 | `objective` | The objective alone, without the penalty. Equal to `fitness` when the answer is feasible. |
 | `feasible` | `true` when the answer meets every constraint (`budget`, `minTotal`). Strict: any violation is `false`. |
 | `gap` | `objective - bestKnown`, in the objective's units; negative means the answer beat it. `null` unless you pass `bestKnown`, because no solver here can prove a bound. |
