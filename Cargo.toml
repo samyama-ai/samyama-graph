@@ -429,3 +429,7 @@ harness = false
 [[bench]]
 name = "graph_vector_hybrid_benchmark"
 harness = false
+
+[[bench]]
+name = "hybrid_retrieval_benchmark"
+harness = false
