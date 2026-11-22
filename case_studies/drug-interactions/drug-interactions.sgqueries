@@ -1,0 +1,982 @@
+{
+  "format": "samyama.queries/1",
+  "generated_by": "samyama 1.14.0",
+  "provenance": "authored",
+  "tenant": "default",
+  "publishable": true,
+  "entries": [
+    {
+      "id": "di_drug_count",
+      "question": "How many drugs does the graph hold?",
+      "paraphrases": [
+        "How many drugs are in the drug-interactions graph?"
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug) RETURN count(d) AS drugs",
+      "rows": 1,
+      "hash": "fnv1a64:41a49cb54eed1dc7",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "di_gene_count",
+      "question": "How many genes are in the graph?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (g:Gene) RETURN count(g) AS genes",
+      "rows": 1,
+      "hash": "fnv1a64:e821c9db5ee9932d",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "di_side_effect_count",
+      "question": "How many different side effects are listed in the graph?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (s:SideEffect) RETURN count(s) AS side_effects",
+      "rows": 1,
+      "hash": "fnv1a64:b9e27292ad1b5e08",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "di_adverse_event_term_count",
+      "question": "How many distinct FDA adverse event terms does the graph hold?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (a:AdverseEvent) RETURN count(a) AS adverse_event_terms",
+      "rows": 1,
+      "hash": "fnv1a64:1ffd62db77f055fe",
+      "unanswerable": false,
+      "params": [],
+      "work": 2
+    },
+    {
+      "id": "di_drugs_without_cas",
+      "question": "How many drugs have no CAS registry number recorded?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug) WHERE d.cas_number IS NULL RETURN count(d) AS drugs_without_cas",
+      "rows": 1,
+      "hash": "fnv1a64:f666715b0f03ac43",
+      "unanswerable": false,
+      "params": [],
+      "work": 26579
+    },
+    {
+      "id": "di_bioactivity_by_measure",
+      "question": "How many bioactivity measurements are there of each measurement type, such as IC50 or Ki?",
+      "paraphrases": [
+        "Break the bioactivity records down by standard type."
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (b:Bioactivity) RETURN b.standard_type AS measure, count(*) AS measurements",
+      "rows": 5,
+      "hash": "fnv1a64:8708cdf301196e64",
+      "unanswerable": false,
+      "params": [],
+      "work": 208035
+    },
+    {
+      "id": "di_drug_drugbank_id",
+      "question": "What is the DrugBank ID of {drug}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug {name: $drug}) RETURN d.drugbank_id AS drugbank_id",
+      "rows": 1,
+      "hash": "fnv1a64:4931bdf56b65bee7",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Imatinib",
+          "enum_values": null
+        }
+      ],
+      "work": 19844
+    },
+    {
+      "id": "di_drug_cas_number",
+      "question": "What is the CAS number of {drug}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug {name: $drug}) RETURN d.cas_number AS cas_number",
+      "rows": 1,
+      "hash": "fnv1a64:e9fdf7c080256e62",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Warfarin",
+          "enum_values": null
+        }
+      ],
+      "work": 19844
+    },
+    {
+      "id": "di_drug_by_drugbank_id",
+      "question": "Which drug has the DrugBank ID {drugbank_id}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug {drugbank_id: $drugbank_id}) RETURN d.name AS drug",
+      "rows": 1,
+      "hash": "fnv1a64:63842d46ece06507",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drugbank_id",
+          "type": "string",
+          "sample": "DB00945",
+          "enum_values": null
+        }
+      ],
+      "work": 19844
+    },
+    {
+      "id": "di_drug_side_effect_count",
+      "question": "How many side effects are listed for {drug}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug {name: $drug})-[:HAS_SIDE_EFFECT]->(s:SideEffect) RETURN count(s) AS side_effects",
+      "rows": 1,
+      "hash": "fnv1a64:e8cd9ab4ddd142a0",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Imatinib",
+          "enum_values": null
+        }
+      ],
+      "work": 6572
+    },
+    {
+      "id": "di_drug_gene_count",
+      "question": "How many genes does {drug} interact with?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug {name: $drug})-[:INTERACTS_WITH_GENE]->(g:Gene) RETURN count(g) AS genes",
+      "rows": 1,
+      "hash": "fnv1a64:3889cac5af7a670f",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Sorafenib",
+          "enum_values": null
+        }
+      ],
+      "work": 6681
+    },
+    {
+      "id": "di_gene_drug_count",
+      "question": "How many drugs interact with the {gene} gene?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug)-[:INTERACTS_WITH_GENE]->(g:Gene {gene_name: $gene}) RETURN count(d) AS drugs",
+      "rows": 1,
+      "hash": "fnv1a64:1d2cb24d72f40ee3",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "gene",
+          "type": "string",
+          "sample": "CYP2D6",
+          "enum_values": null
+        }
+      ],
+      "work": 6817
+    },
+    {
+      "id": "di_side_effect_drug_count",
+      "question": "How many drugs list {side_effect} as a side effect?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug)-[:HAS_SIDE_EFFECT]->(s:SideEffect {name: $side_effect}) RETURN count(d) AS drugs",
+      "rows": 1,
+      "hash": "fnv1a64:e16c20e5e9d7615f",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "side_effect",
+          "type": "string",
+          "sample": "Nausea",
+          "enum_values": null
+        }
+      ],
+      "work": 6846
+    },
+    {
+      "id": "di_drugs_with_gene_links",
+      "question": "How many drugs have at least one recorded gene interaction?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug)-[:INTERACTS_WITH_GENE]->(:Gene) RETURN count(DISTINCT d) AS drugs",
+      "rows": 1,
+      "hash": "fnv1a64:1790733feebf0c0e",
+      "unanswerable": false,
+      "params": [],
+      "work": 41517
+    },
+    {
+      "id": "di_isolated_drugs",
+      "question": "How many drugs have no gene interactions, side effects, indications or adverse event reports at all?",
+      "paraphrases": [
+        "How many drugs in the graph are not connected to anything?"
+      ],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug) WHERE NOT (d)--() RETURN count(d) AS unlinked_drugs",
+      "rows": 1,
+      "hash": "fnv1a64:d0a534b4af8ad8b6",
+      "unanswerable": false,
+      "params": [],
+      "work": 33323
+    },
+    {
+      "id": "di_top_side_effect_drugs",
+      "question": "Which ten drugs have the most side effects listed?",
+      "paraphrases": [
+        "Which drugs carry the longest side-effect profile?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[:HAS_SIDE_EFFECT]->(s:SideEffect) RETURN d.name AS drug, count(s) AS side_effects ORDER BY side_effects DESC, drug LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:321083997f7b0a95",
+      "unanswerable": false,
+      "params": [],
+      "work": 2296
+    },
+    {
+      "id": "di_top_target_genes",
+      "question": "Which ten genes interact with the most drugs?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[:INTERACTS_WITH_GENE]->(g:Gene) RETURN g.gene_name AS gene, count(d) AS drugs ORDER BY drugs DESC, gene LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:1fb25cef8e8aac63",
+      "unanswerable": false,
+      "params": [],
+      "work": 8202
+    },
+    {
+      "id": "di_most_common_side_effects",
+      "question": "Which ten side effects are listed for the most drugs?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[:HAS_SIDE_EFFECT]->(s:SideEffect) RETURN s.name AS side_effect, count(d) AS drugs ORDER BY drugs DESC, side_effect LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:08fd3b8034b1f24f",
+      "unanswerable": false,
+      "params": [],
+      "work": 11736
+    },
+    {
+      "id": "di_most_indicated_drugs",
+      "question": "Which ten drugs have the most indications listed?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[:HAS_INDICATION]->(i:Indication) RETURN d.name AS drug, count(i) AS indications ORDER BY indications DESC, drug LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:682adbe07692a9de",
+      "unanswerable": false,
+      "params": [],
+      "work": 2212
+    },
+    {
+      "id": "di_most_common_indications",
+      "question": "Which ten conditions are linked as an indication to the most drugs?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[:HAS_INDICATION]->(i:Indication) RETURN i.name AS indication, count(d) AS drugs ORDER BY drugs DESC, indication LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:f86cc39d05cdf3b4",
+      "unanswerable": false,
+      "params": [],
+      "work": 5708
+    },
+    {
+      "id": "di_most_gene_drugs",
+      "question": "Which ten drugs interact with the most genes?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[:INTERACTS_WITH_GENE]->(g:Gene) RETURN d.name AS drug, count(g) AS genes ORDER BY genes DESC, drug LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:d7d0ef928afbdefc",
+      "unanswerable": false,
+      "params": [],
+      "work": 12260
+    },
+    {
+      "id": "di_drug_genes",
+      "question": "Which genes does {drug} interact with?",
+      "paraphrases": [
+        "List the gene targets of {drug}."
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug {name: $drug})-[:INTERACTS_WITH_GENE]->(g:Gene) RETURN g.gene_name AS gene",
+      "rows": 33,
+      "hash": "fnv1a64:cb50377dfc8ab6c9",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Warfarin",
+          "enum_values": null
+        }
+      ],
+      "work": 6548
+    },
+    {
+      "id": "di_gene_drugs_by_type",
+      "question": "Which drugs interact with {gene} with the interaction type '{interaction_type}'?",
+      "paraphrases": [
+        "Which drugs are listed as a {interaction_type} of {gene}?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[r:INTERACTS_WITH_GENE]->(g:Gene {gene_name: $gene}) WHERE r.interaction_type = $interaction_type RETURN d.name AS drug",
+      "rows": 12,
+      "hash": "fnv1a64:88d4b98fb5eeb568",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "gene",
+          "type": "string",
+          "sample": "DRD2",
+          "enum_values": null
+        },
+        {
+          "name": "interaction_type",
+          "type": "string",
+          "sample": "agonist",
+          "enum_values": [
+            "inhibitor",
+            "agonist",
+            "blocker",
+            "positive modulator",
+            "modulator",
+            "activator",
+            "antibody",
+            "binder",
+            "other/unknown",
+            "negative modulator",
+            "cleavage",
+            "potentiator",
+            "inverse agonist",
+            "vaccine",
+            "antisense oligonucleotide",
+            "immunotherapy"
+          ]
+        }
+      ],
+      "work": 6649
+    },
+    {
+      "id": "di_interaction_types",
+      "question": "How many drug-gene interactions are recorded for each interaction type, leaving out interactions with no type given?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Drug)-[r:INTERACTS_WITH_GENE]->(:Gene) WHERE r.interaction_type IS NOT NULL RETURN r.interaction_type AS interaction_type, count(*) AS interactions",
+      "rows": 16,
+      "hash": "fnv1a64:9d71ccccfce24f2f",
+      "unanswerable": false,
+      "params": [],
+      "work": 55538
+    },
+    {
+      "id": "di_interactions_untyped",
+      "question": "How many drug-gene interactions have no interaction type recorded?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Drug)-[r:INTERACTS_WITH_GENE]->(:Gene) WHERE r.interaction_type IS NULL RETURN count(r) AS untyped_interactions",
+      "rows": 1,
+      "hash": "fnv1a64:85c36f6f6c7ce370",
+      "unanswerable": false,
+      "params": [],
+      "work": 62592
+    },
+    {
+      "id": "di_interaction_sources",
+      "question": "How many drug-gene interactions come from each source database?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Drug)-[r:INTERACTS_WITH_GENE]->(:Gene) RETURN r.source AS source, count(*) AS interactions",
+      "rows": 20,
+      "hash": "fnv1a64:4ff25d799ffac2f1",
+      "unanswerable": false,
+      "params": [],
+      "work": 41555
+    },
+    {
+      "id": "di_drug_indications",
+      "question": "Which conditions are listed as indications for {drug}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug {name: $drug})-[:HAS_INDICATION]->(i:Indication) RETURN i.name AS indication",
+      "rows": 26,
+      "hash": "fnv1a64:3c3bd6262b989943",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Warfarin",
+          "enum_values": null
+        }
+      ],
+      "work": 2922
+    },
+    {
+      "id": "di_indication_true_drugs",
+      "question": "Which drugs have {indication} recorded as a true indication, not as a precondition or a plain text mention?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[r:HAS_INDICATION]->(i:Indication {name: $indication}) WHERE r.method = 'NLP_indication' RETURN d.name AS drug",
+      "rows": 23,
+      "hash": "fnv1a64:e6446a8cbcbc04a8",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "indication",
+          "type": "string",
+          "sample": "Asthma",
+          "enum_values": null
+        }
+      ],
+      "work": 2950
+    },
+    {
+      "id": "di_indication_methods",
+      "question": "How many drug-indication links were found by each extraction method?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Drug)-[r:HAS_INDICATION]->(:Indication) RETURN r.method AS method, count(*) AS links",
+      "rows": 3,
+      "hash": "fnv1a64:a396cab33290987f",
+      "unanswerable": false,
+      "params": [],
+      "work": 17594
+    },
+    {
+      "id": "di_drug_top_adverse_events",
+      "question": "What are the five adverse events most often reported to the FDA for {drug}, with their report counts?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug {name: $drug})-[r:HAS_ADVERSE_EVENT]->(a:AdverseEvent) RETURN a.term AS adverse_event, r.report_count AS reports ORDER BY reports DESC, adverse_event LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:45662971bda80a33",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Warfarin",
+          "enum_values": null
+        }
+      ],
+      "work": 1880
+    },
+    {
+      "id": "di_adverse_event_top_drugs",
+      "question": "Which five drugs have the most FDA reports of {adverse_event}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[r:HAS_ADVERSE_EVENT]->(a:AdverseEvent {term: $adverse_event}) RETURN d.name AS drug, r.report_count AS reports ORDER BY reports DESC, drug LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:393eb68d03395f8c",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "adverse_event",
+          "type": "string",
+          "sample": "HAEMORRHAGE",
+          "enum_values": null
+        }
+      ],
+      "work": 1796
+    },
+    {
+      "id": "di_adverse_events_most_reports",
+      "question": "Which ten adverse event terms have the most FDA reports in total across all drugs?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (:Drug)-[r:HAS_ADVERSE_EVENT]->(a:AdverseEvent) RETURN a.term AS adverse_event, sum(r.report_count) AS reports ORDER BY reports DESC, adverse_event LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:f3fbf7217241630b",
+      "unanswerable": false,
+      "params": [],
+      "work": 23368
+    },
+    {
+      "id": "di_single_largest_report",
+      "question": "Which drug and adverse event pair has the highest FDA report count, and how many reports is it?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[r:HAS_ADVERSE_EVENT]->(a:AdverseEvent) RETURN d.name AS drug, a.term AS adverse_event, r.report_count AS reports ORDER BY reports DESC, drug, adverse_event LIMIT 1",
+      "rows": 1,
+      "hash": "fnv1a64:22f3df4dbc57492d",
+      "unanswerable": false,
+      "params": [],
+      "work": 19821
+    },
+    {
+      "id": "di_genes_most_bioactivity",
+      "question": "Which ten genes have the most bioactivity measurements recorded against them?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (b:Bioactivity)-[:BIOACTIVITY_TARGET]->(g:Gene) RETURN g.gene_name AS gene, count(b) AS measurements ORDER BY measurements DESC, gene LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:def46ed9fef3eb67",
+      "unanswerable": false,
+      "params": [],
+      "work": 9324
+    },
+    {
+      "id": "di_gene_bioactivity_summary",
+      "question": "How many bioactivity measurements target {gene}, and what are their average and highest pChEMBL values?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (b:Bioactivity)-[:BIOACTIVITY_TARGET]->(g:Gene {gene_name: $gene}) RETURN count(b) AS measurements, round(avg(b.pchembl_value), 2) AS avg_pchembl, max(b.pchembl_value) AS max_pchembl",
+      "rows": 1,
+      "hash": "fnv1a64:bdc0983d9de647ef",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "gene",
+          "type": "string",
+          "sample": "EGFR",
+          "enum_values": null
+        }
+      ],
+      "work": 8618
+    },
+    {
+      "id": "di_gene_bioactivity_by_measure",
+      "question": "For {gene}, how many bioactivity measurements are there of each measurement type?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (b:Bioactivity)-[:BIOACTIVITY_TARGET]->(g:Gene {gene_name: $gene}) RETURN b.standard_type AS measure, count(*) AS measurements",
+      "rows": 5,
+      "hash": "fnv1a64:b9e0d59d9f7f4171",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "gene",
+          "type": "string",
+          "sample": "EGFR",
+          "enum_values": null
+        }
+      ],
+      "work": 8626
+    },
+    {
+      "id": "di_cyp_gene_drugs",
+      "question": "For each cytochrome P450 gene (gene names starting with CYP), how many drugs interact with it?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[:INTERACTS_WITH_GENE]->(g:Gene) WHERE g.gene_name STARTS WITH 'CYP' RETURN g.gene_name AS gene, count(d) AS drugs",
+      "rows": 45,
+      "hash": "fnv1a64:3efbc50a9c3ad0f8",
+      "unanswerable": false,
+      "params": [],
+      "work": 6594
+    },
+    {
+      "id": "di_drugs_se_and_ae",
+      "question": "How many drugs have both listed side effects and FDA adverse event reports?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug) WHERE (d)-[:HAS_SIDE_EFFECT]->() AND (d)-[:HAS_ADVERSE_EVENT]->() RETURN count(d) AS drugs",
+      "rows": 1,
+      "hash": "fnv1a64:4e875da546a329d7",
+      "unanswerable": false,
+      "params": [],
+      "work": 20059
+    },
+    {
+      "id": "di_top_inhibitors",
+      "question": "Which ten drugs are recorded as inhibitors of the most genes?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[r:INTERACTS_WITH_GENE]->(g:Gene) WHERE r.interaction_type = 'inhibitor' RETURN d.name AS drug, count(g) AS inhibited_genes ORDER BY inhibited_genes DESC, drug LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:4d23b7212c8d53fc",
+      "unanswerable": false,
+      "params": [],
+      "work": 55685
+    },
+    {
+      "id": "di_avg_side_effects",
+      "question": "On average, how many side effects does a drug have, counting only drugs with at least one listed?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug)-[:HAS_SIDE_EFFECT]->(s:SideEffect) WITH d, count(s) AS n RETURN round(avg(n), 1) AS avg_side_effects",
+      "rows": 1,
+      "hash": "fnv1a64:df1442ff7bd043b9",
+      "unanswerable": false,
+      "params": [],
+      "work": 146191
+    },
+    {
+      "id": "di_shared_target_pairs",
+      "question": "Which five pairs of drugs share the most gene targets?",
+      "paraphrases": [
+        "Which drug pairs compete at the most of the same genes?"
+      ],
+      "difficulty": "hard",
+      "cypher": "MATCH (d1:Drug)-[:INTERACTS_WITH_GENE]->(g:Gene)<-[:INTERACTS_WITH_GENE]-(d2:Drug) WHERE d1.name < d2.name RETURN d1.name AS drug_a, d2.name AS drug_b, count(g) AS shared_genes ORDER BY shared_genes DESC, drug_a, drug_b LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:841c88c21600fc98",
+      "unanswerable": false,
+      "params": [],
+      "work": 4319951
+    },
+    {
+      "id": "di_pair_shared_genes",
+      "question": "Which genes do {drug_a} and {drug_b} both interact with?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (a:Drug {name: $drug_a})-[:INTERACTS_WITH_GENE]->(g:Gene)<-[:INTERACTS_WITH_GENE]-(b:Drug {name: $drug_b}) RETURN g.gene_name AS gene",
+      "rows": 12,
+      "hash": "fnv1a64:44a8f440a0c260a2",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug_a",
+          "type": "string",
+          "sample": "Imatinib",
+          "enum_values": null
+        },
+        {
+          "name": "drug_b",
+          "type": "string",
+          "sample": "Nilotinib",
+          "enum_values": null
+        }
+      ],
+      "work": 6629
+    },
+    {
+      "id": "di_pair_shared_side_effects",
+      "question": "How many side effects do {drug_a} and {drug_b} have in common?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (a:Drug {name: $drug_a})-[:HAS_SIDE_EFFECT]->(s:SideEffect)<-[:HAS_SIDE_EFFECT]-(b:Drug {name: $drug_b}) RETURN count(s) AS shared_side_effects",
+      "rows": 1,
+      "hash": "fnv1a64:e4a2efe88c85bf7a",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug_a",
+          "type": "string",
+          "sample": "Fluoxetine",
+          "enum_values": null
+        },
+        {
+          "name": "drug_b",
+          "type": "string",
+          "sample": "Paroxetine",
+          "enum_values": null
+        }
+      ],
+      "work": 7758
+    },
+    {
+      "id": "di_similar_side_effect_drugs",
+      "question": "Which five other drugs share the most side effects with {drug}?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (d:Drug {name: $drug})-[:HAS_SIDE_EFFECT]->(s:SideEffect)<-[:HAS_SIDE_EFFECT]-(o:Drug) WHERE o <> d RETURN o.name AS drug, count(s) AS shared_side_effects ORDER BY shared_side_effects DESC, drug LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:2727f3d6f178a19a",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Fluoxetine",
+          "enum_values": null
+        }
+      ],
+      "work": 192254
+    },
+    {
+      "id": "di_gene_drug_side_effects",
+      "question": "Among the drugs that interact with {gene}, which ten side effects are listed for the most of them?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (g:Gene {gene_name: $gene})<-[:INTERACTS_WITH_GENE]-(d:Drug)-[:HAS_SIDE_EFFECT]->(s:SideEffect) RETURN s.name AS side_effect, count(d) AS drugs ORDER BY drugs DESC, side_effect LIMIT 10",
+      "rows": 10,
+      "hash": "fnv1a64:1ad4eb74acc97b4c",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "gene",
+          "type": "string",
+          "sample": "DRD2",
+          "enum_values": null
+        }
+      ],
+      "work": 19960
+    },
+    {
+      "id": "di_indication_target_genes",
+      "question": "Which five genes interact with the most drugs that have {indication} listed as an indication?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (i:Indication {name: $indication})<-[:HAS_INDICATION]-(d:Drug)-[:INTERACTS_WITH_GENE]->(g:Gene) RETURN g.gene_name AS gene, count(DISTINCT d) AS drugs ORDER BY drugs DESC, gene LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:bdc368547688b11f",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "indication",
+          "type": "string",
+          "sample": "Hypertension",
+          "enum_values": null
+        }
+      ],
+      "work": 5513
+    },
+    {
+      "id": "di_drug_ae_matching_side_effects",
+      "question": "Which of {drug}'s FDA adverse event terms also appear, ignoring case, among its listed side effects?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (d:Drug {name: $drug})-[:HAS_SIDE_EFFECT]->(s:SideEffect), (d)-[:HAS_ADVERSE_EVENT]->(a:AdverseEvent) WHERE toLower(s.name) = toLower(a.term) RETURN s.name AS side_effect",
+      "rows": 20,
+      "hash": "fnv1a64:cd3d0403857d86d9",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Warfarin",
+          "enum_values": null
+        }
+      ],
+      "work": 24433
+    },
+    {
+      "id": "di_gene_type_and_side_effect",
+      "question": "Which drugs interact with {gene} with the interaction type '{interaction_type}' and also list {side_effect} as a side effect?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (s:SideEffect {name: $side_effect})<-[:HAS_SIDE_EFFECT]-(d:Drug)-[r:INTERACTS_WITH_GENE]->(g:Gene {gene_name: $gene}) WHERE r.interaction_type = $interaction_type RETURN d.name AS drug",
+      "rows": 3,
+      "hash": "fnv1a64:0d0b131ef46a7042",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "gene",
+          "type": "string",
+          "sample": "DRD2",
+          "enum_values": null
+        },
+        {
+          "name": "interaction_type",
+          "type": "string",
+          "sample": "agonist",
+          "enum_values": [
+            "inhibitor",
+            "agonist",
+            "blocker",
+            "positive modulator",
+            "modulator",
+            "activator",
+            "antibody",
+            "binder",
+            "other/unknown",
+            "negative modulator",
+            "cleavage",
+            "potentiator",
+            "inverse agonist",
+            "vaccine",
+            "antisense oligonucleotide",
+            "immunotherapy"
+          ]
+        },
+        {
+          "name": "side_effect",
+          "type": "string",
+          "sample": "Nausea",
+          "enum_values": null
+        }
+      ],
+      "work": 6936
+    },
+    {
+      "id": "di_indication_also_side_effect",
+      "question": "Which five drugs list the most conditions as both an indication and a side effect (matching by name)?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (d:Drug)-[:HAS_INDICATION]->(i:Indication), (d)-[:HAS_SIDE_EFFECT]->(s:SideEffect) WHERE i.name = s.name RETURN d.name AS drug, count(*) AS overlapping_conditions ORDER BY overlapping_conditions DESC, drug LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:9545db25ae91c212",
+      "unanswerable": false,
+      "params": [],
+      "work": 2756616
+    },
+    {
+      "id": "di_busy_genes_with_bioactivity",
+      "question": "Which genes interact with at least 100 drugs and also have at least 500 bioactivity measurements recorded?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (d:Drug)-[:INTERACTS_WITH_GENE]->(g:Gene) WITH g, count(d) AS drugs WHERE drugs >= 100 MATCH (b:Bioactivity)-[:BIOACTIVITY_TARGET]->(g) WITH g, drugs, count(b) AS measurements WHERE measurements >= 500 RETURN g.gene_name AS gene",
+      "rows": 9,
+      "hash": "fnv1a64:881e0d828ffe7372",
+      "unanswerable": false,
+      "params": [],
+      "work": 53130
+    },
+    {
+      "id": "di_drug_targets_bioactivity",
+      "question": "Among the genes {drug} interacts with, which five have the most bioactivity measurements recorded?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (d:Drug {name: $drug})-[:INTERACTS_WITH_GENE]->(g:Gene)<-[:BIOACTIVITY_TARGET]-(b:Bioactivity) RETURN g.gene_name AS gene, count(b) AS measurements ORDER BY measurements DESC, gene LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:ddc94edab3b99864",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Imatinib",
+          "enum_values": null
+        }
+      ],
+      "work": 34054
+    },
+    {
+      "id": "di_gene_drug_top_adverse_events",
+      "question": "Across the drugs that interact with {gene}, which five adverse event terms have the most FDA reports in total?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (g:Gene {gene_name: $gene})<-[:INTERACTS_WITH_GENE]-(d:Drug)-[r:HAS_ADVERSE_EVENT]->(a:AdverseEvent) RETURN a.term AS adverse_event, sum(r.report_count) AS reports ORDER BY reports DESC, adverse_event LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:313c2142499ee418",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "gene",
+          "type": "string",
+          "sample": "CYP3A4",
+          "enum_values": null
+        }
+      ],
+      "work": 15484
+    },
+    {
+      "id": "di_side_effect_drugs_target_genes",
+      "question": "For drugs that list {side_effect} as a side effect, which five genes do the most of them interact with?",
+      "paraphrases": [],
+      "difficulty": "hard",
+      "cypher": "MATCH (s:SideEffect {name: $side_effect})<-[:HAS_SIDE_EFFECT]-(d:Drug)-[:INTERACTS_WITH_GENE]->(g:Gene) RETURN g.gene_name AS gene, count(d) AS drugs ORDER BY drugs DESC, gene LIMIT 5",
+      "rows": 5,
+      "hash": "fnv1a64:2211173020aecba4",
+      "unanswerable": false,
+      "params": [
+        {
+          "name": "side_effect",
+          "type": "string",
+          "sample": "Electrocardiogram QT prolonged",
+          "enum_values": null
+        }
+      ],
+      "work": 8449
+    },
+    {
+      "id": "di_unanswerable_molecular_weight",
+      "question": "What is the molecular weight of {drug}?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (d:Drug {name: $drug}) WHERE d.molecular_weight IS NOT NULL RETURN d.molecular_weight AS molecular_weight",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Warfarin",
+          "enum_values": null
+        }
+      ],
+      "work": 19842
+    },
+    {
+      "id": "di_unanswerable_gene_chromosome",
+      "question": "On which chromosome is the {gene} gene located?",
+      "paraphrases": [],
+      "difficulty": "easy",
+      "cypher": "MATCH (g:Gene {gene_name: $gene}) WHERE g.chromosome IS NOT NULL RETURN g.chromosome AS chromosome",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "gene",
+          "type": "string",
+          "sample": "CYP2D6",
+          "enum_values": null
+        }
+      ],
+      "work": 6449
+    },
+    {
+      "id": "di_unanswerable_side_effect_frequency",
+      "question": "How often do patients taking {drug} experience {side_effect}?",
+      "paraphrases": [],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug {name: $drug})-[r:HAS_SIDE_EFFECT]->(s:SideEffect {name: $side_effect}) WHERE r.frequency IS NOT NULL RETURN r.frequency AS frequency",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Warfarin",
+          "enum_values": null
+        },
+        {
+          "name": "side_effect",
+          "type": "string",
+          "sample": "Nausea",
+          "enum_values": null
+        }
+      ],
+      "work": 5861
+    },
+    {
+      "id": "di_unanswerable_drug_ic50",
+      "question": "What IC50 values have been measured for {drug} itself?",
+      "paraphrases": [
+        "Which bioactivity assays tested {drug}?"
+      ],
+      "difficulty": "medium",
+      "cypher": "MATCH (d:Drug {name: $drug})--(b:Bioactivity) WHERE b.standard_type = 'IC50' RETURN b.target_name AS target, b.standard_value AS ic50_nm",
+      "rows": 0,
+      "hash": "fnv1a64:cbf29ce484222325",
+      "unanswerable": true,
+      "params": [
+        {
+          "name": "drug",
+          "type": "string",
+          "sample": "Imatinib",
+          "enum_values": null
+        }
+      ],
+      "work": 19843
+    }
+  ]
+}

@@ -134,6 +134,36 @@ For more detail on the architecture and available example demos, see
 
 4. Add or update tests for any behavior you change.
 
+### Adding a graph algorithm
+
+Anything that walks the graph outward from some nodes -- distances,
+reachability, shortest paths, k-hop neighbourhoods, a level-by-level colouring --
+goes through `samyama_graph_algorithms::frontier` rather than a queue of its
+own (ALGO-13, #1695):
+
+- **`Direction`** says which edges a step follows, and **`neighbours`** /
+  **`distinct_neighbours`** say whether a parallel edge or a reciprocal pair
+  counts once or every time. Pick one of the two readings and say which in the
+  doc comment; they give different answers on a multigraph.
+- **`Bfs`** walks: `walk` from fresh, `extend` to carry on into another
+  component, `expand` to prune, `visit` to see every edge and to stop.
+- **`aggregate_neighbours`** folds a value over each node's neighbours.
+
+Then:
+
+1. Add the function to `BUILT_ON_FRONTIER` in `frontier.rs`, with the `CALL`
+   names that reach it. `every_listed_algorithm_is_built_on_the_frontier`
+   checks that it really uses the module, and `tests/frontier_algorithms.rs`
+   that every name is in the catalogue and runs from Cypher.
+2. Write its row in `docs/ALGORITHM-CONVENTIONS.md`.
+3. **Moving an existing algorithm onto the framework must not change its
+   answer.** Add it to `answers()` in `frontier_parity_tests.rs` and record its
+   fingerprint *before* touching it, in a commit of its own; the port then has
+   to reproduce it bit for bit.
+
+The module's own documentation (`cargo doc -p samyama-graph-algorithms`,
+`frontier`) has a complete example.
+
 ## Commit Message Convention
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/).
