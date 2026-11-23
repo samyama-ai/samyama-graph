@@ -1053,6 +1053,7 @@ fn checking_the_answer_is_not_billed_to_the_budget() {
         cfg(),
         Some(3),
         Budget::default(),
+        None,
     )
     .unwrap();
     let population = cfg().population_size as u64;

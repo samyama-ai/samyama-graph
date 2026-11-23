@@ -1,0 +1,536 @@
+[
+  {
+    "id": "pw_pathway_count",
+    "difficulty": "easy",
+    "question": "How many pathways does the graph hold?",
+    "paraphrases": [
+      "How many Reactome pathways are in the graph?"
+    ],
+    "cypher": "MATCH (p:Pathway) RETURN count(p) AS pathways"
+  },
+  {
+    "id": "pw_go_term_count",
+    "difficulty": "easy",
+    "question": "How many Gene Ontology terms are in the graph?",
+    "cypher": "MATCH (g:GOTerm) RETURN count(g) AS go_terms"
+  },
+  {
+    "id": "pw_go_terms_per_namespace",
+    "difficulty": "easy",
+    "question": "How many Gene Ontology terms are there in each namespace (biological process, molecular function, cellular component)?",
+    "paraphrases": [
+      "Break the GO terms down by namespace."
+    ],
+    "cypher": "MATCH (g:GOTerm) WHERE g.namespace IS NOT NULL RETURN g.namespace AS namespace, count(*) AS terms ORDER BY terms DESC"
+  },
+  {
+    "id": "pw_complex_count",
+    "difficulty": "easy",
+    "question": "How many protein complexes are in the graph?",
+    "cypher": "MATCH (c:Complex) RETURN count(c) AS complexes"
+  },
+  {
+    "id": "pw_reaction_count",
+    "difficulty": "easy",
+    "question": "How many reactions does the graph record?",
+    "cypher": "MATCH (r:Reaction) RETURN count(r) AS reactions"
+  },
+  {
+    "id": "pw_interaction_count",
+    "difficulty": "easy",
+    "question": "How many protein-protein interactions are recorded?",
+    "paraphrases": [
+      "How many protein interaction links does the graph have?"
+    ],
+    "cypher": "MATCH (:Protein)-[i:INTERACTS_WITH]->(:Protein) RETURN count(i) AS interactions"
+  },
+  {
+    "id": "pw_pathway_name_by_id",
+    "difficulty": "easy",
+    "question": "What is the name of the Reactome pathway {pathway_id}?",
+    "cypher": "MATCH (p:Pathway {pathway_id: $pathway_id}) RETURN p.name AS pathway",
+    "params": [
+      {
+        "name": "pathway_id",
+        "type": "string",
+        "sample": "R-HSA-109581"
+      }
+    ]
+  },
+  {
+    "id": "pw_go_term_lookup",
+    "difficulty": "easy",
+    "question": "What is the GO term GO:0006915 called, and which namespace is it in?",
+    "cypher": "MATCH (g:GOTerm {go_id: 'GO:0006915'}) RETURN g.name AS name, g.namespace AS namespace"
+  },
+  {
+    "id": "pw_protein_accession",
+    "difficulty": "easy",
+    "question": "What is the UniProt accession of the protein {protein}?",
+    "cypher": "MATCH (p:Protein {name: $protein}) RETURN p.uniprot_id AS accession",
+    "params": [
+      {
+        "name": "protein",
+        "type": "string",
+        "sample": "MAPK1"
+      }
+    ]
+  },
+  {
+    "id": "pw_protein_name_by_accession",
+    "difficulty": "easy",
+    "question": "Which gene name does the protein with UniProt accession Q09472 carry?",
+    "cypher": "MATCH (p:Protein {uniprot_id: 'Q09472'}) RETURN p.name AS gene_name"
+  },
+  {
+    "id": "pw_top_level_pathways",
+    "difficulty": "easy",
+    "question": "Which pathways are top-level, with no parent pathway above them?",
+    "paraphrases": [
+      "List the root pathways of the Reactome hierarchy."
+    ],
+    "cypher": "MATCH (p:Pathway) WHERE NOT (p)-[:CHILD_OF]->(:Pathway) RETURN p.name AS pathway ORDER BY pathway"
+  },
+  {
+    "id": "pw_protein_partner_count",
+    "difficulty": "easy",
+    "question": "How many interaction partners does {protein} have?",
+    "cypher": "MATCH (p:Protein {name: $protein})-[:INTERACTS_WITH]-(o:Protein) RETURN count(DISTINCT o) AS partners",
+    "params": [
+      {
+        "name": "protein",
+        "type": "string",
+        "sample": "TP53"
+      }
+    ]
+  },
+  {
+    "id": "pw_pathway_protein_count",
+    "difficulty": "easy",
+    "question": "How many proteins take part in the {pathway} pathway?",
+    "cypher": "MATCH (p:Protein)-[:PARTICIPATES_IN]->(pw:Pathway {name: $pathway}) RETURN count(DISTINCT p) AS proteins",
+    "params": [
+      {
+        "name": "pathway",
+        "type": "string",
+        "sample": "Apoptosis"
+      }
+    ]
+  },
+  {
+    "id": "pw_obsolete_go_terms",
+    "difficulty": "easy",
+    "question": "How many Gene Ontology terms are obsolete, that is, have a name starting with 'obsolete'?",
+    "cypher": "MATCH (g:GOTerm) WHERE g.name STARTS WITH 'obsolete' RETURN count(g) AS obsolete_terms"
+  },
+  {
+    "id": "pw_unanswerable_sequence_length",
+    "difficulty": "easy",
+    "question": "How many amino acids long is the MAPK1 protein?",
+    "unanswerable": true,
+    "cypher": "MATCH (p:Protein {name: 'MAPK1'}) WHERE p.sequence_length IS NOT NULL RETURN p.sequence_length AS length"
+  },
+  {
+    "id": "pw_top_interaction_hubs",
+    "difficulty": "medium",
+    "question": "Which ten proteins have the most interaction partners?",
+    "paraphrases": [
+      "What are the ten biggest hubs in the protein interaction network?"
+    ],
+    "cypher": "MATCH (p:Protein)-[:INTERACTS_WITH]-(o:Protein) RETURN p.name AS protein, count(DISTINCT o) AS partners ORDER BY partners DESC, protein LIMIT 10"
+  },
+  {
+    "id": "pw_most_pathways_proteins",
+    "difficulty": "medium",
+    "question": "Which ten proteins, by UniProt accession, take part in the most pathways?",
+    "cypher": "MATCH (p:Protein)-[:PARTICIPATES_IN]->(pw:Pathway) RETURN p.uniprot_id AS accession, count(DISTINCT pw) AS pathways ORDER BY pathways DESC, accession LIMIT 10"
+  },
+  {
+    "id": "pw_largest_pathways",
+    "difficulty": "medium",
+    "question": "Which ten pathways involve the most proteins?",
+    "paraphrases": [
+      "What are the ten largest pathways by number of proteins?"
+    ],
+    "cypher": "MATCH (p:Protein)-[:PARTICIPATES_IN]->(pw:Pathway) RETURN pw.name AS pathway, count(DISTINCT p) AS proteins ORDER BY proteins DESC, pathway LIMIT 10"
+  },
+  {
+    "id": "pw_sub_pathways",
+    "difficulty": "medium",
+    "question": "Which pathways sit directly under {pathway}?",
+    "paraphrases": [
+      "What are the immediate sub-pathways of {pathway}?"
+    ],
+    "cypher": "MATCH (c:Pathway)-[:CHILD_OF]->(:Pathway {name: $pathway}) RETURN c.name AS sub_pathway ORDER BY sub_pathway",
+    "params": [
+      {
+        "name": "pathway",
+        "type": "string",
+        "sample": "Signal Transduction"
+      }
+    ]
+  },
+  {
+    "id": "pw_parent_pathways",
+    "difficulty": "medium",
+    "question": "Which pathway or pathways is {pathway} directly part of?",
+    "cypher": "MATCH (:Pathway {name: $pathway})-[:CHILD_OF]->(p:Pathway) RETURN p.name AS parent ORDER BY parent",
+    "params": [
+      {
+        "name": "pathway",
+        "type": "string",
+        "sample": "Meiosis"
+      }
+    ]
+  },
+  {
+    "id": "pw_protein_pathways",
+    "difficulty": "medium",
+    "question": "Which pathways does the protein with UniProt accession {accession} take part in?",
+    "cypher": "MATCH (:Protein {uniprot_id: $accession})-[:PARTICIPATES_IN]->(pw:Pathway) RETURN pw.name AS pathway ORDER BY pathway",
+    "params": [
+      {
+        "name": "accession",
+        "type": "string",
+        "sample": "Q07812"
+      }
+    ]
+  },
+  {
+    "id": "pw_protein_go_by_namespace",
+    "difficulty": "medium",
+    "question": "How many GO terms is the protein with UniProt accession {accession} annotated with in each namespace?",
+    "cypher": "MATCH (:Protein {uniprot_id: $accession})-[:ANNOTATED_WITH]->(g:GOTerm) RETURN g.namespace AS namespace, count(DISTINCT g) AS terms ORDER BY terms DESC, namespace",
+    "params": [
+      {
+        "name": "accession",
+        "type": "string",
+        "sample": "P04637"
+      }
+    ]
+  },
+  {
+    "id": "pw_confident_partners",
+    "difficulty": "medium",
+    "question": "Which proteins interact with {protein} with a confidence score of at least {min_score}?",
+    "cypher": "MATCH (:Protein {name: $protein})-[i:INTERACTS_WITH]-(o:Protein) WHERE i.combined_score >= $min_score RETURN DISTINCT o.name AS partner ORDER BY partner",
+    "params": [
+      {
+        "name": "protein",
+        "type": "string",
+        "sample": "TP53"
+      },
+      {
+        "name": "min_score",
+        "type": "int",
+        "sample": 999
+      }
+    ]
+  },
+  {
+    "id": "pw_go_parents",
+    "difficulty": "medium",
+    "question": "Which broader GO terms is 'apoptotic process' directly a kind of, one level up?",
+    "paraphrases": [
+      "What are the direct is-a parents of the GO term apoptotic process?"
+    ],
+    "cypher": "MATCH (:GOTerm {name: 'apoptotic process'})-[:IS_A]->(p:GOTerm) RETURN p.go_id AS go_id, p.name AS name ORDER BY go_id"
+  },
+  {
+    "id": "pw_go_subtype_count",
+    "difficulty": "medium",
+    "question": "How many GO terms are direct subtypes of 'programmed cell death'?",
+    "cypher": "MATCH (c:GOTerm)-[:IS_A]->(:GOTerm {name: 'programmed cell death'}) RETURN count(DISTINCT c) AS subtypes"
+  },
+  {
+    "id": "pw_term_protein_count",
+    "difficulty": "medium",
+    "question": "How many proteins are annotated with the GO term 'apoptotic process'?",
+    "cypher": "MATCH (p:Protein)-[:ANNOTATED_WITH]->(:GOTerm {name: 'apoptotic process'}) RETURN count(DISTINCT p) AS proteins"
+  },
+  {
+    "id": "pw_pathway_evidence_split",
+    "difficulty": "medium",
+    "question": "How many protein-to-pathway memberships are traceable author statements (TAS) and how many are electronically inferred (IEA)?",
+    "cypher": "MATCH (:Protein)-[r:PARTICIPATES_IN]->(:Pathway) RETURN r.evidence AS evidence, count(*) AS memberships ORDER BY memberships DESC"
+  },
+  {
+    "id": "pw_top_go_terms",
+    "difficulty": "medium",
+    "question": "Which ten GO terms are used to annotate the most proteins?",
+    "cypher": "MATCH (p:Protein)-[:ANNOTATED_WITH]->(g:GOTerm) RETURN g.name AS term, count(DISTINCT p) AS proteins ORDER BY proteins DESC, term LIMIT 10"
+  },
+  {
+    "id": "pw_top_go_terms_in_namespace",
+    "difficulty": "medium",
+    "question": "Which five {namespace} GO terms annotate the most proteins?",
+    "cypher": "MATCH (p:Protein)-[:ANNOTATED_WITH]->(g:GOTerm {namespace: $namespace}) RETURN g.name AS term, count(DISTINCT p) AS proteins ORDER BY proteins DESC, term LIMIT 5",
+    "params": [
+      {
+        "name": "namespace",
+        "type": "string",
+        "sample": "biological_process",
+        "enum_values": [
+          "biological_process",
+          "molecular_function",
+          "cellular_component"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pw_avg_interaction_score",
+    "difficulty": "medium",
+    "question": "What are the lowest, highest and average confidence scores of the protein interactions, with the average rounded to one decimal?",
+    "cypher": "MATCH (:Protein)-[i:INTERACTS_WITH]->(:Protein) RETURN min(i.combined_score) AS lowest, max(i.combined_score) AS highest, round(avg(i.combined_score) * 10) / 10.0 AS average"
+  },
+  {
+    "id": "pw_pathways_most_children",
+    "difficulty": "medium",
+    "question": "Which five pathways have the most direct sub-pathways?",
+    "cypher": "MATCH (c:Pathway)-[:CHILD_OF]->(p:Pathway) RETURN p.name AS pathway, count(DISTINCT c) AS sub_pathways ORDER BY sub_pathways DESC, pathway LIMIT 5"
+  },
+  {
+    "id": "pw_largest_complexes",
+    "difficulty": "medium",
+    "question": "Which five protein complexes have the most protein components?",
+    "cypher": "MATCH (p:Protein)-[:COMPONENT_OF]->(c:Complex) RETURN c.name AS complex, count(DISTINCT p) AS components ORDER BY components DESC, complex LIMIT 5"
+  },
+  {
+    "id": "pw_complex_component_count",
+    "difficulty": "medium",
+    "question": "How many protein components does the complex with Reactome identifier R-HSA-749445 have?",
+    "cypher": "MATCH (p:Protein)-[:COMPONENT_OF]->(:Complex {complex_id: 'R-HSA-749445'}) RETURN count(DISTINCT p) AS components"
+  },
+  {
+    "id": "pw_annotations_by_evidence",
+    "difficulty": "medium",
+    "question": "How many GO annotations are there for each evidence code?",
+    "paraphrases": [
+      "Break the protein GO annotations down by evidence code."
+    ],
+    "cypher": "MATCH (:Protein)-[a:ANNOTATED_WITH]->(:GOTerm) RETURN a.evidence_code AS evidence_code, count(*) AS annotations ORDER BY annotations DESC, evidence_code"
+  },
+  {
+    "id": "pw_proteins_with_evidence",
+    "difficulty": "medium",
+    "question": "How many proteins have at least one GO annotation backed by evidence code {code}?",
+    "cypher": "MATCH (p:Protein)-[a:ANNOTATED_WITH]->(:GOTerm) WHERE a.evidence_code = $code RETURN count(DISTINCT p) AS proteins",
+    "params": [
+      {
+        "name": "code",
+        "type": "string",
+        "sample": "IDA",
+        "enum_values": [
+          "IEA",
+          "IDA",
+          "ISS",
+          "IBA",
+          "TAS",
+          "IPI",
+          "IMP",
+          "NAS",
+          "HDA",
+          "IGI",
+          "IC",
+          "ISA",
+          "IEP",
+          "EXP"
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pw_signaling_pathway_count",
+    "difficulty": "medium",
+    "question": "How many pathways have the word 'signaling' in their name, ignoring case?",
+    "cypher": "MATCH (p:Pathway) WHERE toLower(p.name) CONTAINS 'signaling' RETURN count(p) AS pathways"
+  },
+  {
+    "id": "pw_multi_parent_pathways",
+    "difficulty": "medium",
+    "question": "How many pathways sit directly under more than one parent pathway?",
+    "cypher": "MATCH (c:Pathway)-[:CHILD_OF]->(p:Pathway) WITH c, count(DISTINCT p) AS parents WHERE parents > 1 RETURN count(c) AS pathways"
+  },
+  {
+    "id": "pw_go_part_of",
+    "difficulty": "medium",
+    "question": "Which larger GO terms is 'mitotic spindle elongation' directly part of?",
+    "cypher": "MATCH (:GOTerm {name: 'mitotic spindle elongation'})-[:PART_OF]->(w:GOTerm) RETURN w.name AS whole ORDER BY whole"
+  },
+  {
+    "id": "pw_unanswerable_drug_targets",
+    "difficulty": "medium",
+    "question": "Which approved drugs target {protein}?",
+    "unanswerable": true,
+    "cypher": "MATCH (d:Drug)-[:TARGETS]->(:Protein {name: $protein}) RETURN d.name AS drug ORDER BY drug",
+    "params": [
+      {
+        "name": "protein",
+        "type": "string",
+        "sample": "EGFR"
+      }
+    ]
+  },
+  {
+    "id": "pw_unanswerable_tissue_expression",
+    "difficulty": "medium",
+    "question": "In which tissue is TP53 most highly expressed?",
+    "unanswerable": true,
+    "cypher": "MATCH (p:Protein {name: 'TP53'}) WHERE p.top_tissue IS NOT NULL RETURN p.top_tissue AS tissue"
+  },
+  {
+    "id": "pw_pathway_descendant_count",
+    "difficulty": "hard",
+    "question": "How many pathways lie anywhere beneath {pathway} in the pathway hierarchy?",
+    "paraphrases": [
+      "Counting every level, how many sub-pathways does {pathway} have?"
+    ],
+    "cypher": "MATCH (c:Pathway)-[:CHILD_OF*1..]->(:Pathway {name: $pathway}) RETURN count(DISTINCT c) AS pathways",
+    "params": [
+      {
+        "name": "pathway",
+        "type": "string",
+        "sample": "Signal Transduction"
+      }
+    ]
+  },
+  {
+    "id": "pw_pathway_top_level",
+    "difficulty": "hard",
+    "question": "Which top-level pathways does 'Retinoid metabolism and transport' ultimately belong to?",
+    "cypher": "MATCH (:Pathway {name: 'Retinoid metabolism and transport'})-[:CHILD_OF*1..]->(r:Pathway) WHERE NOT (r)-[:CHILD_OF]->(:Pathway) RETURN DISTINCT r.name AS top_level ORDER BY top_level"
+  },
+  {
+    "id": "pw_go_ancestors",
+    "difficulty": "hard",
+    "question": "Following is-a links all the way up, which GO terms is GO:0006915 a kind of?",
+    "cypher": "MATCH (:GOTerm {go_id: 'GO:0006915'})-[:IS_A*1..]->(a:GOTerm) RETURN DISTINCT a.go_id AS go_id, a.name AS name ORDER BY go_id"
+  },
+  {
+    "id": "pw_shared_partners",
+    "difficulty": "hard",
+    "question": "How many interaction partners do {protein_a} and {protein_b} have in common?",
+    "cypher": "MATCH (:Protein {name: $protein_a})-[:INTERACTS_WITH]-(x:Protein)-[:INTERACTS_WITH]-(:Protein {name: $protein_b}) RETURN count(DISTINCT x) AS shared_partners",
+    "params": [
+      {
+        "name": "protein_a",
+        "type": "string",
+        "sample": "TP53"
+      },
+      {
+        "name": "protein_b",
+        "type": "string",
+        "sample": "EGFR"
+      }
+    ]
+  },
+  {
+    "id": "pw_pathway_overlap",
+    "difficulty": "hard",
+    "question": "How many proteins take part in both {pathway_a} and {pathway_b}?",
+    "cypher": "MATCH (:Pathway {name: $pathway_a})<-[:PARTICIPATES_IN]-(p:Protein)-[:PARTICIPATES_IN]->(:Pathway {name: $pathway_b}) RETURN count(DISTINCT p) AS proteins",
+    "params": [
+      {
+        "name": "pathway_a",
+        "type": "string",
+        "sample": "Apoptosis"
+      },
+      {
+        "name": "pathway_b",
+        "type": "string",
+        "sample": "Cell Cycle"
+      }
+    ]
+  },
+  {
+    "id": "pw_partners_in_pathway",
+    "difficulty": "hard",
+    "question": "Which interaction partners of {protein} also take part in the {pathway} pathway?",
+    "cypher": "MATCH (:Protein {name: $protein})-[:INTERACTS_WITH]-(o:Protein)-[:PARTICIPATES_IN]->(:Pathway {name: $pathway}) RETURN DISTINCT o.name AS partner ORDER BY partner",
+    "params": [
+      {
+        "name": "protein",
+        "type": "string",
+        "sample": "CDK1"
+      },
+      {
+        "name": "pathway",
+        "type": "string",
+        "sample": "Cell Cycle"
+      }
+    ]
+  },
+  {
+    "id": "pw_partner_top_processes",
+    "difficulty": "hard",
+    "question": "Which five biological-process GO terms are most common among the interaction partners of {protein}?",
+    "cypher": "MATCH (:Protein {name: $protein})-[:INTERACTS_WITH]-(o:Protein)-[:ANNOTATED_WITH]->(g:GOTerm {namespace: 'biological_process'}) RETURN g.name AS process, count(DISTINCT o) AS partners ORDER BY partners DESC, process LIMIT 5",
+    "params": [
+      {
+        "name": "protein",
+        "type": "string",
+        "sample": "CDK1"
+      }
+    ]
+  },
+  {
+    "id": "pw_pathway_top_functions",
+    "difficulty": "hard",
+    "question": "Which five molecular-function GO terms are most common among the proteins in the {pathway} pathway?",
+    "cypher": "MATCH (:Pathway {name: $pathway})<-[:PARTICIPATES_IN]-(p:Protein)-[:ANNOTATED_WITH]->(g:GOTerm {namespace: 'molecular_function'}) RETURN g.name AS function, count(DISTINCT p) AS proteins ORDER BY proteins DESC, function LIMIT 5",
+    "params": [
+      {
+        "name": "pathway",
+        "type": "string",
+        "sample": "Apoptosis"
+      }
+    ]
+  },
+  {
+    "id": "pw_pathway_crosstalk",
+    "difficulty": "hard",
+    "question": "Which five other pathways share the most proteins with {pathway}?",
+    "cypher": "MATCH (:Pathway {name: $pathway})<-[:PARTICIPATES_IN]-(p:Protein)-[:PARTICIPATES_IN]->(o:Pathway) WHERE o.name <> $pathway RETURN o.name AS pathway, count(DISTINCT p) AS shared_proteins ORDER BY shared_proteins DESC, pathway LIMIT 5",
+    "params": [
+      {
+        "name": "pathway",
+        "type": "string",
+        "sample": "Apoptosis"
+      }
+    ]
+  },
+  {
+    "id": "pw_interactions_within_pathway",
+    "difficulty": "hard",
+    "question": "How many protein interactions are there in which both partners take part in the {pathway} pathway?",
+    "cypher": "MATCH (pw:Pathway {name: $pathway})<-[:PARTICIPATES_IN]-(a:Protein)-[i:INTERACTS_WITH]->(b:Protein)-[:PARTICIPATES_IN]->(pw) RETURN count(DISTINCT i) AS interactions",
+    "params": [
+      {
+        "name": "pathway",
+        "type": "string",
+        "sample": "Apoptosis"
+      }
+    ]
+  },
+  {
+    "id": "pw_top_level_subtree_sizes",
+    "difficulty": "hard",
+    "question": "For each top-level pathway, how many pathways lie anywhere beneath it? List the five largest.",
+    "cypher": "MATCH (r:Pathway) WHERE NOT (r)-[:CHILD_OF]->(:Pathway) MATCH (c:Pathway)-[:CHILD_OF*1..]->(r) RETURN r.name AS top_level, count(DISTINCT c) AS pathways ORDER BY pathways DESC, top_level LIMIT 5"
+  },
+  {
+    "id": "pw_unanswerable_partners_in_tissue",
+    "difficulty": "hard",
+    "question": "Which interaction partners of {protein} are expressed in the liver?",
+    "unanswerable": true,
+    "cypher": "MATCH (:Protein {name: $protein})-[:INTERACTS_WITH]-(o:Protein)-[:EXPRESSED_IN]->(:Tissue {name: 'liver'}) RETURN DISTINCT o.name AS partner ORDER BY partner",
+    "params": [
+      {
+        "name": "protein",
+        "type": "string",
+        "sample": "TP53"
+      }
+    ]
+  }
+]
