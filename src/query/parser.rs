@@ -188,7 +188,10 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                     let profile = inner.as_str().to_uppercase().starts_with("PROFILE");
                     query.profile = profile;
                     query.explain = !profile;
-                    query.plan_json = inner.into_inner().any(|p| p.as_rule() == Rule::explain_format);
+                    query.plan_json = inner.clone().into_inner().any(|p| p.as_rule() == Rule::explain_format);
+                    for p in inner.into_inner().filter(|p| p.as_rule() == Rule::explain_options) {
+                        parse_cypher_options(p, &mut query.plan_options)?;
+                    }
                 }
                 Rule::cypher_options => parse_cypher_options(inner, &mut query.plan_options)?,
                 Rule::pipeline_stmt => {
@@ -590,7 +593,11 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
                                 query.explain = true;
                             }
                             query.plan_json =
-                                inner.into_inner().any(|p| p.as_rule() == Rule::explain_format);
+                                inner.clone().into_inner().any(|p| p.as_rule() == Rule::explain_format);
+                            // `EXPLAIN (plan=2)` is `EXPLAIN CYPHER plan=2` (#2252).
+                            for p in inner.into_inner().filter(|p| p.as_rule() == Rule::explain_options) {
+                                parse_cypher_options(p, &mut query.plan_options)?;
+                            }
                         }
                         Rule::union_clause => {
                             // Check if UNION ALL (inner has "ALL" text)
@@ -891,7 +898,15 @@ fn parse_cypher_options(pair: pest::iterators::Pair<Rule>, options: &mut crate::
         let key = kv.next().map(|p| p.as_str().to_string()).unwrap_or_default();
         let value = kv.next().map(|p| p.as_str().to_string()).unwrap_or_default();
         let lower = key.to_ascii_lowercase();
-        if !seen.insert(lower.clone()) {
+        // Twice in one group, or once here and once in another group of the
+        // same query (`CYPHER plan=1 EXPLAIN (plan=2)`): either way one of
+        // the two would be dropped without a word.
+        let already = match lower.as_str() {
+            "planner" => options.planner.is_some(),
+            "plan" => options.plan.is_some(),
+            _ => false,
+        };
+        if !seen.insert(lower.clone()) || already {
             return Err(ParseError::Coded { code: c::BAD_ARGUMENT, message: format!("CYPHER option `{key}` is given twice") });
         }
         match lower.as_str() {
