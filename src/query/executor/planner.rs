@@ -4024,6 +4024,32 @@ impl QueryPlanner {
             )));
         }
 
+        if call_clause.procedure_name.eq_ignore_ascii_case("rdf.shacl.validate") {
+            // SHACL validation of the graph read as RDF (#2100, part 3). The
+            // shapes and the optional base are string literals, read at plan
+            // time, so a wrong argument is a planning error.
+            let args = &call_clause.arguments;
+            let text = |e: &Expression, what: &str| -> ExecutionResult<String> {
+                match e {
+                    Expression::Literal(PropertyValue::String(s)) => Ok(s.clone()),
+                    _ => Err(ExecutionError::PlanningError(format!(
+                        "rdf.shacl.validate: {what} must be a string literal"
+                    ))),
+                }
+            };
+            if !(1..=2).contains(&args.len()) {
+                return Err(ExecutionError::PlanningError(format!(
+                    "rdf.shacl.validate takes (shapesTurtle) or (shapesTurtle, baseIri); got {} arguments",
+                    args.len()
+                )));
+            }
+            let shapes = text(&args[0], "the shapes (Turtle)")?;
+            let base = args.get(1).map(|b| text(b, "the base IRI")).transpose()?;
+            let yields: Vec<(String, Option<String>)> =
+                call_clause.yield_items.iter().map(|i| (i.name.clone(), i.alias.clone())).collect();
+            return Ok(Box::new(super::shacl_call::ShaclValidateOperator::new(shapes, base, &yields)?));
+        }
+
         if call_clause.procedure_name.eq_ignore_ascii_case("db.index.point.nearest") {
             // (label, property, point, k) YIELD node, distance (#1618).
             let args = &call_clause.arguments;
