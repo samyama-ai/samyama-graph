@@ -7374,6 +7374,16 @@ NodeDeleted { id, .. } => {
         // node, so one that lost the label, or was deleted, is still in it and
         // must not be returned (#1605).
         let label_key = Label::new(label);
+        if strategy == Some(crate::vector::strategy::FilterStrategy::Inline) {
+            // The predicate inside the walk (#1999): one search, no widening.
+            return self
+                .vector_index
+                .search_inline_ef(label, property_key, query, k, ef, |id| {
+                    self.get_node(id)
+                        .is_some_and(|n| n.labels.contains(&label_key))
+                        && keep(id)
+                });
+        }
         self.vector_index
             .search_filtered_ef(label, property_key, query, k, ef, |id| {
                 self.get_node(id)
