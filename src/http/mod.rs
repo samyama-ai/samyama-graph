@@ -8,6 +8,7 @@ pub mod transactions;
 pub mod uc_problems;
 pub mod vector;
 pub mod structure;
+pub mod icons;
 
 pub use server::HttpServer;
 

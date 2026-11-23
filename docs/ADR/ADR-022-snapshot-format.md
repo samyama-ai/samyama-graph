@@ -172,6 +172,36 @@ converted file explains itself and can be converted back:
   import judges the sources already held before its own writes.
 - **Shown by `samyama verify`**, one line per source.
 
+**The header can carry the graph's node style** (`icons`, added 2026-11-23 for
+#2029): icon, colour and caption per label, colour per relationship type, so
+every client draws a label the same way:
+
+```json
+"icons": {"format": "samyama.icons/1",
+          "nodes": {"Country": {"color": "#2563EB", "icon": "lucide:Flag", "caption": "name"}},
+          "edges": {"IN_REGION": {"color": "#94A3B8"}}}
+```
+
+- **Embedded, not a sidecar.** Unlike `queries` and `results`, a style is
+  small (capped at 64 KiB and 1024 entries) and rarely changes, and losing it
+  because a second file was left behind is the failure it exists to prevent.
+  Additive like `sources`: absent when the graph has no style, so such a
+  header is written exactly as before. The version stays 2.
+- **Never fails an import.** An unknown `format`, or a style over the cap, is
+  skipped whole; a bad field (a colour that is not `#RRGGBB`, an icon that is
+  not `lucide:<Name>`) is dropped, and an entry with no valid field left is
+  dropped. Each is a warning in the import's `icons` report.
+- **Replaced, not merged.** Import loads the header's style as the graph's
+  (`GraphStore::icon_style`), leaving out labels and relationship types the
+  schema lacks and listing them as `unknown_labels` / `unknown_edge_types`. A
+  header without a style clears the graph's, the same rule as the catalog
+  (#2026). Every export writes the current style back.
+- **Set offline or live.** `samyama snapshot-icons <snap> --init | --from
+  <style.json> | --clear` rewrites only the header; `--init` fills every
+  unstyled label with Insight's default colour and icon and keeps the rest.
+  `GET /api/icons` serves the style and `PUT /api/icons` (write role) replaces
+  it, refusing a body with any mistake; the next export carries it.
+
 Properties are encoded as JSON values. Edge records ("stub edges") carry only `id, src, tgt, type, props` — endpoint/type metadata, no creation timestamps in v2.
 
 ### Typed values

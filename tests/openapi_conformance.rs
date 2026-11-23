@@ -254,6 +254,19 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
             json("unknown hierarchy", "/api/hierarchies/nope/cues", r#"{}"#),
             json("broken JSON", "/api/hierarchies/nope/cues", BROKEN),
         ],
+        ("GET", "/api/icons") => vec![
+            bare("get", "/api/icons"),
+            bare("another graph", "/api/icons?graph=other"),
+        ],
+        ("PUT", "/api/icons") => vec![
+            json("empty style", "/api/icons", r#"{}"#),
+            json(
+                "bad colour",
+                "/api/icons",
+                r##"{"nodes": {"A": {"color": "red"}}}"##,
+            ),
+            json("broken JSON", "/api/icons", BROKEN),
+        ],
         ("GET", "/api/structure") => vec![bare("get", "/api/structure")],
         ("PUT", "/api/structure") => vec![
             json("no fields", "/api/structure", r#"{}"#),

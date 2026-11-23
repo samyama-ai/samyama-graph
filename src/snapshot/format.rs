@@ -65,6 +65,14 @@ pub struct SnapshotHeader {
     /// when empty so existing snapshots serialize byte-for-byte unchanged.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub structures: Vec<crate::index::structure::StructuralConvention>,
+    /// The graph's node style (`samyama.icons/1`, #2029): icon, colour and
+    /// caption per label, colour per relationship type. Embedded, not a
+    /// sidecar: it is a few KB, and a style lost because a second file was
+    /// left behind is the failure it exists to prevent. Reading it never
+    /// fails an import; what cannot be read is skipped with a warning.
+    /// Additive: a header without it serializes exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons: Option<crate::snapshot::icons::IconStyle>,
 }
 
 /// Where a snapshot's sidecar -- its query catalog (#1154) or its materialized
@@ -322,4 +330,8 @@ pub struct ImportStats {
     /// the rows already there were indexed under it, and replacing it would
     /// change answers for data this import did not bring.
     pub index_conflicts: u64,
+    /// The style the header carried and what it covers (#2029). The import
+    /// loads it as the graph's style, replacing any before it. Boxed so the
+    /// report does not grow every enum that carries these stats.
+    pub icons: Box<crate::snapshot::icons::IconReport>,
 }

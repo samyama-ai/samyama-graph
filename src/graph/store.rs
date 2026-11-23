@@ -1352,6 +1352,12 @@ pub struct GraphStore {
     /// Structural manifold conventions & geometric index registry (#2035, #2036)
     pub structure_registry: Arc<crate::index::structure::StructureRegistry>,
 
+    /// The graph's node style (#2029) and where it came from: `header`,
+    /// `api` or `none`. Kept in memory; a snapshot export writes it into the
+    /// header, and an import replaces it.
+    icon_style: Option<crate::snapshot::icons::IconStyle>,
+    icon_style_source: &'static str,
+
     /// Named graph projections (ALGO-05): views kept for repeated analytics.
     /// In memory only; see `crate::graph::projection`.
     pub graph_projections: Arc<crate::graph::projection::GraphProjections>,
@@ -1507,6 +1513,8 @@ impl GraphStore {
             index_catalog_dirty: std::sync::atomic::AtomicBool::new(false),
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
             structure_registry: Arc::new(crate::index::structure::StructureRegistry::new()),
+            icon_style: None,
+            icon_style_source: "none",
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
             features: Arc::new(crate::graph::feature::FeatureRegistry::new()),
             node_columns: ColumnStore::new(),
@@ -5664,6 +5672,31 @@ NodeDeleted { id, .. } => {
     /// this order and each type's edges in turn is reproducible end to end.
     /// The sort is over the distinct types only -- a handful of names, not a
     /// per-edge cost.
+    /// The graph's node style (#2029), if it has one.
+    pub fn icon_style(&self) -> Option<&crate::snapshot::icons::IconStyle> {
+        self.icon_style.as_ref()
+    }
+
+    /// Where the style came from: `header`, `api`, or `none` when there is
+    /// no style.
+    pub fn icon_style_source(&self) -> &'static str {
+        if self.icon_style.is_some() {
+            self.icon_style_source
+        } else {
+            "none"
+        }
+    }
+
+    /// Replaces the graph's style. An empty style is no style.
+    pub fn set_icon_style(
+        &mut self,
+        style: Option<crate::snapshot::icons::IconStyle>,
+        source: &'static str,
+    ) {
+        self.icon_style = style.filter(|s| !s.is_empty());
+        self.icon_style_source = source;
+    }
+
     pub fn all_edge_types(&self) -> Vec<&EdgeType> {
         let mut types: Vec<&EdgeType> = self.edge_type_index.keys().collect();
         types.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -6597,6 +6630,8 @@ NodeDeleted { id, .. } => {
         self.snapshot_sources.clear();
         self.snapshot_sources_stale = false;
         self.structure_registry.clear();
+        self.icon_style = None;
+        self.icon_style_source = "none";
         self.nodes.clear();
         self.edge_type_table.clear();
         self.edge_type_to_id.clear();

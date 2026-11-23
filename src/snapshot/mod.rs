@@ -13,6 +13,7 @@ pub mod codec;
 pub mod content_hash;
 pub mod encryption;
 pub mod format;
+pub mod icons;
 pub mod keys;
 pub mod persist;
 pub mod verify;
@@ -357,6 +358,7 @@ pub fn export_tenant_with_compression(
         results: None,
         sources,
         structures: store.structure_registry.list(),
+        icons: store.icon_style().cloned(),
     };
     let header_json = serde_json::to_string(&header)?;
     gz.write_all(header_json.as_bytes())?;
@@ -1854,6 +1856,32 @@ fn import_tenant_inner(
         store.structure_registry.upsert(convention.clone());
     }
 
+    // The header's style replaces the graph's, and a header without one
+    // clears it (#2029), the same rule as the catalog in #2026: a style left
+    // from the previous snapshot would draw this one's labels.
+    let mut schema_labels: Vec<String> = store
+        .all_labels()
+        .into_iter()
+        .map(|l| l.as_str().to_string())
+        .collect();
+    let schema_edge_types: Vec<String> = store
+        .all_edge_types()
+        .into_iter()
+        .map(|t| t.as_str().to_string())
+        .collect();
+    schema_labels.sort_unstable();
+    let (icon_style, icons) = crate::snapshot::icons::IconStyle::for_import(
+        header.icons.as_ref(),
+        &schema_labels,
+        &schema_edge_types,
+    );
+    let icon_source = if icon_style.is_some() {
+        "header"
+    } else {
+        "none"
+    };
+    store.set_icon_style(icon_style, icon_source);
+
     Ok(ImportStats {
         node_count: imported_node_count,
         edge_count: imported_edge_count,
@@ -1872,6 +1900,7 @@ fn import_tenant_inner(
         hierarchy_count,
         indexes,
         index_conflicts,
+        icons: Box::new(icons),
     })
 }
 
@@ -2548,6 +2577,7 @@ mod tests {
             results: None,
             sources: Vec::new(),
             structures: Vec::new(),
+            icons: None,
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();
@@ -2580,6 +2610,7 @@ mod tests {
             results: None,
             sources: Vec::new(),
             structures: Vec::new(),
+            icons: None,
         };
         let mut gz = GzEncoder::new(Vec::new(), Compression::default());
         let header_json = serde_json::to_string(&header).unwrap();

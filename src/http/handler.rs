@@ -3785,6 +3785,9 @@ pub async fn restore_snapshot_handler(
                     "failed": r.failed,
                     "conflicts": stats.index_conflicts,
                 })),
+                // The header's style, now the graph's (#2029): what it covers
+                // and what was skipped. `source: "none"` when it had none.
+                "icons": stats.icons,
             }))
             .into_response()
         }
