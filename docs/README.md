@@ -100,4 +100,4 @@ Retired 2026-10-14 because it no longer described anything in the repository (#1
 
 ### Vector benchmark methodology
 
-- **[benchmarks/](./benchmarks/)** — vector benchmark protocols, filtered-search strategy costs, graph + vector hybrid queries and checkpoint methodology; documents distinguish implemented scope from measurements still required.
+- **[benchmarks/](./benchmarks/)** — vector benchmark protocols, filtered-search strategy costs, graph + vector hybrid queries, recall under churn and checkpoint methodology; documents distinguish implemented scope from measurements still required.
