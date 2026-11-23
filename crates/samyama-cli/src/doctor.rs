@@ -231,10 +231,26 @@ fn check_nlq_endpoint(get: impl Fn(&str) -> Option<String>, timeout: Duration) -
 /// Where a strict Snap cannot read without the `removable-media` plug.
 const REMOVABLE_MEDIA_ROOTS: [&str; 2] = ["/media", "/mnt"];
 
-/// `dir` as an absolute path, without touching the filesystem: a data
-/// directory that does not exist yet still has a place it will be.
-fn absolute(dir: &std::path::Path) -> std::path::PathBuf {
-    std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf())
+/// A Snap path as an absolute, slash-separated string, without touching the
+/// filesystem. Snap paths use Unix syntax even in tests running on Windows.
+fn snap_path(dir: &std::path::Path) -> String {
+    let raw = dir.to_string_lossy();
+    let path = if raw.starts_with('/') {
+        raw.into_owned()
+    } else {
+        std::path::absolute(dir)
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    };
+    path.replace('\\', "/")
+}
+
+/// Component-aware prefix check for Unix-style paths supplied by snapd.
+fn snap_path_is_within(path: &str, root: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let root = root.trim_end_matches('/');
+    path == root || path.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
 }
 
 /// Under a strict Snap, can `/media` and `/mnt` be read? (#2203)
@@ -263,11 +279,11 @@ fn check_snap_removable_media(
         Some(true) => Check::new(NAME, Verdict::Pass,
             format!("connected; {} are readable", REMOVABLE_MEDIA_ROOTS.join(" and "))),
         Some(false) => {
-            let dir = absolute(data_dir);
-            if REMOVABLE_MEDIA_ROOTS.iter().any(|r| dir.starts_with(r)) {
+            let dir = snap_path(data_dir);
+            if REMOVABLE_MEDIA_ROOTS.iter().any(|r| snap_path_is_within(&dir, r)) {
                 Check::new(NAME, Verdict::Fail, format!(
                     "not connected, and the data directory {} is on removable media; {fix}",
-                    dir.display()))
+                    dir))
             } else {
                 Check::new(NAME, Verdict::Warn, format!(
                     "not connected: a .sgsnap under {} cannot be read or imported; {fix}",
@@ -290,20 +306,20 @@ fn check_snap_data_dir(get: impl Fn(&str) -> Option<String>, data_dir: &std::pat
     if get("SNAP").is_none() {
         return Check::new(NAME, Verdict::Skipped, "not running as a Snap");
     }
-    let dir = absolute(data_dir);
-    let under = |var: &str| get(var).filter(|v| !v.is_empty()).filter(|v| dir.starts_with(v));
+    let dir = snap_path(data_dir);
+    let under = |var: &str| get(var).filter(|v| !v.is_empty()).filter(|v| snap_path_is_within(&dir, v));
     if let Some(common) = under("SNAP_COMMON") {
         return Check::new(NAME, Verdict::Pass,
-            format!("{} is under $SNAP_COMMON ({common}), shared by every revision", dir.display()));
+            format!("{} is under $SNAP_COMMON ({common}), shared by every revision", dir));
     }
     if let Some(data) = under("SNAP_DATA") {
         let to = get("SNAP_COMMON").map_or_else(|| "$SNAP_COMMON".to_string(), |c| format!("{c}/data"));
         return Check::new(NAME, Verdict::Warn, format!(
             "{} is under $SNAP_DATA ({data}), which every refresh copies in full; use {to}",
-            dir.display()));
+            dir));
     }
     Check::new(NAME, Verdict::Pass,
-        format!("{} is outside the Snap's revisioned data, so a refresh does not copy it", dir.display()))
+        format!("{} is outside the Snap's revisioned data, so a refresh does not copy it", dir))
 }
 
 /// `snapctl is-connected removable-media`, inside a Snap. Exit 0 is
