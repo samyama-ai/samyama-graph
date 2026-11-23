@@ -20627,7 +20627,7 @@ impl AlgorithmOperator {
     }
 
     /// A string config value, refused when it is not one.
-    fn config_string(&self, config: &std::collections::HashMap<String, PropertyValue>, key: &str) -> ExecutionResult<Option<String>> {
+    fn structural_config_string(&self, config: &std::collections::HashMap<String, PropertyValue>, key: &str) -> ExecutionResult<Option<String>> {
         match config.get(key) {
             None => Ok(None),
             Some(PropertyValue::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
@@ -20664,7 +20664,7 @@ impl AlgorithmOperator {
                 self.name, self.name
             )));
         };
-        let cost_name = self.config_string(&config, "cost")?.unwrap_or_else(|| PathCost::NAMES[1].to_string());
+        let cost_name = self.structural_config_string(&config, "cost")?.unwrap_or_else(|| PathCost::NAMES[1].to_string());
         let cost = PathCost::parse(&cost_name).ok_or_else(|| {
             ExecutionError::bad_argument(format!(
                 "{}: unknown cost `{cost_name}`; use `hops` (fewest relationships) or `length` \
@@ -20682,7 +20682,7 @@ impl AlgorithmOperator {
                 )))
             }
         };
-        let edge_type = self.config_string(&config, "edgeType")?;
+        let edge_type = self.structural_config_string(&config, "edgeType")?;
         let structure = Structure::resolve(store, structure.as_deref())
             .map_err(|e| ExecutionError::bad_argument(format!("{}: {e}", self.name)))?;
         let view = self.view(store, structure.convention.label.as_deref(), edge_type.as_deref(), None)?;
@@ -20733,7 +20733,7 @@ impl AlgorithmOperator {
                 )))
             }
         } as usize;
-        let edge_type = self.config_string(&config, "edgeType")?;
+        let edge_type = self.structural_config_string(&config, "edgeType")?;
         let structure = Structure::resolve(store, structure.as_deref())
             .map_err(|e| ExecutionError::bad_argument(format!("{}: {e}", self.name)))?;
         let radius = match config.get("radius") {
