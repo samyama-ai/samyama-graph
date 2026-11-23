@@ -137,7 +137,7 @@ for ind in result.pareto_front {
 ## Integration with Samyama DB
 You can access these solvers via Cypher!
 
-```cypher
+```cypher graph=factories
 CALL algo.or.solve({
   algorithm: 'GWO',
   label: 'Factory',
@@ -148,23 +148,72 @@ CALL algo.or.solve({
 })
 ```
 
-### The model a call describes
+### Modelling a problem in Cypher (OPT-07)
 
-`algo.or.solve` builds one fixed shape of problem from the nodes of a label.
-There is no general modelling language yet: the objective is always linear in
-the node values, and the two constraints are the two keys below.
+A problem is stated in one `CALL`: its config map is the whole modelling
+language `algo.or.solve` reads (OPT-07, #2264). Nothing is declared outside
+the call, and every part of the model is read from the graph when it runs:
+
+| Part of the model | Written as | What it means on the graph |
+|---|---|---|
+| Decision variables | `label: 'Item'` | One continuous variable per node with that label. |
+| Domain | `lowerBound`, `upperBound` | The same interval for every variable. |
+| Objective | `costProperty: 'cost'` | Minimise Σ value × cost, each node's cost from its own property. |
+| Several objectives | `costProperties: ['cost', 'risk']` | One Σ value × cost per property, solved as a Pareto front. |
+| Constraints | `budget`, `minTotal` | Σ value × cost ≤ `budget`; Σ value ≥ `minTotal`. |
+| How constraints act | `constraintHandling` | `penalty`, `repair` or `feasibility` (below). |
+| The solution | `property: 'qty'` | Written to that property on every variable's node, all or nothing (below). |
+| How good it is | `YIELD objective, feasible, gap, ...` | The result envelope (below). |
+
+```cypher graph=items
+CALL algo.or.solve({label: 'Item', property: 'qty', costProperty: 'cost',
+                    upperBound: 5, minTotal: 6, budget: 30, seed: 1})
+YIELD objective, feasible
+RETURN objective, feasible
+```
+
+That call reads as: choose a quantity between 0 and 5 for each `:Item`,
+minimising what they cost in total, buying at least 6 in all and spending at
+most 30. The chosen quantities land on `qty`; `MATCH (i:Item) RETURN i.name,
+i.qty` reads the plan back.
+
+**Costs are numbers, whole or not.** `{cost: 3}` and `{cost: 3.0}` are the
+same cost. A node without the cost property costs `1.0`. Any other value (a
+string, a list) is refused, naming the property and the node, and nothing is
+written. Before #2264 a whole-number cost was read as `1.0`: a graph written
+as `CREATE (:Item {cost: 3})` was solved as a different problem, without an
+error (`tests/or_solve_reads_whole_number_costs.rs`).
+
+**What the language cannot express yet.** Each of these is a different
+problem from the one above, and none is approximated by it:
+
+- variables chosen by a pattern or a `WHERE`: it is every node of one label;
+- an objective that is not linear in the node values, or that reads
+  relationships or paths (the graph-native templates below are the exception,
+  one procedure per problem);
+- any constraint beyond `budget` and `minTotal`, and constraints written as
+  Cypher predicates over each candidate (OPT-07's H2 target);
+- writing the solution to relationships: it is a node property;
+- integer or binary variables: every variable is continuous.
+
+From Rust, `samyama::optimization::CypherProblem` takes an objective that is
+any Cypher query over `$x0 … $xN` (`examples/cypher_problem_demo.rs`); that is
+not reachable from a Cypher `CALL`.
+
+The keys in full:
 
 | Key | Meaning | Default |
 |---|---|---|
 | `label` | Every node with this label is one decision variable. | required |
 | `property` | The node property the solution is written to. | required |
 | `lowerBound` / `min`, `upperBound` / `max` | Every variable lies in `[lowerBound, upperBound]`. `lowerBound` must be less than `upperBound`; equal or inverted bounds are refused. | `0.0`, `100.0` |
-| `costProperty` / `cost_property` | The objective is **minimise Σ value × cost**, reading each node's cost from this property (`1.0` where a node has none). | every cost `1.0` |
+| `costProperty` / `cost_property` | The objective is **minimise Σ value × cost**, reading each node's cost from this property, integer or float (`1.0` where a node has none). | every cost `1.0` |
 | `costProperties` / `cost_properties` | Two or more cost properties make it multi-objective: one Σ value × cost per property, solved as a Pareto front. | — |
 | `budget` | Constraint Σ value × cost ≤ `budget`. | none |
 | `minTotal` / `min_total` | Constraint Σ value ≥ `minTotal`. | none |
 | `algorithm` | Any solver in `algo.or.solve`'s list; an unknown name is refused, not replaced. | `Jaya` |
 | `populationSize`, `maxIterations` | Solver settings. | `50`, `100` |
+| `seed` | A non-negative integer; the same call on the same graph then gives the same answer. | none (a fresh draw each call) |
 | `bestKnown` | A reference objective to report `gap` against (single-objective only). | none |
 
 How the constraints act on the search is chosen with `constraintHandling`
@@ -186,10 +235,11 @@ not the solver.
 | `repair` | the candidate repaired first, then scored; the repaired point is the one written back | -- |
 | `feasibility` | Deb's rules: any feasible point beats any infeasible one, a smaller violation beats a larger | multi-objective solvers |
 
-```cypher
+```cypher graph=items
 CALL algo.or.solve({label: 'Item', property: 'qty', costProperty: 'cost',
                     minTotal: 6, budget: 10, constraintHandling: 'repair'})
 YIELD objective, feasible
+RETURN objective, feasible
 ```
 
 - **The penalty is inexact.** A quadratic penalty is smaller than the saving
@@ -254,10 +304,11 @@ Every row reports how good the answer is, not only the answer (OPT-09):
 single-objective solves only: a Pareto front has no single best known value,
 so passing it there is an error rather than a `gap` that is silently `null`.
 
-```cypher
+```cypher graph=factories
 CALL algo.or.solve({label: 'Factory', property: 'production', cost_property: 'cost',
                     budget: 50000.0, bestKnown: 41000.0})
 YIELD objective, feasible, gap, total_time_ms
+RETURN objective, feasible, gap, total_time_ms
 ```
 
 `/optimize/solve` reports `feasible` and `gap` in its `done` event as well:
