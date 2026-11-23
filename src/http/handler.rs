@@ -63,6 +63,52 @@ pub struct QueryRequest {
     /// time after a write, so it is computed only for a caller that asks.
     #[serde(default)]
     pub include_snapshot_hash: bool,
+    /// `CYPHER plan=N` as a body field (LANG-06, #2252): run the N-th
+    /// candidate plan of each MATCH. Exactly as if the query began with
+    /// `CYPHER plan=N`, so a plan the query does not have is refused, never
+    /// run as plan 1.
+    ///
+    /// The field used to be absent, and serde dropped it: a `plan` key came
+    /// back 200 with the default plan, which reads exactly like a forced plan
+    /// that happened to equal it.
+    #[serde(default)]
+    pub plan: Option<usize>,
+    /// `CYPHER planner=…` as a body field: `cost` or `legacy` (#2252).
+    #[serde(default)]
+    pub planner: Option<String>,
+    /// `CYPHER runtime=…` as a body field: `volcano`, the one runtime (#2252).
+    #[serde(default)]
+    pub runtime: Option<String>,
+}
+
+/// Fold the body's `plan`, `planner` and `runtime` fields into the query
+/// text as a `CYPHER` prefix (#2252), so they are checked by the same code
+/// as the prefix and cannot mean anything it does not.
+///
+/// A value is spliced into the statement, so it must be the shape an option
+/// value is (letters, digits, `_`, `-`, `.`); anything else is refused here
+/// rather than parsed as Cypher.
+fn apply_plan_fields(payload: &mut QueryRequest) -> Result<(), String> {
+    let mut opts = Vec::new();
+    for (key, value) in [("planner", &payload.planner), ("runtime", &payload.runtime)] {
+        if let Some(v) = value {
+            let shaped = !v.is_empty()
+                && v.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+            if !shaped {
+                return Err(format!(
+                    "`{key}` must be a bare word such as \"cost\"; got {v:?}"
+                ));
+            }
+            opts.push(format!("{key}={v}"));
+        }
+    }
+    if let Some(n) = payload.plan {
+        opts.push(format!("plan={n}"));
+    }
+    if !opts.is_empty() {
+        payload.query = format!("CYPHER {} {}", opts.join(" "), payload.query);
+    }
+    Ok(())
 }
 
 /// The request's parameters as bound values, or the 400 the caller gets.
@@ -604,11 +650,20 @@ pub async fn query_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
     headers: axum::http::HeaderMap,
-    Json(payload): Json<QueryRequest>,
+    Json(mut payload): Json<QueryRequest>,
 ) -> axum::response::Response {
     // The graph is in the body, which the request layer never reads; name it
     // on the request's span here so every event below carries it (#2076).
     tracing::Span::current().record("tenant", crate::logging::loggable_name(&payload.graph));
+    // Before anything reads the statement: authorization, the read-only check
+    // and the audit hash all see the query that runs (#2252).
+    if let Err(e) = apply_plan_fields(&mut payload) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": e, "code": crate::query::error_code::BAD_ARGUMENT })),
+        )
+            .into_response();
+    }
     // What the audit layer cannot see from outside: it never reads the body,
     // so the statement's kind, graph and hash travel back on the response
     // (#2081). A statement that does not parse counts as a write, as on RESP.
