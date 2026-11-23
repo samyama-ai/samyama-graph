@@ -56,6 +56,7 @@ returning fewer rows. The arguments may be `$parameters`.
 | `maxExpanded` | 100 | The most nodes that are not seeds the expansion may add |
 | `graphWeight` | 1 | The weight of the graph term in the rerank |
 | `decay` | 0.5 | The graph term's factor per hop, in [0, 1] |
+| `sourceProperty` | see [Provenance](#provenance) | The property holding a hit's source URI |
 
 Any other key is an error, as a misspelt key silently ignored would run a
 different search from the one written.
@@ -74,6 +75,31 @@ different search from the one written.
 | `hops` | integer | 0 for a seed; otherwise steps from the seed nearest it |
 | `seed` | node | The node itself for a seed; otherwise the seed contributing most to its graph term |
 | `timings` | map | Milliseconds per stage: `bm25Ms`, `vectorMs`, `fusionMs`, `expansionMs`, `rerankMs`, `totalMs`. The same map on every row of one call |
+| `provenance` | map | The citation payload; see [Provenance](#provenance) |
+
+### Provenance
+
+Every row carries a `provenance` map unless the call `YIELD`s other columns,
+so a bare `CALL db.hybrid.search(...)` returns enough to render a citation
+without the caller knowing the corpus's property names (AI-08, #1707). Every
+key is always present; what is unknown is null.
+
+| key | value |
+|---|---|
+| `nodeId` | The node's id, as `id(node)` |
+| `labels` | Its labels, sorted |
+| `source` | Its source URI, or null if it has none |
+| `sourceProperty` | The property `source` was read from, or null |
+| `score` | The row's `score` |
+| `foundBy` | The row's `foundBy` |
+| `bm25Rank`, `vectorRank` | The row's ranks, null if not in that list |
+| `seedId`, `hops` | The seed it was reached from and how far; itself and 0 for a seed |
+| `index` | `{fulltext, vector}`: the indexes searched, null for one not used. A vector index given as `{label, property}` reads `Label.property` |
+
+`source` is read from `sourceProperty` when the call names one, and only from
+it. Otherwise it is the first of `source_uri`, `sourceUri`, `uri`, `url`,
+`source`, `src` the node has. A value that is not a string is given as its
+text.
 
 Rows come best first, ties broken by fused score and then node id, so a
 search is reproducible. There is no `LIMIT` of its own beyond `k` and
