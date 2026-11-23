@@ -322,6 +322,7 @@ fn app() -> (axum::Router, Arc<tokio::sync::RwLock<GraphStore>>) {
         persistence: None,
         snapshot_key: None,
         transactions: Default::default(),
+        query_catalogs: Default::default(),
     };
     let app = axum::Router::new()
         .route(

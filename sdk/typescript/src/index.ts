@@ -17,4 +17,12 @@ export type {
   ConstraintInfo,
   CsvImportResult,
   JsonImportResult,
+  CatalogParam,
+  CatalogEntrySummary,
+  CatalogEntryDetail,
+  CatalogListResult,
+  CatalogImportResult,
+  CatalogRunResult,
+  CatalogLinkState,
+  CatalogError,
 } from "./types.js";

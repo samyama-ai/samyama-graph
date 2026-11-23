@@ -263,6 +263,33 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
             "application/json",
             "{}",
         )],
+        // A fresh server has no catalog, so these answer `no_catalog`; the
+        // loaded paths are covered by tests/query_catalog_http.rs (#2026).
+        ("POST", "/api/queries/import") => vec![
+            raw("not multipart", "/api/queries/import", "application/json", "{}"),
+            raw(
+                "multipart with no file",
+                "/api/queries/import",
+                "multipart/form-data; boundary=X",
+                "--X--\r\n",
+            ),
+            raw(
+                "not a catalog",
+                "/api/queries/import",
+                "multipart/form-data; boundary=X",
+                "--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"c.sgqueries\"\r\n\r\nnope\r\n--X--\r\n",
+            ),
+        ],
+        ("GET", "/api/queries") => vec![
+            bare("no catalog", "/api/queries"),
+            bare("another graph", "/api/queries?graph=other"),
+        ],
+        ("GET", "/api/queries/{id}") => vec![bare("no catalog", "/api/queries/nope")],
+        ("POST", "/api/queries/{id}/run") => vec![
+            json("no catalog", "/api/queries/nope/run", r#"{"params": {}}"#),
+            json("an unknown field", "/api/queries/nope/run", r#"{"param": {}}"#),
+            json("broken JSON", "/api/queries/nope/run", BROKEN),
+        ],
         ("POST", "/api/enrich/policy") => vec![
             json("no fields", "/api/enrich/policy", r#"{}"#),
             json("broken JSON", "/api/enrich/policy", BROKEN),
