@@ -45,14 +45,60 @@ The panel and the log use the same threshold on purpose. A dashboard and a log
 that disagree about what "slow" means give an operator two numbers and a reason
 to trust neither.
 
+## Is it overloaded, and are writes reaching disk?
+
+- **Load: clients and queries running.** `samyama_active_connections` is what
+  `max_connections` counts: open RESP connections plus HTTP requests in
+  progress, the scrape itself included. It is absent on a server with no tenant
+  manager rather than a false 0. `samyama_queries_in_flight` is queries
+  executing now. A query still waiting for the store lock is not counted; its
+  wait is `lock_wait_ms` on its own response. Connections climbing while
+  running stays flat means clients are queued behind the lock.
+- **Persistence: writes reaching disk.** `samyama_persistence_degraded` turns 1
+  on the first write that fails to reach disk. From then on writes are refused
+  until a restart, so this is the one to alert on.
+  `samyama_mutations_persisted_total` and `samyama_persistence_errors_total`
+  count mutations written and failed attempts, over auto-commit statements and
+  transaction commits alike. A failed transaction commit is rolled back and
+  counted as an error without degrading the server.
+
 ## What is not here
 
 - **Per-query-shape latency.** The histogram is process-wide, so it says the
   system got slower and not which query did. The log closes that gap; a
   per-shape metric would need a cardinality decision we have not made.
 - **Rows scanned, plan choice.** Use `EXPLAIN` on the query the log named.
-- **Traces.** Not shipped. REL-10 asks for them and this is the metrics and
-  logs half; saying so is better than a panel that is always empty.
+- **Traces on this dashboard.** Traces go to a trace store, not Prometheus;
+  see below.
+- **Per-operator spans and AI-call spans.** Not shipped yet: a span per
+  operator per query needs a sampling decision first, or it slows the queries
+  it is measuring.
+
+## Traces
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` (a collector's base URL, e.g.
+`http://localhost:4318`) or `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` (the full
+traces URL) and the server exports traces over OTLP/HTTP to Jaeger, Tempo or an
+OpenTelemetry Collector. The service is `samyama` unless `OTEL_SERVICE_NAME`
+says otherwise. Unset, nothing is exported and nothing is built: the stage
+spans below are `debug` level and the log subscriber stops at `info`, so they
+are never created.
+
+Each HTTP request and RESP command is one trace, rooted at the `request` span
+(same `request_id` as the logs), with a child span per stage:
+
+| Span | What its duration is |
+|---|---|
+| `samyama.lock.acquire` (`mode` = `read`/`write`) | waiting for the store's lock — contention |
+| `samyama.query.parse` (`cache_hit`) | parsing, or the parse-cache lookup |
+| `samyama.query.execute` | running the statement; `samyama.query.plan` inside it is planning |
+| `samyama.storage.persist` (`mutations`) | writing a statement's changes to disk |
+
+An HTTP request carrying a W3C `traceparent` header joins the caller's trace,
+so a trace that starts in a client service continues through the engine. A
+missing or malformed header starts a new trace; the request is not refused.
+Spans are sent in batches every few seconds and flushed when the server
+returns; a process that is killed loses the last batch.
 
 ## Keeping it honest
 

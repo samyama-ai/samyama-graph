@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Samyama Graph Database API
-  version: 1.15.0
+  version: 1.16.0
   description: |
     HTTP API for the Samyama high-performance distributed graph database.
     Supports OpenCypher queries, graph status, and CRUD operations.
@@ -207,7 +207,8 @@ paths:
       summary: Algorithms `CALL algo.*` can run
       description: |
         Every graph algorithm the engine dispatches, with its aliases, category,
-        parameters, the columns its rows carry, whether it writes to the graph
+        a one-sentence description, parameters (with the minimum the engine
+        enforces, where it enforces one), the columns its rows carry, whether it writes to the graph
         (and so needs write access), whether it can run on a named projection
         (`graph`), and the column `writeProperty` stores when it can write its
         result back. Names resolve case-insensitively, with or without the
@@ -229,7 +230,7 @@ paths:
                     type: array
                     items:
                       type: object
-                      required: [name, aliases, category, parameters, yields, writes, runs_on_projection, write_back_column]
+                      required: [name, aliases, category, description, parameters, yields, writes, runs_on_projection, write_back_column]
                       properties:
                         name:
                           type: string
@@ -243,6 +244,10 @@ paths:
                           type: string
                           enum: [centrality, community, path, link_prediction, similarity,
                                  structure, graph_metric, temporal, embedding, optimization]
+                        description:
+                          type: string
+                          description: What the algorithm computes, in one sentence.
+                          example: "Katz centrality: influence counted over all walks, decaying with their length."
                         parameters:
                           type: array
                           items:
@@ -266,6 +271,26 @@ paths:
                               also:
                                 type: string
                                 description: A second spelling the engine also accepts for this key.
+                              bound:
+                                type: object
+                                description: >-
+                                  The smallest value the engine accepts as given, present only
+                                  where the engine enforces one. Every enforced bound is a
+                                  minimum; absent means none is enforced.
+                                required: [min, inclusive, below]
+                                properties:
+                                  min:
+                                    type: number
+                                    example: 1
+                                  inclusive:
+                                    type: boolean
+                                    description: false when `min` itself is out of range.
+                                  below:
+                                    type: string
+                                    enum: [refused, clamped, replaced]
+                                    description: >-
+                                      What happens to a smaller value: an error naming the
+                                      parameter, raised to `min`, or replaced by the default.
                         yields:
                           type: array
                           items:
@@ -440,12 +465,38 @@ paths:
                   description: Target graph/tenant name
                 format:
                   type: string
-                  enum: [arrow, parquet]
+                  enum: [arrow, parquet, csv]
                   default: arrow
                   description: Output encoding
+                seed:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: Seeds rand() and randomUUID() for this statement, so the same query over the same graph returns the same bytes
+                snapshot_hash:
+                  type: string
+                  description: Pin the export to the graph an earlier manifest named; a different graph is refused with 409
+              additionalProperties: false
       responses:
         '200':
-          description: The result set
+          description: The result set, with its dataset manifest in headers (ML-08)
+          headers:
+            x-samyama-dataset-manifest:
+              description: 'JSON: snapshot_hash, query, seed, format, graph, engine_version, rows, content_hash'
+              schema:
+                type: string
+            x-samyama-snapshot-hash:
+              description: sha256 over the graph the query read
+              schema:
+                type: string
+            x-samyama-content-hash:
+              description: sha256 over the response body
+              schema:
+                type: string
+            x-samyama-seed:
+              description: The seed, or none
+              schema:
+                type: string
           content:
             application/vnd.apache.arrow.stream:
               schema:
@@ -456,7 +507,13 @@ paths:
                 type: string
                 format: binary
         '400':
-          description: Unknown format, unknown graph, or a query that does not run
+          description: Unknown format, unknown graph, an unknown request field, or a query that does not run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: snapshot_hash was given and the graph's content hash differs
           content:
             application/json:
               schema:
@@ -598,6 +655,15 @@ paths:
                     Stop once the objective has been evaluated this many times
                     (OPT-11). Checked between iterations, so a run can make up to
                     one iteration's evaluations more. Leave it out for no limit.
+                constraint_handling:
+                  type: string
+                  enum: [penalty, repair, feasibility]
+                  description: >
+                    How a candidate that breaks a constraint is treated (OPT-10):
+                    objective plus penalty, the problem's repair before scoring,
+                    or Deb's feasibility rules. Absent: penalty for a
+                    single-objective solver, feasibility for a multi-objective
+                    one. `repair` on a benchmark with no repair fails the solve.
       responses:
         '200':
           description: The run's id
@@ -706,6 +772,8 @@ paths:
             type: integer
             minimum: 0
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The slow-query log
           content:
@@ -766,7 +834,7 @@ paths:
                 $ref: '#/components/schemas/StatusResponse'
               example:
                 status: healthy
-                version: 1.15.0
+                version: 1.16.0
                 storage:
                   nodes: 2000
                   edges: 11000
@@ -822,6 +890,43 @@ paths:
         '403':
           description: The credential may not read this graph
 
+  /api/changes:
+    get:
+      operationId: getChanges
+      summary: Has the graph's data changed?
+      description: |
+        A change token for polling (#1771). Send back the token from the last
+        reply as `since`; `changed: false` means no node, relationship, label
+        or property changed in between, so a result fetched then is still
+        current and need not be re-run. The token moves on every data change
+        and on nothing else, except that a write which fails part-way may move
+        it too: it errs towards "changed", costing a re-run, never towards a
+        stale "unchanged". It says that the data changed, not what changed.
+        A token from another server process, or one that does not parse,
+        reads as changed. Opaque: compare it for equality only.
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: The `token` from an earlier reply. Absent reads as changed.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The current token, and whether it differs from `since`
+          headers:
+            Cache-Control:
+              description: Always `no-store`; a cached "unchanged" would be wrong.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChangesResponse'
+              example:
+                token: 3f9c2a7be41d0c58-42
+                changed: false
+
   /api/tenants:
     get:
       operationId: listTenants
@@ -853,6 +958,8 @@ paths:
               id: analytics
               name: Analytics Team
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '201':
           description: Tenant created
           content:
@@ -932,6 +1039,8 @@ paths:
             schema:
               $ref: '#/components/schemas/UpdateTenantRequest'
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: Updated tenant
           content:
@@ -975,6 +1084,8 @@ paths:
                   type: string
                   description: Tenant/graph name.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: A sampled subgraph
           content:
@@ -1017,6 +1128,8 @@ paths:
                   type: string
                   description: Distance metric, e.g. cosine or euclidean.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The index was created
 
@@ -1049,6 +1162,8 @@ paths:
                   type: integer
                   description: Number of neighbours to return.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The nearest neighbours, closest first
           content:
@@ -1088,6 +1203,8 @@ paths:
                   type: string
                   format: binary
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The snapshot was imported
 
@@ -1122,6 +1239,8 @@ paths:
                         target_label: "FailureMode"
                         target_key: "name"
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: Policy accepted
           content:
@@ -1186,6 +1305,8 @@ paths:
         subgraph edges (for example MONITORS edges to FailureMode nodes). Values
         below the floor stay pending.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: Verification completed
           content:
@@ -1371,6 +1492,8 @@ paths:
                     Return at most this many nodes, chosen as the top
                     macro-subtrees.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The hierarchy's cues
           content:
@@ -1571,6 +1694,8 @@ paths:
                     A start and goal node whose manifold-guided A* shortest path
                     is returned in `astar_path`; null when no path exists.
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The convention's cues
           content:
@@ -1633,6 +1758,17 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
 components:
+  responses:
+    BadRequest:
+      description: |
+        The request could not be read or acted on: broken JSON, a missing or
+        mistyped field, a body that is not the declared Content-Type, a
+        multipart body with no boundary, or a query string missing a
+        parameter. Always JSON, never plain text (API-01).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
   schemas:
     QueryRequest:
       type: object
@@ -1662,6 +1798,34 @@ components:
             `POST /api/tx/begin`. Its writes are visible only inside the
             transaction until `POST /api/tx/{id}/commit`, and
             `POST /api/tx/{id}/rollback` undoes them.
+        include_snapshot_hash:
+          type: boolean
+          default: false
+          description: >-
+            Return `snapshot_hash`, the content hash of the graph the statement
+            saw (TRUST-06). Opt-in, because it is one pass over the graph the
+            first time after a write.
+        plan:
+          type: integer
+          minimum: 1
+          description: >-
+            Run the N-th cheapest candidate plan of each MATCH (LANG-06), exactly
+            as if the query began with `CYPHER plan=N`. A plan the query does not
+            have is a 400 that says how many it has, never plan 1. EXPLAIN under
+            `planner: cost` prints `Forceable plans: K`, the range to loop over.
+        planner:
+          type: string
+          enum: [cost, legacy]
+          description: >-
+            `CYPHER planner=…` as a field: `cost` plans every MATCH with the
+            cost-based enumerator, `legacy` with the default planner. Any other
+            value is a 400.
+        runtime:
+          type: string
+          enum: [volcano, interpreted]
+          description: >-
+            `CYPHER runtime=…` as a field. There is one runtime, so this only
+            refuses (400) a runtime the engine does not have.
 
     QueryResponse:
       type: object
@@ -1696,6 +1860,16 @@ components:
           description: >-
             The MVCC version the read saw, tying the result to the data that
             produced it. Identifies the snapshot; it is not a content hash.
+        snapshot_hash:
+          type: string
+          description: >-
+            Present only when the request set `include_snapshot_hash`.
+            `sha256:<64 hex>` over the graph's content (nodes, labels,
+            properties, relationships), the value `snapshot export` reports for
+            the same data. Derived from the data, so it is the same after a
+            restart and on another server holding the same graph.
+          examples:
+            - "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
         cached:
           type: boolean
           description: >-
@@ -1709,6 +1883,32 @@ components:
             query did not state and that the choice was observable in the rows.
           items:
             $ref: '#/components/schemas/Notification'
+        stats:
+          $ref: '#/components/schemas/QueryStats'
+
+    QueryStats:
+      type: object
+      description: >-
+        What one statement cost (COST-06). Only what is measured for free;
+        rows examined and peak memory are not reported (use PROFILE for rows
+        per operator).
+      properties:
+        elapsed_ms:
+          type: number
+          description: >-
+            Parsing, planning and running the statement, in milliseconds. A
+            result-cache hit reports the lookup, not the original run.
+        lock_wait_ms:
+          type: number
+          description: >-
+            Waiting for the store's read or write lock before the statement
+            started; contention shows here. 0 inside a transaction.
+        rows:
+          type: integer
+          description: Rows in the result.
+        is_write:
+          type: boolean
+          description: Whether the statement was run as a write.
 
     Notification:
       type: object
@@ -1763,6 +1963,16 @@ components:
           additionalProperties: true
           description: Edge properties
 
+    ChangesResponse:
+      type: object
+      required: [token, changed]
+      properties:
+        token:
+          type: string
+          description: Opaque. Send it back as `since` on the next poll.
+        changed:
+          type: boolean
+          description: True when `token` differs from `since`, or `since` was absent.
     StatusResponse:
       type: object
       properties:
@@ -1775,7 +1985,7 @@ components:
           type: string
           description: Server version
           examples:
-            - 1.15.0
+            - 1.16.0
         storage:
           type: object
           properties:

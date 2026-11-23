@@ -95,6 +95,16 @@ impl CommandHandler {
                 (named_graph(), Some(Self::query_hash(&query)))
             }
             "GRAPH.DELETE" => (named_graph(), None),
+            // Emptying the slow-query log changes server state, as HTTP's
+            // `DELETE /api/slowlog` does, and is recorded like it (#2079).
+            // `RESET` as our subcommand, or after a graph name in FalkorDB's form.
+            "GRAPH.SLOWLOG"
+                if args.iter().skip(1).take(2).any(|v| {
+                    v.as_string().ok().flatten().is_some_and(|s| s.eq_ignore_ascii_case("RESET"))
+                }) =>
+            {
+                (None, None)
+            }
             // These name no graph: the transaction is on the only one served.
             "GRAPH.COMMIT" | "GRAPH.ROLLBACK" => (Some("default".to_string()), None),
             _ => return None,
@@ -163,6 +173,7 @@ impl CommandHandler {
             "GRAPH.NLQ" => self.handle_graph_nlq(args, store, auth).await,
             "GRAPH.DELETE" => self.handle_graph_delete(args, store, auth).await,
             "GRAPH.LIST" => self.handle_graph_list(args, store, auth).await,
+            "GRAPH.SLOWLOG" => self.handle_graph_slowlog(args, auth),
             "PING" => self.handle_ping(args),
             "ECHO" => self.handle_echo(args),
             "INFO" => self.handle_info(store).await,
@@ -384,7 +395,11 @@ impl CommandHandler {
             }
         }
 
-        let mut store_guard = store.write().await;
+        // Stages of the command's trace (#2077), as on HTTP.
+        let mut store_guard = {
+            use tracing::Instrument;
+            store.write().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write")).await
+        };
 
             // Record what the statement changes, so persistence does not depend on
             // what it returns (#1094).
@@ -413,8 +428,11 @@ impl CommandHandler {
             // store keeps this right whichever way a statement ends.
             let persist_failed = if let Some(ref persist_mgr) = self.persistence {
                 let mutations = store_guard.take_write_log();
+                let _persist =
+                    tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64, entities = tracing::field::Empty).entered();
                 match persist_mgr.apply_mutations(&graph_name, &store_guard, &mutations) {
                     Ok(n) => {
+                        _persist.record("entities", n as i64);
                         debug!("Persisted {} entities from {} mutations", n, mutations.len());
                         None
                     }
@@ -443,7 +461,10 @@ impl CommandHandler {
                 ))),
             }
         } else {
-            let store_guard = store.read().await;
+            let store_guard = {
+                use tracing::Instrument;
+                store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+            };
             let res = self
                 .query_engine
                 .execute_with_params_within(&query_str, &*store_guard, &params, time_limit);
@@ -460,6 +481,90 @@ impl CommandHandler {
                 error!("Query error: {}", e);
                 RespValue::Error(format!("ERR {}", e))
             }
+        }
+    }
+
+    /// GRAPH.SLOWLOG GET [count] | LEN | RESET: the slow-query log over RESP
+    /// (#2079), as `GET`/`DELETE /api/slowlog` serve it over HTTP.
+    ///
+    /// The shape follows Redis's `SLOWLOG`: GET returns the newest entries
+    /// first, each a flat field/value array so a RESP2 client reads it without
+    /// a map type; LEN an integer; RESET the number of entries cleared, as the
+    /// HTTP route reports it. Admin only when credentials are configured, as on
+    /// HTTP: entries hold query text from every tenant, literals included.
+    ///
+    /// FalkorDB's form, `GRAPH.SLOWLOG <graph>` and `GRAPH.SLOWLOG <graph>
+    /// RESET`, is answered too, in FalkorDB's reply shape, so a client moving
+    /// over keeps working. As everywhere else, the graph must be `default`;
+    /// `GET`, `LEN` and `RESET` are read as subcommands, never as a graph.
+    fn handle_graph_slowlog(&self, args: &[RespValue], auth: Option<&crate::auth::Credential>) -> RespValue {
+        use crate::query::slowlog;
+        if let Some(user) = auth {
+            if let Err(e) = user.authorize_role(crate::auth::Role::Admin) {
+                return RespValue::Error(format!("ERR {e}"));
+            }
+        }
+        let arg = |i: usize| args.get(i).and_then(|v| v.as_string().ok().flatten());
+        let usage = || {
+            RespValue::Error(
+                "ERR usage: GRAPH.SLOWLOG GET [count] | GRAPH.SLOWLOG LEN | GRAPH.SLOWLOG RESET"
+                    .to_string(),
+            )
+        };
+        let int = |n: u64| RespValue::Integer(i64::try_from(n).unwrap_or(i64::MAX));
+        let text = |s: &str| RespValue::BulkString(Some(s.as_bytes().to_vec()));
+        match (arg(1).map(|s| s.to_ascii_uppercase()).as_deref(), args.len()) {
+            (Some("GET"), 2 | 3) => {
+                let limit = match arg(2) {
+                    None => slowlog::max_len(),
+                    Some(n) => match n.parse::<usize>() {
+                        Ok(n) => n.min(slowlog::max_len()),
+                        Err(_) => return RespValue::Error(format!("ERR count must be a non-negative integer, got '{n}'")),
+                    },
+                };
+                RespValue::Array(
+                    slowlog::recent(limit)
+                        .into_iter()
+                        .map(|e| {
+                            RespValue::Array(vec![
+                                text("id"), int(e.id),
+                                text("timestamp_ms"), int(e.timestamp_ms),
+                                text("elapsed_ms"), int(e.elapsed_ms),
+                                text("threshold_ms"), int(e.threshold_ms),
+                                text("rows"), int(e.rows as u64),
+                                text("failed"), int(e.failed as u64),
+                                text("query"), text(&e.query),
+                            ])
+                        })
+                        .collect(),
+                )
+            }
+            (Some("LEN"), 2) => int(slowlog::len() as u64),
+            (Some("RESET"), 2) => int(slowlog::reset() as u64),
+            (Some("GET" | "LEN" | "RESET"), _) | (None, _) => usage(),
+            (Some(_), 2 | 3) if arg(1).as_deref() != Some("default") => RespValue::Error(format!(
+                "ERR this build serves a single graph ('default'); graph '{}' does not exist",
+                arg(1).unwrap_or_default()
+            )),
+            // FalkorDB: each entry is [timestamp (s), command, query, duration (ms)].
+            (Some(_), 2) => RespValue::Array(
+                slowlog::recent(slowlog::max_len())
+                    .into_iter()
+                    .map(|e| {
+                        RespValue::Array(vec![
+                            text(&(e.timestamp_ms / 1000).to_string()),
+                            text("GRAPH.QUERY"),
+                            text(&e.query),
+                            text(&e.elapsed_ms.to_string()),
+                        ])
+                    })
+                    .collect(),
+            ),
+            (Some(_), 3) if arg(2).is_some_and(|s| s.eq_ignore_ascii_case("RESET")) => {
+                slowlog::reset();
+                RespValue::SimpleString("OK".to_string())
+            }
+            _ => usage(),
         }
     }
 
@@ -2169,8 +2274,8 @@ mod tests {
             // the shape the old prefix check let through (#1156).
             let srv = MockHttp::serve(vec![(
                 200,
-                r#"{"response": "MATCH (n) DETACH DELETE n"}"#.to_string(),
-            )]);
+                r#"{"response":"{\"cypher\":\"MATCH (n) DETACH DELETE n\"}"}"#.to_string(),
+            ); 3]);
             let r = handler
                 .translate_nlq(
                     "delete everything",
@@ -2179,7 +2284,7 @@ mod tests {
                 )
                 .await;
             assert!(err_text(&r).contains("write operations"), "{r:?}");
-            assert_eq!(srv.requests().len(), 1, "the model was asked once");
+            assert_eq!(srv.requests().len(), 3, "invalid structured output is repaired twice");
             assert_eq!(s.read().await.node_count(), 1, "nothing was deleted");
         }
 

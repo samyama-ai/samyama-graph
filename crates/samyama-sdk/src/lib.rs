@@ -35,7 +35,16 @@
 //! ```
 
 pub mod client;
+
+/// The README's Rust blocks, compiled and run as doctests (#1734): each one is
+/// a separate program linking this crate, as a user's would, so the embedded
+/// quick start a reader copies is one that builds and runs on this commit.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
+
 pub mod embedded;
+pub mod env;
 pub mod error;
 pub mod models;
 pub mod remote;

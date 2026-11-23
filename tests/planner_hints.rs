@@ -105,3 +105,38 @@ fn using_join_is_accepted() {
     let q = "MATCH (a:P)-[:KNOWS]->(b:P), (b)-[:KNOWS]->(c:P) USING JOIN ON b WHERE a.id = 1 RETURN c.id AS id";
     assert_eq!(ids(&s, q), vec![3]);
 }
+
+/// The `--- Planner hints ---` section of EXPLAIN, or `None` when there is none.
+fn hint_section(s: &GraphStore, q: &str) -> Option<String> {
+    let text = plan(s, q).unwrap();
+    let (_, rest) = text.split_once("--- Planner hints ---")?;
+    Some(rest.split("\n---").next().unwrap().trim().to_string())
+}
+
+#[test]
+fn explain_names_each_hint_and_what_it_did() {
+    let s = store();
+    assert_eq!(hint_section(&s, "MATCH (p:P) WHERE p.id = 7 RETURN p.id AS id"), None, "no hint, no section");
+
+    let scan = hint_section(&s, "MATCH (p:P) USING SCAN p:P WHERE p.id = 7 RETURN p.id AS id").unwrap();
+    assert!(scan.starts_with("USING SCAN p:P -- applied"), "{scan}");
+
+    let index = hint_section(&s, "MATCH (p:P) USING INDEX p:P(grp) WHERE p.grp = 2 RETURN p.id AS id").unwrap();
+    assert!(index.starts_with("USING INDEX p:P(grp) -- applied"), "{index}");
+
+    let join = hint_section(
+        &s,
+        "MATCH (a:P)-[:KNOWS]->(b:P), (b)-[:KNOWS]->(c:P) USING JOIN ON b WHERE a.id = 1 RETURN c.id AS id",
+    )
+    .unwrap();
+    assert!(join.starts_with("USING JOIN ON b -- accepted"), "{join}");
+}
+
+#[test]
+fn explain_of_a_hint_that_cannot_be_honoured_is_the_error_not_a_plan() {
+    // The section is a statement that each hint was applied; it can only be
+    // true if EXPLAIN refuses the hints planning refuses.
+    let s = store();
+    let err = plan(&s, "MATCH (p:P) USING INDEX p:P(nope) WHERE p.nope = 1 RETURN p").expect_err("no such index");
+    assert!(err.contains("no such index"), "{err}");
+}

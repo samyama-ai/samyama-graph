@@ -273,6 +273,10 @@ impl EmbeddedClient {
     /// key. Without `CREATE CONSTRAINT FOR (n:Label) REQUIRE n.property IS
     /// UNIQUE` it is an error, not a scan.
     ///
+    /// `graph` must be `"default"`, as for [`SamyamaClient::query`]: another
+    /// name is refused rather than answered from the one graph this client
+    /// holds.
+    ///
     /// # Example
     /// ```
     /// # use samyama_sdk::{EmbeddedClient, SamyamaClient};
@@ -286,11 +290,15 @@ impl EmbeddedClient {
     /// ```
     pub async fn find_node_by_unique(
         &self,
-        _graph: &str,
+        graph: &str,
         label: &str,
         property: &str,
         value: impl Into<samyama::graph::PropertyValue>,
     ) -> SamyamaResult<Option<samyama::graph::NodeId>> {
+        // Took `_graph` and ignored it: asked for `analytics`, it answered
+        // from `default` -- the defect #2139 removed from `query` and
+        // `delete_graph`, left in the one method that was not on the trait.
+        reject_foreign_graph(graph)?;
         let value = value.into();
         let store_guard = self.store.read().await;
         store_guard
@@ -306,7 +314,7 @@ impl Default for EmbeddedClient {
 }
 
 /// Convert a RecordBatch from the query engine into an SDK QueryResult.
-fn record_batch_to_query_result(batch: &RecordBatch, store: &GraphStore) -> QueryResult {
+pub(crate) fn record_batch_to_query_result(batch: &RecordBatch, store: &GraphStore) -> QueryResult {
     let mut nodes_map: HashMap<String, SdkNode> = HashMap::new();
     let mut edges_map: HashMap<String, SdkEdge> = HashMap::new();
     let mut records = Vec::new();

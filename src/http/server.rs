@@ -18,7 +18,7 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::info;
 use super::handler::{
-    query_handler, export_handler, import_parquet_handler, status_handler, memory_handler, metrics_handler, slowlog_handler, slowlog_reset_handler, schema_handler, sample_handler,
+    query_handler, export_handler, import_parquet_handler, status_handler, changes_handler, memory_handler, metrics_handler, slowlog_handler, slowlog_reset_handler, schema_handler, sample_handler,
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
     set_enrich_policy_handler, enrich_handler, verify_handler,
@@ -581,6 +581,9 @@ pub async fn request_context(
         .map(str::to_string)
         .unwrap_or_else(new_request_id);
     let span = request_span(&id, "http");
+    // A caller's W3C `traceparent` makes this span part of its trace (#2077).
+    #[cfg(feature = "otel")]
+    crate::otel::continue_trace(&span, req.headers());
     span.record("method", req.method().as_str());
     span.record("path", req.uri().path());
     req.extensions_mut().insert(RequestId(id.clone()));
@@ -618,6 +621,63 @@ fn cors_layer(origins: &[String]) -> CorsLayer {
         .expose_headers([axum::http::HeaderName::from_static(
             crate::logging::REQUEST_ID_HEADER,
         )])
+}
+
+/// The largest plain-text error body `json_error_body` reads. A framework
+/// rejection is a sentence; anything longer is left as it is.
+const PLAIN_ERROR_LIMIT: usize = 64 * 1024;
+
+/// An error answered as `text/plain`, re-answered as `{"error": "<the text>"}`
+/// (API-01, #1723).
+///
+/// The handlers answer every error as JSON. The ones that did not came from
+/// axum's extractors, which refuse a request before the handler runs -- broken
+/// JSON, a missing field, a body that is not JSON, a multipart body with no
+/// boundary, a query string missing a parameter -- and say so in plain text.
+/// A client generated from the OpenAPI document parses `{"error": ...}` and
+/// failed on exactly the answer meant to tell it what it got wrong.
+///
+/// The status of those rejections is made **400**, the one handlers already
+/// use for a request they cannot act on: axum used 400, 415 or 422 depending on
+/// which extractor refused, so a missing `query` was 422 while a missing
+/// `nodes` was 400. The message still says which it was. Other statuses keep
+/// theirs: 413 is a size limit, not a malformed request, and a 5xx is ours.
+///
+/// Only `text/plain` error answers are touched. A JSON error, any success, and
+/// `/metrics` (a 200 in Prometheus's text format) pass through unchanged.
+async fn json_error_body(resp: axum::response::Response) -> axum::response::Response {
+    use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+    let status = resp.status();
+    if !(status.is_client_error() || status.is_server_error()) {
+        return resp;
+    }
+    let plain = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("text/plain"));
+    if !plain {
+        return resp;
+    }
+    let (mut parts, body) = resp.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, PLAIN_ERROR_LIMIT).await else {
+        return (status, axum::Json(serde_json::json!({ "error": status.to_string() })))
+            .into_response();
+    };
+    let message = String::from_utf8_lossy(&bytes).trim().to_string();
+    let message = if message.is_empty() { status.to_string() } else { message };
+    parts.status = match status {
+        axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE | axum::http::StatusCode::UNPROCESSABLE_ENTITY => axum::http::StatusCode::BAD_REQUEST,
+        other => other,
+    };
+    parts.headers.remove(CONTENT_TYPE);
+    parts.headers.remove(CONTENT_LENGTH);
+    let json = axum::Json(serde_json::json!({ "error": message })).into_response();
+    let (json_parts, json_body) = json.into_parts();
+    for (k, v) in json_parts.headers.iter() {
+        parts.headers.insert(k.clone(), v.clone());
+    }
+    axum::response::Response::from_parts(parts, json_body)
 }
 
 /// Shared application state for HTTP routes
@@ -714,7 +774,14 @@ impl AppState {
         graph: &str,
         body: impl FnOnce(&mut GraphStore) -> T,
     ) -> T {
-        let mut store = self.store.write().await;
+        use tracing::Instrument;
+        // Stages of the request's trace (#2077): the wait for the writer's
+        // lock is where contention shows.
+        let mut store = self
+            .store
+            .write()
+            .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write"))
+            .await;
         if let Some(pm) = &self.persistence {
             store.enable_write_log();
             // The quota, resolved before the body runs. Checked here it is
@@ -726,8 +793,13 @@ impl AppState {
         let out = body(&mut store);
         if let Some(pm) = &self.persistence {
             let mutations = store.take_write_log();
+            let _persist =
+                tracing::debug_span!("samyama.storage.persist", mutations = mutations.len() as i64, entities = tracing::field::Empty).entered();
             match pm.apply_mutations(graph, &store, &mutations) {
-                Ok(n) => tracing::debug!("persisted {n} entities from {} mutations", mutations.len()),
+                Ok(n) => {
+                    _persist.record("entities", n as i64);
+                    tracing::debug!("persisted {n} entities from {} mutations", mutations.len())
+                }
                 Err(e) => {
                     // `mutate` returns the body's own value and has no channel
                     // for an error, so the handler cannot be told here. What it
@@ -1003,6 +1075,7 @@ impl HttpServer {
             .route("/api/nlq", post(nlq_handler))
             .route("/api/status", get(status_handler))
             .route("/api/sparql", post(super::sparql::sparql_handler))
+            .route("/api/changes", get(changes_handler))
             .route("/api/memory", get(memory_handler))
             .route("/metrics", get(metrics_handler))
             .route("/api/slowlog", get(slowlog_handler).delete(slowlog_reset_handler))
@@ -1035,6 +1108,11 @@ impl HttpServer {
         if let Some(tm) = self.tenants.as_ref() {
             app = app.merge(super::tenants::router(Arc::clone(tm), Arc::clone(&embed_cache)));
         }
+
+        // Every error answer is the JSON `{"error": ...}` the OpenAPI document
+        // declares (API-01, #1723). Innermost of the cross-cutting layers, so
+        // it sees every route's answer, the merged routers' included.
+        app = app.layer(axum::middleware::map_response(json_error_body));
 
         // Authentication goes on *before* CORS, which makes it the inner layer:
         // layers apply outermost-last, so the last `.layer()` call runs first.

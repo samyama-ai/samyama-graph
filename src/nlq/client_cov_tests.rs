@@ -269,10 +269,10 @@ async fn gemini_unreachable_endpoint_is_a_network_error() {
 // ---------------------------------------------------------------- pipeline
 
 #[tokio::test]
-async fn pipeline_extracts_fenced_cypher_from_the_model_answer() {
+async fn pipeline_reads_cypher_from_the_structured_model_answer() {
     let srv = MockHttp::serve(vec![(
         200,
-        openai_ok("Here you go:\n```cypher\nMATCH (p:Person) RETURN p.name\n```"),
+        openai_ok(r#"{"cypher":"MATCH (p:Person) RETURN p.name"}"#),
     )]);
     let pipeline =
         NLQPipeline::new(cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
@@ -298,7 +298,13 @@ async fn pipeline_extracts_fenced_cypher_from_the_model_answer() {
 
 #[tokio::test]
 async fn pipeline_rejects_a_write_query_from_the_model() {
-    let srv = MockHttp::serve(vec![(200, openai_ok("MATCH (n) DETACH DELETE n"))]);
+    let srv = MockHttp::serve(vec![
+        (
+            200,
+            openai_ok(r#"{"cypher":"MATCH (n) DETACH DELETE n"}"#)
+        );
+        3
+    ]);
     let pipeline =
         NLQPipeline::new(cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
     let err = pipeline.text_to_cypher("wipe it", "").await.unwrap_err();
@@ -497,18 +503,23 @@ fn schema() -> ResponseSchema {
 #[tokio::test]
 async fn openai_sends_the_schema_as_a_strict_json_schema() {
     let srv = MockHttp::serve(vec![(200, openai_ok("RETURN 1"))]);
-    let client =
-        NLQClient::new(&cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
+    let client = NLQClient::new(&cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
 
     let out = client
         .complete_structured("q", Some(&schema()))
         .await
         .unwrap();
-    assert!(out.schema_enforced, "the schema went out, so it is enforced");
+    assert!(
+        out.schema_enforced,
+        "the schema went out, so it is enforced"
+    );
 
     let body = srv.requests()[0].json();
     assert_eq!(body["response_format"]["type"], "json_schema");
-    assert_eq!(body["response_format"]["json_schema"]["name"], "cypher_answer");
+    assert_eq!(
+        body["response_format"]["json_schema"]["name"],
+        "cypher_answer"
+    );
     // `strict` is what constrains the decode; without it the schema is a
     // suggestion and `EVAL-09` is not satisfied.
     assert_eq!(body["response_format"]["json_schema"]["strict"], true);
@@ -519,10 +530,59 @@ async fn openai_sends_the_schema_as_a_strict_json_schema() {
 }
 
 #[tokio::test]
+async fn openai_closes_nested_objects_in_a_provider_neutral_schema() {
+    let neutral = ResponseSchema {
+        name: "plan".into(),
+        schema: serde_json::json!({
+            "type":"object",
+            "properties":{"calls":{"type":"array","items":{"type":"object","properties":{"tool":{"type":"string"}},"required":["tool"]}}},
+            "required":["calls"]
+        }),
+    };
+    let srv = MockHttp::serve(vec![(200, openai_ok("{}"))]);
+    let client = NLQClient::new(&cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
+    client
+        .complete_structured("q", Some(&neutral))
+        .await
+        .unwrap();
+    let sent = srv.requests()[0].json()["response_format"]["json_schema"]["schema"].clone();
+    assert_eq!(sent["additionalProperties"], false);
+    assert_eq!(
+        sent["properties"]["calls"]["items"]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        sent["properties"]["calls"]["items"]["properties"]["tool"]["type"],
+        "string"
+    );
+}
+
+#[tokio::test]
+async fn openai_refuses_optional_properties_that_cannot_be_strictly_decoded() {
+    let optional = ResponseSchema {
+        name: "optional".into(),
+        schema: serde_json::json!({
+            "type":"object",
+            "properties":{"required":{"type":"string"},"optional":{"type":"string"}},
+            "required":["required"]
+        }),
+    };
+    let client =
+        NLQClient::new(&cfg(LLMProvider::OpenAI, &dead_base_url(), Some("k"), None)).unwrap();
+    let error = client
+        .complete_structured("q", Some(&optional))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, NLQError::ConfigError(ref message) if message.contains("optional fields")),
+        "{error:?}"
+    );
+}
+
+#[tokio::test]
 async fn openai_omits_response_format_when_no_schema_is_asked_for() {
     let srv = MockHttp::serve(vec![(200, openai_ok("RETURN 1"))]);
-    let client =
-        NLQClient::new(&cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
+    let client = NLQClient::new(&cfg(LLMProvider::OpenAI, &srv.base_url, Some("k"), None)).unwrap();
 
     let out = client.complete("q").await.unwrap();
     assert!(!out.schema_enforced);
@@ -564,20 +624,41 @@ async fn gemini_sends_both_the_mime_type_and_the_schema() {
         200,
         r#"{"candidates":[{"content":{"parts":[{"text":"RETURN 1"}]}}]}"#.to_string(),
     )]);
-    let client =
-        NLQClient::new(&cfg(LLMProvider::Gemini, &srv.base_url, Some("k"), None)).unwrap();
+    let client = NLQClient::new(&cfg(LLMProvider::Gemini, &srv.base_url, Some("k"), None)).unwrap();
+    let mut gemini_schema = schema();
+    gemini_schema
+        .schema
+        .as_object_mut()
+        .unwrap()
+        .remove("additionalProperties");
 
     let out = client
-        .complete_structured("q", Some(&schema()))
+        .complete_structured("q", Some(&gemini_schema))
         .await
         .unwrap();
     assert!(out.schema_enforced);
 
-    let gc = &srv.requests()[0].json()["generationConfig"];
+    let err = client
+        .complete_structured("q", Some(&schema()))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, NLQError::ConfigError(ref message) if message.contains("additionalProperties") && message.contains("not supported by Gemini")),
+        "{err:?}"
+    );
+    let requests = srv.requests();
+    assert_eq!(requests.len(), 1, "unsupported schema must not be sent");
+
+    let gc = &requests[0].json()["generationConfig"];
     // Gemini constrains the decode only when BOTH are set: the schema alone
     // is ignored without the MIME type, which is the easy half to get wrong.
     assert_eq!(gc["responseMimeType"], "application/json");
-    assert_eq!(gc["responseSchema"]["type"], "object");
+    assert_eq!(gc["responseSchema"]["type"], "OBJECT");
+    assert_eq!(
+        gc["responseSchema"]["properties"]["cypher"]["type"],
+        "STRING"
+    );
+    assert!(gc["responseSchema"].get("additionalProperties").is_none());
     assert_eq!(gc["temperature"], 0.0);
 }
 
@@ -587,8 +668,7 @@ async fn gemini_omits_both_when_no_schema_is_asked_for() {
         200,
         r#"{"candidates":[{"content":{"parts":[{"text":"x"}]}}]}"#.to_string(),
     )]);
-    let client =
-        NLQClient::new(&cfg(LLMProvider::Gemini, &srv.base_url, Some("k"), None)).unwrap();
+    let client = NLQClient::new(&cfg(LLMProvider::Gemini, &srv.base_url, Some("k"), None)).unwrap();
 
     assert!(!client.complete("q").await.unwrap().schema_enforced);
     let gc = &srv.requests()[0].json()["generationConfig"];

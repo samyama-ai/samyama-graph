@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Samyama is a high-performance graph database written in Rust with Redis protocol (RESP) compatibility, multi-tenancy, vector search, NLQ, and graph algorithms. Raft configuration and state-machine scaffolding exist, but writes currently apply only on the local node; replication and quorum are not implemented. Version v1.15.0.
+Samyama is a high-performance graph database written in Rust with Redis protocol (RESP) compatibility, multi-tenancy, vector search, NLQ, and graph algorithms. Raft configuration and state-machine scaffolding exist, but writes currently apply only on the local node; replication and quorum are not implemented. Version v1.16.0.
 
 Cypher conformance is **measured, not estimated**: 99.9% of the openCypher TCK's evaluated scenarios pass (3,845 of 3,847, 98.7% coverage of 3,897, 2026-09-15, `d2df42a`). The `~90% OpenCypher support` this line used to claim was a self-assessment withdrawn in `#437` as unmeasured; the measured figure has now passed it, which settles nothing, because only one of the two can be reproduced. Quote the pass rate **with** its coverage: a high rate over a small evaluated set is how this measurement is usually inflated, and that is exactly what the earlier 87.1% turned out to be.
 
@@ -27,6 +27,8 @@ cargo bench --bench full_benchmark             # Full suite (ingestion, vector, 
 cargo bench --bench vector_benchmark           # HNSW vector search
 cargo bench --bench ann_benchmark -- --synthetic 100000x128  # recall@k vs QPS sweep over ef
 cargo bench --bench ann_benchmark -- --dataset data/ann/sift-128-euclidean  # after scripts/download_ann_datasets.py
+cargo bench --bench vector_cost_profile -- --synthetic 1000000x768 --dollars-per-hour 0.252  # bytes/vector, build/restart, $ per 1M queries per quantization
+cargo bench --bench graph_vector_hybrid_benchmark  # GraphRAG-shaped vector + traversal queries vs a brute-force reference (--export DIR for the Neo4j/Qdrant script)
 cargo bench --bench graphalytics_benchmark     # LDBC Graphalytics algorithms
 cargo bench --bench mvcc_benchmark             # MVCC & arena allocation
 cargo bench --bench late_materialization_bench  # Late materialization traversal
@@ -158,7 +160,7 @@ samyama-gpu, samyama-sdk, samyama-convert, samyama-cli), `sdk/` (Python, TypeScr
 
 ## Cypher Support
 
-**Supported clauses:** MATCH, OPTIONAL MATCH, CREATE, DELETE, SET, REMOVE, MERGE, WITH, UNWIND, UNION, RETURN DISTINCT, ORDER BY, SKIP, LIMIT, EXPLAIN, EXISTS subqueries.
+**Supported clauses:** MATCH, OPTIONAL MATCH, CREATE, DELETE, SET, REMOVE, MERGE, WITH, UNWIND, UNION, RETURN DISTINCT, ORDER BY, SKIP, LIMIT, EXPLAIN, EXISTS subqueries, `USING INDEX` / `USING SCAN` / `USING JOIN` planner hints (mandatory, as in Neo4j), `ANALYZE [:Label]`.
 
 **Supported functions (30+):** toUpper, toLower, trim, replace, substring, left, right, reverse, toString, toInteger, toFloat, abs, ceil, floor, round, sqrt, sign, count, sum, avg, min, max, collect, size, length, head, last, tail, keys, id, labels, type, exists, coalesce.
 
@@ -234,7 +236,7 @@ Benchmarks are the opposite — always `--release`, on a quiet host, with the
 calibration line compared before the timings (#529).
 
 - **Unit and integration tests** across the workspace; `scripts/coverage.sh` measures coverage for the current checkout.
-- **33 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
+- **35 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
 - **Integration tests**: Rust suites in `tests/` and Python scripts in `tests/integration/`
 - **20 demos on built-in data** in `examples/`
 - **17 dataset loaders and post-processing passes** in `examples/`
