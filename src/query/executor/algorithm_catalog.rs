@@ -533,7 +533,7 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
     // list; forest fire may start anywhere, stratified takes none.
     ("algo.sample.forestFire", &[
         pos("seeds", T::List, false),
-        Param { name: "size", kind: ParamKind::Config, ty: T::Integer, required: true, default: None, also: None },
+        Param { name: "size", kind: ParamKind::Config, ty: T::Integer, required: true, default: None, also: None, bound: None },
         key("forwardProbability", T::Float, D::Float(0.7)),
         key("direction", T::String, D::String("out")),
         key("seed", T::Integer, D::Integer(42)),
@@ -560,7 +560,7 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
     ]),
     ("algo.sample.randomWalk", &[
         pos("seeds", T::List, true),
-        Param { name: "size", kind: ParamKind::Config, ty: T::Integer, required: true, default: None, also: None },
+        Param { name: "size", kind: ParamKind::Config, ty: T::Integer, required: true, default: None, also: None, bound: None },
         key("restartProbability", T::Float, D::Float(0.15)),
         // Left out, 100 steps per node of `size`.
         opt("maxSteps", T::Integer),
@@ -657,6 +657,11 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.split", "Assigns each node to train, validation or test so that related nodes (a component, a community, a source, or a time window) land in the same split."),
     ("algo.splitLeakage", "The pairs of related nodes that a split put in different splits, each with the reason they count as a leak."),
     ("algo.sample.neighbors", "Samples up to fanout neighbours per node at each hop out from the seed nodes, in minibatches, as a GNN trainer draws them; seeded, so the same seed returns the same rows."),
+    ("algo.sample.forestFire", "A sample of size nodes burnt outward from the seed nodes as a forest fire, each burning node igniting a geometric number of its unburnt neighbours; seeded."),
+    ("algo.sample.snowball", "The seed nodes and their neighbourhood, wave by wave for hops waves, taking up to perNode new neighbours of each node."),
+    ("algo.sample.egoNetwork", "The seed nodes and every node within hops of them, each at its smallest distance."),
+    ("algo.sample.randomWalk", "The first size distinct nodes a random walk from the seed nodes visits, restarting at a seed with restartProbability; seeded."),
+    ("algo.sample.stratified", "The same share of each label group of nodes, by fraction or perStratum; seeded."),
 ];
 
 impl AlgorithmEntry {
