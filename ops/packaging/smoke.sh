@@ -11,10 +11,6 @@
 # restart; removal stops the service and keeps the data.
 set -eu
 
-# systemd as PID 1 may not preserve the image's PATH for docker exec shells.
-PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-export PATH
-
 pkg=$1
 fail() { echo "FAIL: $*" >&2; journalctl -u samyama --no-pager -n 50 >&2 || true; exit 1; }
 ok() { echo "ok: $*"; }
