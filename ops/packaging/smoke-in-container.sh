@@ -31,7 +31,8 @@ docker run -d --name "$name" --privileged --cgroupns=host \
 # Wait for systemd to come up as PID 1.
 up=
 for _ in $(seq 1 120); do
-    state=$(docker exec "$name" systemctl is-system-running 2>/dev/null || true)
+    # Resolve systemctl directly; systemd may not leave it on docker exec's PATH.
+    state=$(docker exec "$name" /usr/bin/systemctl is-system-running 2>/dev/null || true)
     case "$state" in running|degraded) up=1; break ;; esac
     sleep 2
 done
