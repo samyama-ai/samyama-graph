@@ -218,6 +218,9 @@ struct ResultKey {
     /// a refresh, drop or re-create changes the answer without changing any
     /// data, so the epoch alone would serve the old one.
     projections: u64,
+    /// `GraphStore::features`' generation: a `feature.get` answered before
+    /// the latest materialization is not served after it (ML-07).
+    features: u64,
 }
 
 /// Canonical, order-independent rendering of bound parameters.
@@ -524,6 +527,7 @@ impl QueryEngine {
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         crate::usdt::query_start(query_str, false);
+        let _in_flight = crate::query::metrics::in_flight();
         let parse_started = std::time::Instant::now();
         let mut query = self.parse_to_run(query_str)?;
         // Only a non-Cypher dialect rewrites the AST, so only that pays for a
@@ -614,6 +618,7 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
     ) -> Result<StreamedResult, Box<dyn std::error::Error>> {
         crate::usdt::query_start(query_str, false);
+        let _in_flight = crate::query::metrics::in_flight();
         let query = self.parse_to_run(query_str)?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
@@ -710,6 +715,7 @@ impl QueryEngine {
             params: canonical_params(&effective),
             epoch: store.epoch(),
             projections: store.graph_projections.generation(),
+            features: store.features.generation(),
         };
 
         {
@@ -735,7 +741,10 @@ impl QueryEngine {
         // epoch would publish an answer computed partly before it. Storing
         // nothing when the epoch moved is the honest outcome: the answer is
         // still returned, it is just not remembered.
-        if store.epoch() == key.epoch && store.graph_projections.generation() == key.projections {
+        if store.epoch() == key.epoch
+            && store.graph_projections.generation() == key.projections
+            && store.features.generation() == key.features
+        {
             self.insert_with_budget(key, batch.clone());
         }
         Ok((batch, false))
@@ -872,6 +881,7 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         crate::usdt::query_start(query_str, true);
+        let _in_flight = crate::query::metrics::in_flight();
         let query = self.parse_to_run(query_str)?;
         let deadline = self.deadline(time_limit);
 

@@ -319,6 +319,13 @@ harness = false
 name = "ann_benchmark"
 harness = false
 
+# Resource and cost profile of the vector index per quantization (#1989):
+# bytes per vector, build/dump/restart time, $ per million queries. Its
+# arithmetic is in benches/vector_cost_common, tested by tests/vector_cost_profile.rs.
+[[bench]]
+name = "vector_cost_profile"
+harness = false
+
 [[bench]]
 name = "vector_distance"
 harness = false
@@ -410,4 +417,14 @@ harness = false
 
 [[bench]]
 name = "filtered_ann_benchmark"
+harness = false
+
+# Graph + vector hybrid (GraphRAG-shaped) queries (#1987). Its shared code is
+# in benches/graph_vector_hybrid and is tested by tests/graph_vector_hybrid_harness.rs.
+[[bench]]
+name = "graph_vector_hybrid_benchmark"
+harness = false
+
+[[bench]]
+name = "hybrid_retrieval_benchmark"
 harness = false

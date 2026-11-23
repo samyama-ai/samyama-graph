@@ -20,3 +20,6 @@ Inputs in this directory:
   `examples/hier_benchmark.rs` and by tests; see `hier/README.md`.
 - `ldbc/ldbc-sf1-params.*.json` — LDBC SNB SF1 substitution parameters for
   `ldbc_benchmark.rs`.
+- `graph_vector_hybrid/` — shared code of `graph_vector_hybrid_benchmark.rs`,
+  and the Neo4j / Qdrant competitor script with its pinned `docker-compose.yml`;
+  see `docs/benchmarks/graph-vector-hybrid.md`.

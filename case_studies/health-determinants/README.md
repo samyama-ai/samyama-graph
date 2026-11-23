@@ -38,6 +38,35 @@ demographics → world regions. Every query returns real rows (DoD-gated).
 `Country.iso_code` is the **federation key** shared with the
 [surveillance](../surveillance) and [health-systems](../health-systems) graphs.
 
+## Question catalog
+
+[`health-determinants.sgqueries`](./health-determinants.sgqueries) holds 58 questions
+(17 easy, 28 medium, 13 hard; four unanswerable), built with `catalog-build --release`
+against the pinned snapshot (#1154). [`questions.json`](questions.json) is its source,
+and the NLQ accuracy benchmark
+([competitor-benchmarks#260](https://git.samyama.ai/Samyama.ai/samyama-graph-competitor-benchmarks/issues/260))
+reads it as its question set. Every entry is checked
+weekly against the published snapshot by
+[`kg-catalogs.yml`](../../.github/workflows/kg-catalogs.yml).
+
+```bash
+samyama queries list case_studies/health-determinants/health-determinants.sgqueries
+samyama queries run  case_studies/health-determinants/health-determinants.sgqueries \
+    --snapshot health-determinants.sgsnap --entry <id> [--param name=value]...
+samyama verify health-determinants.sgsnap --queries case_studies/health-determinants/health-determinants.sgqueries
+```
+
+Every indicator node holds one value for one country and one year, so each question
+pins the indicator (by its World Bank code in the Cypher, by its plain name in the
+question) and the year. The graph's 211 `Country` nodes are World Bank economies and
+include territories such as Bermuda and the Cayman Islands, which top some rankings;
+there are no aggregate rows (no "World" or "Sub-Saharan Africa" country). Two
+economies, Ethiopia and Venezuela, have the income level `Not classified`, and that
+value appears as its own group in the income-group questions. Freshwater withdrawal is
+a percentage of *internal* resources, so it can run far above 100% (Egypt: 7,750% in
+2020). The questions avoid those already asked of the WHO data in the
+[surveillance](../surveillance) and [health-systems](../health-systems) catalogs.
+
 ## Data & license
 
 Sources: World Bank WDI (CC BY 4.0), WHO Ambient Air Quality, FAO AQUASTAT, UNDP
