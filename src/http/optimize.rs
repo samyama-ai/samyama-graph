@@ -23,6 +23,7 @@ use samyama_optimization::algorithms::{
 };
 use samyama_optimization::benchmarks::{DTLZ, DTLZ_FRONT_SAMPLES_PER_AXIS, ZDT, ZDT_FRONT_SAMPLES};
 use samyama_optimization::budget::{Budget, Budgeted, StopReason};
+use samyama_optimization::constraints::{Constrained, ConstraintHandling};
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SimpleProblem,
     SolverConfig,
@@ -798,6 +799,12 @@ struct SolveReq {
     /// Stop once the objective has been evaluated this many times (OPT-11).
     #[serde(default)]
     max_evaluations: Option<u64>,
+    /// How a candidate that breaks a constraint is treated (OPT-10, #2266):
+    /// `penalty`, `repair` or `feasibility`. Absent: `penalty` for a
+    /// single-objective solver, `feasibility` (constrained dominance) for a
+    /// multi-objective one, which is what each did before.
+    #[serde(default)]
+    constraint_handling: Option<String>,
 }
 
 impl SolveReq {
@@ -882,6 +889,18 @@ async fn start_solve(
             format!("unknown algorithm: {}", req.algorithm),
         ))?;
     let budget = req.budget().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    let constraint_handling = match req.constraint_handling.as_deref() {
+        None => None,
+        Some(name) => Some(ConstraintHandling::from_name(name).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "unknown constraint_handling `{name}`; use one of {}",
+                    ConstraintHandling::NAMES.join(", ")
+                ),
+            )
+        })?),
+    };
 
     let job_id = Uuid::new_v4().to_string();
     let (event_tx, event_rx) = mpsc::channel::<SseEvent>(256);
@@ -943,6 +962,7 @@ async fn start_solve(
                 cfg,
                 seed,
                 budget,
+                constraint_handling,
             );
             let elapsed = started.elapsed();
             // Measured after the clock stops: `total_time_ms` is the solve.
@@ -1109,9 +1129,11 @@ fn solve_multi_objective<P: MultiObjectiveProblem>(
     cfg: SolverConfig,
     seed: Option<u64>,
     budget: Budget,
+    handling: ConstraintHandling,
     problem: P,
 ) -> Result<(MultiObjectiveRun, u64, StopReason), String> {
-    let problem = &Budgeted::new(problem, budget);
+    let constrained = Constrained::new_multi(problem, handling).map_err(|e| e.to_string())?;
+    let problem = &Budgeted::new(constrained, budget);
     let r = match algo_id {
         "mo_bmr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBMR), seed).solve(problem),
         "mo_bwr" => seeded!(MOBMWRSolver::new(cfg, MOBMWRVariant::MOBWR), seed).solve(problem),
@@ -1122,7 +1144,23 @@ fn solve_multi_objective<P: MultiObjectiveProblem>(
         "nsga2" => seeded!(NSGA2Solver::new(cfg), seed).solve(problem),
         _ => return Err(format!("algorithm {} not multi-objective", algo_id)),
     };
-    let (returned, feasible) = returned_front(&r.pareto_front);
+    // Each point judged by the problem's own constraints and objectives, at
+    // the point it was scored at (OPT-10, #2266). What the solver kept can
+    // differ: under `penalty` its objectives carry the penalty and it saw no
+    // violation, and under `repair` it holds the unrepaired point.
+    let constrained = problem.inner();
+    let front: Vec<samyama_optimization::common::MultiObjectiveIndividual> = r
+        .pareto_front
+        .iter()
+        .map(|ind| {
+            let x = constrained.resolve_multi(&ind.variables);
+            let violation: f64 = constrained.inner().penalties(&x).iter().sum();
+            let objectives =
+                samyama_optimization::common::evaluate_objectives(constrained.inner(), &x);
+            samyama_optimization::common::MultiObjectiveIndividual::new(x, objectives, violation)
+        })
+        .collect();
+    let (returned, feasible) = returned_front(&front);
     let final_first = returned
         .iter()
         .map(|ind| ind.fitness[0])
@@ -1192,6 +1230,7 @@ fn run_solver(
         cfg,
         seed,
         Budget::default(),
+        None,
     )
 }
 
@@ -1206,23 +1245,26 @@ fn run_solver_within(
     cfg: SolverConfig,
     seed: Option<u64>,
     budget: Budget,
+    constraint_handling: Option<ConstraintHandling>,
 ) -> Result<SolverOutcome, String> {
     if multi_objective {
+        let handling = constraint_handling.unwrap_or(ConstraintHandling::FeasibilityRules);
         let (run, evaluations, stopped_by) = if bench_id == "uc2_dosing" {
             solve_multi_objective(
                 algo_id,
                 cfg,
                 seed,
                 budget,
+                handling,
                 super::uc_problems::UC2DosingProblem::new(),
             )?
         } else {
             match FrontProblem::for_benchmark(bench_id) {
                 Some(FrontProblem::Zdt(problem)) => {
-                    solve_multi_objective(algo_id, cfg, seed, budget, problem)?
+                    solve_multi_objective(algo_id, cfg, seed, budget, handling, problem)?
                 }
                 Some(FrontProblem::Dtlz(problem)) => {
-                    solve_multi_objective(algo_id, cfg, seed, budget, problem)?
+                    solve_multi_objective(algo_id, cfg, seed, budget, handling, problem)?
                 }
                 None => return Err(format!("benchmark {} is not multi-objective", bench_id)),
             }
@@ -1243,7 +1285,12 @@ fn run_solver_within(
             .find(|b| b.id == bench_id)
             .ok_or_else(|| format!("unknown benchmark: {bench_id}"))?;
         let dim = if bench_dim == 0 { bench.dim } else { bench_dim };
-        let budgeted = Budgeted::new(single_obj(bench.id, dim, bench.lower, bench.upper), budget);
+        let constrained = Constrained::new(
+            single_obj(bench.id, dim, bench.lower, bench.upper),
+            constraint_handling.unwrap_or(ConstraintHandling::Penalty),
+        )
+        .map_err(|e| format!("{}: {e}", bench.id))?;
+        let budgeted = Budgeted::new(constrained, budget);
         let problem = &budgeted;
 
         let result = match algo_id {
@@ -1276,13 +1323,15 @@ fn run_solver_within(
         };
         // Measured on the bare problem: checking the answer is not part of
         // the solve, so it does not count against the budget.
-        let problem = budgeted.inner();
-        let objective = problem.objective(&result.best_variables);
+        let constrained = budgeted.inner();
+        let best = constrained.resolve(&result.best_variables);
+        let problem = constrained.inner();
+        let objective = problem.objective(&best);
         Ok(SolverOutcome {
             final_fitness: result.best_fitness,
             history: result.history,
             final_pareto: None,
-            feasible: Some(is_feasible(problem.penalty(&result.best_variables))),
+            feasible: Some(is_feasible(problem.penalty(&best))),
             gap: bench
                 .optimum
                 .map(|optimum| gap_to_best_known(objective, optimum)),

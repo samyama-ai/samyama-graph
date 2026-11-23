@@ -6,10 +6,15 @@ COMMENT = _{ ("/*" ~ (!"*/" ~ ANY)* ~ "*/") | ("//" ~ (!"\n" ~ ANY)*) }
 
 // Query structure
 query = { SOI ~ cypher_options? ~ explain_clause? ~ cypher_options? ~ statement ~ (union_clause ~ statement)* ~ ";"? ~ EOI }
-explain_clause = { (^"PROFILE" | ^"EXPLAIN") ~ explain_format? }
+explain_clause = { (^"PROFILE" | ^"EXPLAIN") ~ (explain_format | explain_options)? }
 // `EXPLAIN (FORMAT JSON)` / `PROFILE (FORMAT JSON)` (#2013): the plan as a
 // structured value instead of text, for a client that would otherwise parse it.
 explain_format = { "(" ~ ^"FORMAT" ~ ^"JSON" ~ ")" }
+// `EXPLAIN (plan=2)` / `PROFILE (planner=cost, plan=2)` (LANG-06, #2252): the
+// `CYPHER` options in parentheses, checked exactly as `CYPHER plan=2` is. A
+// spelling clients try first; refusing it as a parse error at the `(` told
+// them nothing about the option that does exist.
+explain_options = { "(" ~ cypher_option ~ ("," ~ cypher_option)* ~ ")" }
 // `CYPHER planner=cost plan=2 MATCH …` (LANG-06, #1616): options that choose
 // the planner and force one of its candidate plans, before or after EXPLAIN.
 // Keys and values are checked when the query is lowered, so an option this
@@ -143,8 +148,9 @@ fulltext_one = _{ "(" ~ variable ~ "." ~ property_key ~ ")" }
 drop_fulltext_index_stmt = { ^"DROP" ~ ^"FULLTEXT" ~ ^"INDEX" ~ index_name }
 
 show_indexes_stmt = { ^"SHOW" ~ (^"INDEXES" | ^"INDEX") }
-// ANALYZE -- recompute the planner statistics (LANG-13).
-analyze_stmt = { ^"ANALYZE" }
+// ANALYZE -- recompute the planner statistics (LANG-13). `ANALYZE :Label`
+// recomputes the same statistics and reports the part that describes Label.
+analyze_stmt = { ^"ANALYZE" ~ (":" ~ label)? }
 show_constraints_stmt = { ^"SHOW" ~ ^"CONSTRAINTS" }
 create_constraint_stmt = { ^"CREATE" ~ ^"CONSTRAINT" ~ (constraint_modern | constraint_legacy) }
 // Neo4j 4+/5 form. The optional name must not swallow the `IF` or `FOR` keyword, and is
