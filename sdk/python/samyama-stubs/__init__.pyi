@@ -19,7 +19,15 @@ argument gets one value and is told another.
 
 from typing import Any, Final
 
-__all__ = ["SamyamaClient", "QueryResult", "QueryStream", "ServerStatus"]
+__all__ = ["SamyamaClient", "QueryResult", "QueryStream", "ServerStatus", "RequestTimeoutError"]
+
+class RequestTimeoutError(RuntimeError):
+    """The server did not answer in time (#2175).
+
+    If the request was a write, the server may or may not have applied it, so
+    it was not sent again. A refused connection raises `RuntimeError` instead:
+    that request never reached the server.
+    """
 
 class QueryResult:
     """One query's answer: a table, plus the graph elements it referenced."""
