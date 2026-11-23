@@ -515,7 +515,7 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
     // `batchSize` has no fixed default: left out, every seed is one batch.
     ("algo.sample.neighbors", &[
         pos("seeds", T::List, true),
-        Param { name: "fanout", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None },
+        Param { name: "fanout", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None, bound: None },
         key("direction", T::String, D::String("out")),
         opt("weightProperty", T::String),
         opt("batchSize", T::Integer),
@@ -604,6 +604,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
     ("algo.split", "Assigns each node to train, validation or test so that related nodes (a component, a community, a source, or a time window) land in the same split."),
     ("algo.splitLeakage", "The pairs of related nodes that a split put in different splits, each with the reason they count as a leak."),
+    ("algo.sample.neighbors", "Samples up to fanout neighbours per node at each hop out from the seed nodes, in minibatches, as a GNN trainer draws them; seeded, so the same seed returns the same rows."),
 ];
 
 impl AlgorithmEntry {
