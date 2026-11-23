@@ -4799,9 +4799,9 @@ impl QueryPlanner {
     }
 
     fn dispatch_plan_match_inner(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
-        let (graph_native, forced) = {
+        let (graph_native, forced, asked_for_cost) = {
             let f = self.forcing.lock().unwrap();
-            (f.graph_native.unwrap_or(self.config.graph_native), f.plan)
+            (f.graph_native.unwrap_or(self.config.graph_native), f.plan, f.graph_native == Some(true))
         };
         if let Some(n) = forced {
             // A pattern the enumerator cannot plan has the one plan the
@@ -4823,7 +4823,7 @@ impl QueryPlanner {
             Self::note_native_plan_count();
             return Ok(plan);
         }
-        if graph_native && Self::is_cyclic(match_clause) {
+        if graph_native && !asked_for_cost && Self::is_cyclic(match_clause) {
             // A cyclic pattern closes on a TrieJoin in the default planner,
             // which counts parallel relationships correctly. The enumerator's
             // plan closes it with an ExpandInto behind relationship-uniqueness
@@ -4832,6 +4832,8 @@ impl QueryPlanner {
             // patterns lost their worst-case-optimal join (#2249, PERF-07).
             // Until the enumerator's TrieJoin binds relationships with their
             // multiplicity, a cycle goes to the planner that plans it right.
+            // Only by default: `CYPHER planner=cost` asks for the enumerator
+            // by name, and gets it.
             return self.plan_match(match_clause, where_clause, store);
         }
         if graph_native {
