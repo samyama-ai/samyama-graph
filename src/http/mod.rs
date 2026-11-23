@@ -3,6 +3,7 @@
 pub mod server;
 pub mod handler;
 pub mod optimize;
+pub mod queries;
 pub mod tenants;
 pub mod transactions;
 pub mod uc_problems;

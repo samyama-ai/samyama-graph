@@ -1142,6 +1142,13 @@ paths:
         The body is **multipart/form-data**, not a raw octet stream — posting the
         bytes directly is the mistake this description exists to prevent. Import
         merges into the target tenant rather than replacing it.
+
+        An optional second part, `queries`, carries the `.sgqueries` catalog the
+        snapshot's header links. It is checked against the header's SHA-256
+        before anything is written and loaded for the graph. Every import drops
+        the graph's previous catalog, and the response's `queries` says whether
+        the header links one and whether it was loaded: `linked: true,
+        loaded: false` means the client should ask for the file.
       requestBody:
         required: true
         content:
@@ -1152,11 +1159,225 @@ paths:
                 file:
                   type: string
                   format: binary
+                queries:
+                  type: string
+                  format: binary
+                  description: The `.sgqueries` file the header links
       responses:
         '400':
           $ref: '#/components/responses/BadRequest'
+        '409':
+          description: >-
+            `catalog_mismatch`: the `queries` part is not the catalog the
+            header names (`expected`, `got`), or the header names none.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogError'
         '200':
           description: The snapshot was imported
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  queries:
+                    $ref: '#/components/schemas/CatalogLinkState'
+
+  /api/queries/import:
+    post:
+      operationId: importQueryCatalog
+      summary: Load a .sgqueries catalog for a graph
+      description: >
+        Replaces the graph's catalog. Held in memory: a restart drops it.
+        Refused whole if any entry's query writes, is assembled by string
+        substitution, or declares parameters that do not match it. Needs write
+        permission.
+      parameters:
+        - $ref: '#/components/parameters/Graph'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                graph:
+                  type: string
+      responses:
+        '200':
+          description: Loaded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  loaded: {type: integer}
+                  replaced: {type: boolean}
+                  sha256: {type: string}
+                  by_difficulty:
+                    type: object
+                    properties:
+                      easy: {type: integer}
+                      medium: {type: integer}
+                      hard: {type: integer}
+                  with_params: {type: integer}
+        '400':
+          description: Not a catalog, or a refused entry (`invalid_catalog`), or no file
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogError'
+        '413':
+          description: The catalog is larger than the server accepts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogError'
+
+  /api/queries:
+    get:
+      operationId: listQueries
+      summary: List and search the graph's catalog entries
+      description: >
+        `q` keeps entries whose question or paraphrases contain every word of
+        it, case-insensitively. Each entry carries its parameters, so a client
+        can draw a form without a second request.
+      parameters:
+        - name: q
+          in: query
+          schema: {type: string}
+        - name: difficulty
+          in: query
+          schema: {type: string, enum: [easy, medium, hard]}
+        - $ref: '#/components/parameters/Graph'
+      responses:
+        '200':
+          description: The matching entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total: {type: integer}
+                  sha256: {type: string}
+                  results:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CatalogEntrySummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: '`no_catalog`: the graph has no catalog loaded'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogError'
+
+  /api/queries/{id}:
+    get:
+      operationId: getQuery
+      summary: One catalog entry, with its Cypher and work ceiling
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+        - $ref: '#/components/parameters/Graph'
+      responses:
+        '200':
+          description: The entry
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/CatalogEntrySummary'
+                  - type: object
+                    properties:
+                      cypher: {type: string}
+                      work: {type: [integer, 'null']}
+                      work_ceiling: {type: [integer, 'null']}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: '`no_catalog`, or `query_not_found`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogError'
+
+  /api/queries/{id}/run:
+    post:
+      operationId: runQuery
+      summary: Run a catalog entry with bound parameter values
+      description: >
+        Values are bound, never substituted into the query. Every declared
+        parameter needs a value (`param_missing`); the sample is not used in
+        its place. The run is held to the entry's work ceiling, and at most
+        10,000 rows are returned (`truncated`).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                params:
+                  type: object
+                  additionalProperties: true
+                graph:
+                  type: string
+                  default: default
+      responses:
+        '200':
+          description: The result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  columns: {type: array, items: {type: string}}
+                  rows: {type: array, items: {type: array, items: {}}}
+                  row_count: {type: integer}
+                  truncated: {type: boolean}
+                  work: {type: [integer, 'null']}
+                  work_ceiling: {type: [integer, 'null']}
+                  source: {type: string, enum: [computed]}
+        '400':
+          description: >-
+            `param_missing` (`param`), `param_unknown` (`param`, `declared`),
+            `param_type` (`param`, `expected`, `got`), `param_not_allowed`
+            (`param`, `allowed`), `query_error`, or a body that is not the
+            declared JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogError'
+        '404':
+          description: '`no_catalog`, or `query_not_found`'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogError'
+        '422':
+          description: >-
+            `work_ceiling` (`limit`, `params`): the values make the template do
+            more work than its ceiling. Or `invalid_entry`: the entry cannot be
+            run, for instance it records no work.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogError'
 
   /api/enrich/policy:
     post:
@@ -1708,6 +1929,14 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
 components:
+  parameters:
+    Graph:
+      name: graph
+      in: query
+      description: "Target graph/tenant name (default: 'default')"
+      schema:
+        type: string
+        default: default
   responses:
     BadRequest:
       description: |
@@ -2098,6 +2327,56 @@ components:
         error:
           type: string
           description: Error message
+
+    CatalogError:
+      description: >-
+        An `ErrorResponse` with a stable `code` and the fields that name what
+        was wrong (#2026).
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            code:
+              type: string
+              enum: [param_missing, param_unknown, param_type, param_not_allowed,
+                     work_ceiling, invalid_entry, query_error, query_not_found,
+                     no_catalog, catalog_mismatch, invalid_catalog, bad_upload]
+            param: {type: string}
+            declared: {type: array, items: {type: string}}
+            expected: {}
+            got: {}
+            allowed: {type: array, items: {}}
+            limit: {type: integer}
+            params: {type: object}
+
+    CatalogEntrySummary:
+      type: object
+      properties:
+        id: {type: string}
+        question: {type: string}
+        paraphrases: {type: array, items: {type: string}}
+        difficulty: {type: string}
+        unanswerable: {type: boolean}
+        params:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              type: {type: string, enum: [int, float, string, bool]}
+              sample: {}
+              enum_values: {type: [array, 'null'], items: {}}
+
+    CatalogLinkState:
+      type: object
+      description: >-
+        `linked: false` is a snapshot whose header names no catalog.
+        `linked: true, loaded: false` means the client should ask for the file.
+      properties:
+        linked: {type: boolean}
+        expected_file: {type: [string, 'null']}
+        sha256: {type: [string, 'null']}
+        loaded: {type: boolean}
 
     Tenant:
       type: object

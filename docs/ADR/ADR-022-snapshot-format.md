@@ -86,6 +86,14 @@ published snapshot by `.github/workflows/kg-catalogs.yml` (`catalog-gate
 snapshots predate the header link, so linking them is a re-upload of each
 asset with `catalog-build ... --link`; until then `verify` takes `--queries`.
 
+**A server serves a graph's catalog over HTTP** (#2026).
+- `POST /api/queries/import` (multipart `file`, needs write) loads a catalog for a graph. Every entry is checked as at build time, and an entry whose query writes is refused, so the whole file is refused.
+- `GET /api/queries?q=&difficulty=` lists the entries with their parameters. `q` keeps an entry when every word appears in its question or one of its paraphrases.
+- `GET /api/queries/:id` adds the entry's Cypher and its work ceiling.
+- `POST /api/queries/:id/run` with `{params}` runs the entry through `run_template_in` in `RunMode::Api`. Over HTTP an omitted parameter is refused (`param_missing`) instead of taking its sample, as the CLI does. Refusals carry a `code` (`param_missing`, `param_unknown`, `param_type`, `param_not_allowed`, `work_ceiling`, `no_catalog`, `query_not_found`) and the fields that name the input at fault.
+- `POST /api/snapshot/import` takes an optional `queries` part. It is checked against the header's `queries.sha256` before anything is written, and a mismatch is a 409 `catalog_mismatch`. Every import drops the graph's previous catalog. The response's `queries: {linked, expected_file, sha256, loaded}` tells a client whether to ask for the file.
+- Catalogs are held in memory, so a restart drops them.
+
 **A read-only snapshot may carry materialized results** (`read_only`,
 `results: {file, sha256}`, added 2026-10-01 for #1158). A second sidecar,
 `<kg>.sgresults` (`samyama.results/1`), beside the catalog; the body format does

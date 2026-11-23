@@ -209,7 +209,8 @@ pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::a
     if *method == Method::POST
         && (path.starts_with("/api/import/")
             || path == "/api/enrich"
-            || path == "/api/vector/indexes")
+            || path == "/api/vector/indexes"
+            || path == "/api/queries/import")
     {
         return Role::Write;
     }
@@ -701,6 +702,9 @@ pub struct AppState {
     pub snapshot_key: Option<Arc<[u8; crate::snapshot::encryption::KEY_BYTES]>>,
     /// Open HTTP transactions, each holding the writer's lock (#1200 step 6b).
     pub transactions: super::transactions::TxnSessions,
+    /// Each graph's loaded query catalog (#2026). In memory: a restart drops
+    /// them, and a snapshot import drops the graph's.
+    pub query_catalogs: super::queries::Catalogs,
 }
 
 impl AppState {
@@ -1054,6 +1058,7 @@ impl HttpServer {
             persistence: self.persistence.clone(),
             snapshot_key: self.snapshot_key.clone(),
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
 
         let optimize_state = Arc::new(super::optimize::OptimizeState::default());
@@ -1097,6 +1102,14 @@ impl HttpServer {
             .route("/api/structure", get(get_structure_handler).put(put_structure_handler))
             .route("/api/structure/cues", post(structure_cues_handler))
             .route("/api/snapshot/export", post(export_snapshot_handler))
+            .route(
+                "/api/queries/import",
+                post(super::queries::import_handler)
+                    .layer(DefaultBodyLimit::max(super::queries::MAX_CATALOG_BYTES)),
+            )
+            .route("/api/queries", get(super::queries::list_handler))
+            .route("/api/queries/:id", get(super::queries::get_handler))
+            .route("/api/queries/:id/run", post(super::queries::run_handler))
             .route("/api/snapshot/import", post(restore_snapshot_handler)
                 .layer(DefaultBodyLimit::max(SNAPSHOT_IMPORT_BODY_LIMIT)))
             .with_state(state);
@@ -1216,6 +1229,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
 
         let cloned = state.clone();
@@ -1237,6 +1251,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
 
         let cloned = state.clone();
@@ -1264,6 +1279,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
 
         let c1 = state.clone();
@@ -1289,6 +1305,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
 
         // Write through the state
@@ -1330,6 +1347,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
 
         // Deliberately no CORS layer here. This assembles a miniature router to
@@ -1357,6 +1375,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
 
         let app = Router::new()
