@@ -31,6 +31,8 @@ pub enum AlgorithmCategory {
     /// Draws part of the graph, as a GNN trainer's minibatches (ML-02).
     Sampling,
     Optimization,
+    /// Prepares a training dataset: leakage-safe splits and their check (ML-05).
+    Dataset,
 }
 
 /// One callable algorithm.
@@ -169,6 +171,10 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     read("algo.pca", &[], Embedding, &["node", "projection"]),
     write("algo.fastRP", Embedding, &["node", "embedding"]),
     write("algo.node2vec", Embedding, &["node", "embedding"]),
+    // Training datasets (ML-05, #1730). `split` keeps whole groups on one side;
+    // `splitLeakage` reads a stored split back and lists every leak across it.
+    read("algo.split", &["algo.trainTestSplit"], Dataset, &["node", "split", "group"]),
+    read("algo.splitLeakage", &["algo.leakageCheck"], Dataset, &["node1", "node2", "split1", "split2", "reason"]),
     // Optimisation. A single-objective solve also yields `history`,
     // `iterations` and `max_iterations`; a multi-objective one yields
     // `front_size` instead.
@@ -491,11 +497,31 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         LABEL,
         EDGE_TYPE,
     ]),
+    // Leakage-safe splits (ML-05, #1730). `property` is required by the
+    // `time` and `source` strategies and refused by the others; `edgeType` is
+    // required by `entity`.
+    ("algo.split", &[
+        Param { name: "strategy", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
+        key("ratios", T::List, D::FloatList(&[0.8, 0.1, 0.1])),
+        key("seed", T::Integer, D::Integer(42)),
+        opt("property", T::String),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    // `hops` is read by the `entity` strategy only.
+    ("algo.splitLeakage", &[
+        Param { name: "strategy", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
+        key("splitProperty", T::String, D::String("split")),
+        key("hops", T::Integer, D::Integer(3)),
+        opt("property", T::String),
+        LABEL,
+        EDGE_TYPE,
+    ]),
     // Neighbour sampling (ML-02, #1717). `seeds` is one node id or a list.
     // `batchSize` has no fixed default: left out, every seed is one batch.
     ("algo.sample.neighbors", &[
         pos("seeds", T::List, true),
-        Param { name: "fanout", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None },
+        Param { name: "fanout", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None, bound: None },
         key("direction", T::String, D::String("out")),
         opt("weightProperty", T::String),
         opt("batchSize", T::Integer),
@@ -628,6 +654,9 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.solve", "Optimises a numeric property on each node of a label with a metaheuristic solver (Jaya by default), each value within the bounds, minimising the sum of value times its cost property."),
     ("algo.negativeSampling", "Node pairs that are not edges, for training link prediction (random, degree-matched or k-hop)."),
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
+    ("algo.split", "Assigns each node to train, validation or test so that related nodes (a component, a community, a source, or a time window) land in the same split."),
+    ("algo.splitLeakage", "The pairs of related nodes that a split put in different splits, each with the reason they count as a leak."),
+    ("algo.sample.neighbors", "Samples up to fanout neighbours per node at each hop out from the seed nodes, in minibatches, as a GNN trainer draws them; seeded, so the same seed returns the same rows."),
 ];
 
 impl AlgorithmEntry {

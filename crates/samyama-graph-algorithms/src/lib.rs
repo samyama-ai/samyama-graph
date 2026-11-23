@@ -33,6 +33,7 @@ pub mod pathfinding_extra;
 pub mod traversal;
 pub mod temporal;
 pub mod embeddings;
+pub mod split;
 
 pub use common::{GraphView, NodeId};
 pub use constrained_path::{constrained_shortest_path, ConstrainedPath, ConstrainedPathError};
@@ -99,5 +100,6 @@ pub use embeddings::{fastrp, node2vec, FastRpConfig, Node2VecConfig};
 #[cfg(test)]
 #[path = "lib_cov_tests.rs"]
 mod cov_tests;
+pub use split::{assign_groups, entity_leaks, group_leaks, split_names, time_leaks, time_split, GroupLeak};
 #[cfg(test)]
 mod frontier_parity_tests;
