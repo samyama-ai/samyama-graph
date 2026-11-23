@@ -24,7 +24,7 @@ cypher_kw = @{ ^"CYPHER" ~ !(ASCII_ALPHANUMERIC | "_") }
 cypher_option = { cypher_option_key ~ "=" ~ cypher_option_value }
 cypher_option_key = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* }
 cypher_option_value = @{ (ASCII_ALPHANUMERIC | "_" | "-" | ".")+ }
-union_clause = { ^"UNION" ~ ^"ALL"? }
+union_clause = { (&clause_word ~ ^"UNION") ~ ^"ALL"? }
 statement = { analyze_stmt | show_graph_projections_stmt | create_graph_projection_stmt | refresh_graph_projection_stmt | drop_graph_projection_stmt | show_hierarchy_indexes_stmt | show_structure_indexes_stmt | show_indexes_stmt | show_constraints_stmt | drop_hierarchy_index_stmt | drop_structure_index_stmt | drop_fulltext_index_stmt | drop_index_stmt | create_constraint_stmt | create_fulltext_index_stmt | create_point_index_stmt | drop_point_index_stmt | create_vector_index_stmt | create_hierarchy_index_stmt | create_structure_index_stmt | create_index_stmt | rebuild_hierarchy_index_stmt | rebuild_structure_index_stmt | call_stmt | foreach_stmt | merge_stmt | load_csv_stmt | load_parquet_stmt | unwind_stmt | match_stmt | create_stmt | with_return_stmt | return_stmt }
 
 // A query as what Cypher actually is: an ordered sequence of clauses.
@@ -61,24 +61,24 @@ index_name = @{ !((^"FOR" | ^"ON") ~ !(ASCII_ALPHANUMERIC | "_")) ~ (ASCII_ALPHA
 // could see -- a uniformity gap, not a missing capability, so it is a grammar
 // alternative and not a feature. Both build the same index: the builder
 // dispatches on `label`/`property_key` and ignores the pattern variable.
-create_vector_index_stmt = { ^"CREATE" ~ ^"VECTOR" ~ ^"INDEX" ~ index_name? ~ (vector_index_for | vector_index_on) ~ options? }
+create_vector_index_stmt = { (&clause_word ~ ^"CREATE") ~ ^"VECTOR" ~ ^"INDEX" ~ index_name? ~ (vector_index_for | vector_index_on) ~ options? }
 vector_index_for = _{ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ")" }
 vector_index_on = _{ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ")" }
 // Every index kind takes both spellings (NDS-11, #1668): the `ON :L(p)` form
 // this grammar started with, and Neo4j 5's `FOR (n:L) ON (n.p)`, each with an
 // optional name. `RANGE` is Neo4j's name for the plain B-tree kind.
-create_index_stmt = { ^"CREATE" ~ (^"RANGE" | ^"BTREE")? ~ ^"INDEX" ~ index_name? ~ (index_for_props | index_on_props) }
+create_index_stmt = { (&clause_word ~ ^"CREATE") ~ (^"RANGE" | ^"BTREE")? ~ ^"INDEX" ~ index_name? ~ (index_for_props | index_on_props) }
 index_on_props = _{ ^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")" }
 index_for_props = _{ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ "(" ~ variable ~ "." ~ property_key ~ ("," ~ variable ~ "." ~ property_key)* ~ ")" }
 // `CREATE POINT INDEX` builds an R-tree over a property holding points (#1618).
-create_point_index_stmt = { ^"CREATE" ~ ^"POINT" ~ ^"INDEX" ~ index_name? ~ (vector_index_for | vector_index_on) ~ options? }
+create_point_index_stmt = { (&clause_word ~ ^"CREATE") ~ ^"POINT" ~ ^"INDEX" ~ index_name? ~ (vector_index_for | vector_index_on) ~ options? }
 drop_point_index_stmt = { ^"DROP" ~ ^"POINT" ~ ^"INDEX" ~ index_name }
 
 // CREATE HIERARCHY INDEX (ADR-035, OEH)
 //   CREATE HIERARCHY INDEX atc ON ()-[:IS_A]->() MEASURE d.units AGGREGATE sum, max
 // The alternatives inside hier_relationship are ordered longest-first: PEG commits to the
 // first match, so `<-[...]-` must be tried before `-[...]-` or the leading `<` is orphaned.
-create_hierarchy_index_stmt = { ^"CREATE" ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable ~ ^"ON" ~ hier_relationship ~ hier_measure? ~ hier_aggregates? }
+create_hierarchy_index_stmt = { (&clause_word ~ ^"CREATE") ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable ~ ^"ON" ~ hier_relationship ~ hier_measure? ~ hier_aggregates? }
 drop_hierarchy_index_stmt = { ^"DROP" ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable }
 show_hierarchy_indexes_stmt = { ^"SHOW" ~ ^"HIERARCHY" ~ (^"INDEXES" | ^"INDEX") }
 rebuild_hierarchy_index_stmt = { ^"REBUILD" ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable }
@@ -99,12 +99,12 @@ rebuild_hierarchy_index_stmt = { ^"REBUILD" ~ ^"HIERARCHY" ~ ^"INDEX" ~ variable
 // coordinate list is optional, and each clause maps to one field of
 // `ManifoldSpec`, so the grammar cannot express a convention the index cannot
 // build.
-create_structure_index_stmt = { ^"CREATE" ~ ^"STRUCTURE" ~ ^"INDEX" ~ variable ~ ^"ON" ~ ":" ~ label ~ sgi_coords ~ sgi_metric? ~ sgi_backbone? ~ sgi_contact_radius? ~ sgi_measure? }
+create_structure_index_stmt = { (&clause_word ~ ^"CREATE") ~ ^"STRUCTURE" ~ ^"INDEX" ~ variable ~ ^"ON" ~ ":" ~ label ~ sgi_coords ~ sgi_metric? ~ sgi_backbone? ~ sgi_contact_radius? ~ sgi_measure? }
 sgi_coords = { "(" ~ property_key ~ ("," ~ property_key){1,2} ~ ")" }
 sgi_metric = { ^"METRIC" ~ sgi_metric_name }
 sgi_metric_name = @{ ^"euclidean" | ^"geospherical" | ^"geo" | ^"spherical" }
 sgi_backbone = { ^"BACKBONE" ~ property_key ~ sgi_group_by? }
-sgi_group_by = { ^"GROUP" ~ ^"BY" ~ property_key }
+sgi_group_by = { ^"GROUP" ~ (&clause_word ~ ^"BY") ~ property_key }
 sgi_contact_radius = { ^"CONTACT_RADIUS" ~ (float | integer) }
 sgi_measure = { ^"MEASURE" ~ property_key ~ sgi_aggregates? }
 sgi_aggregates = { ^"AGGREGATE" ~ sgi_aggregate ~ ("," ~ sgi_aggregate)* }
@@ -118,7 +118,7 @@ rebuild_structure_index_stmt = { ^"REBUILD" ~ ^"STRUCTURE" ~ ^"INDEX" ~ variable
 // The three filters are exactly what an algorithm's view can be built from:
 // one node label, one relationship type, one numeric weight property. Each is
 // optional; leaving one out takes all of it.
-create_graph_projection_stmt = { ^"CREATE" ~ ^"GRAPH" ~ ^"PROJECTION" ~ variable ~ if_not_exists? ~ projection_nodes? ~ projection_relationships? ~ projection_weight? }
+create_graph_projection_stmt = { (&clause_word ~ ^"CREATE") ~ ^"GRAPH" ~ ^"PROJECTION" ~ variable ~ if_not_exists? ~ projection_nodes? ~ projection_relationships? ~ projection_weight? }
 projection_nodes = { ^"NODES" ~ ":" ~ label }
 projection_relationships = { ^"RELATIONSHIPS" ~ ":" ~ label }
 projection_weight = { ^"WEIGHT" ~ property_key }
@@ -141,7 +141,7 @@ drop_index_stmt = { ^"DROP" ~ ^"INDEX" ~ ^"ON" ~ ":" ~ label ~ "(" ~ property_ke
 // WITH over a string property, which the term dictionary here serves. The name
 // is optional in both spellings; an unnamed index is named `<kind>_<label>_<property>`
 // so `db.index.fulltext.queryNodes` can still address it (#1668).
-create_fulltext_index_stmt = { ^"CREATE" ~ fulltext_kind ~ ^"INDEX" ~ index_name? ~ ((^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ (fulltext_each | fulltext_one)) | (^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")")) }
+create_fulltext_index_stmt = { (&clause_word ~ ^"CREATE") ~ fulltext_kind ~ ^"INDEX" ~ index_name? ~ ((^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"ON" ~ (fulltext_each | fulltext_one)) | (^"ON" ~ ":" ~ label ~ "(" ~ property_key ~ ("," ~ property_key)* ~ ")")) }
 fulltext_kind = { ^"FULLTEXT" | ^"TEXT" }
 fulltext_each = _{ ^"EACH" ~ "[" ~ variable ~ "." ~ property_key ~ ("," ~ variable ~ "." ~ property_key)* ~ "]" }
 fulltext_one = _{ "(" ~ variable ~ "." ~ property_key ~ ")" }
@@ -152,7 +152,7 @@ show_indexes_stmt = { ^"SHOW" ~ (^"INDEXES" | ^"INDEX") }
 // recomputes the same statistics and reports the part that describes Label.
 analyze_stmt = { ^"ANALYZE" ~ (":" ~ label)? }
 show_constraints_stmt = { ^"SHOW" ~ ^"CONSTRAINTS" }
-create_constraint_stmt = { ^"CREATE" ~ ^"CONSTRAINT" ~ (constraint_modern | constraint_legacy) }
+create_constraint_stmt = { (&clause_word ~ ^"CREATE") ~ ^"CONSTRAINT" ~ (constraint_modern | constraint_legacy) }
 // Neo4j 4+/5 form. The optional name must not swallow the `IF` or `FOR` keyword, and is
 // kept in its own rule so it is not mistaken for the pattern variable.
 constraint_modern = { constraint_name? ~ if_not_exists? ~ ^"FOR" ~ "(" ~ variable ~ ":" ~ label ~ ")" ~ ^"REQUIRE" ~ property_access ~ ^"IS" ~ ^"UNIQUE" }
@@ -169,20 +169,20 @@ options = { ^"OPTIONS" ~ "{" ~ property_list? ~ "}" }
 // ORDER BY score DESC LIMIT 10` — the example in our own README — was a
 // syntax error.
 call_stmt = { (call_subquery | call_clause) ~ where_clause? ~ match_stmt_partial? ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
-match_stmt_partial = { ^"MATCH" ~ pattern ~ where_clause? }
+match_stmt_partial = { (&clause_word ~ ^"MATCH") ~ pattern ~ where_clause? }
 
 // CALL subquery: CALL { MATCH ... RETURN ... }
-call_subquery = { ^"CALL" ~ "{" ~ statement ~ "}" }
+call_subquery = { (&clause_word ~ ^"CALL") ~ "{" ~ statement ~ "}" }
 // `MATCH ... CALL { WITH a, b <statement> }` (#1236): a subquery run once per
 // row, with `a` and `b` imported from it. `WITH *` imports everything in scope.
-correlated_call = { ^"CALL" ~ "{" ~ ^"WITH" ~ call_imports ~ statement ~ "}" }
+correlated_call = { (&clause_word ~ ^"CALL") ~ "{" ~ (&clause_word ~ ^"WITH") ~ call_imports ~ statement ~ "}" }
 call_imports = { "*" | variable ~ ("," ~ variable)* }
 
 // CALL clause
-call_clause = { ^"CALL" ~ procedure_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ (^"YIELD" ~ yield_items)? }
+call_clause = { (&clause_word ~ ^"CALL") ~ procedure_name ~ "(" ~ (expression ~ ("," ~ expression)*)? ~ ")" ~ ((&clause_word ~ ^"YIELD") ~ yield_items)? }
 procedure_name = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | ".")* }
 yield_items = { yield_item ~ ("," ~ yield_item)* }
-yield_item = { variable ~ (^"AS" ~ variable)? }
+yield_item = { variable ~ ((&clause_word ~ ^"AS") ~ variable)? }
 
 // MERGE statement: MERGE (n:Person {name: "Alice"}) ON CREATE SET ... ON MATCH SET ...
 // A bare `SET` after MERGE applies whichever branch was taken, unlike ON CREATE / ON
@@ -190,12 +190,12 @@ yield_item = { variable ~ (^"AS" ~ variable)? }
 // `(on_create_set | on_match_set)*` rather than a fixed `ON CREATE` then
 // `ON MATCH`: Cypher lets them be written in either order, and requiring one
 // made `ON MATCH SET … ON CREATE SET …` a syntax error.
-merge_stmt = { ^"MERGE" ~ pattern ~ (on_create_set | on_match_set)* ~ set_clause* ~ remove_clause* ~ return_clause? }
+merge_stmt = { (&clause_word ~ ^"MERGE") ~ pattern ~ (on_create_set | on_match_set)* ~ set_clause* ~ remove_clause* ~ return_clause? }
 // `set_entry`, not `set_item`: `MERGE (a:L) ON MATCH SET a:M1` sets a label,
 // and restricting these to property assignment made the branch-specific forms
 // less capable than the bare `SET` on the same statement.
-on_create_set = { ^"ON" ~ ^"CREATE" ~ ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
-on_match_set = { ^"ON" ~ ^"MATCH" ~ ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
+on_create_set = { ^"ON" ~ (&clause_word ~ ^"CREATE") ~ (&clause_word ~ ^"SET") ~ set_entry ~ ("," ~ set_entry)* }
+on_match_set = { ^"ON" ~ (&clause_word ~ ^"MATCH") ~ (&clause_word ~ ^"SET") ~ set_entry ~ ("," ~ set_entry)* }
 
 // MATCH statement: sequence of reading clauses, optional write, finishing with RETURN
 match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ (correlated_call | call_clause)? ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
@@ -204,7 +204,7 @@ match_stmt = { (optional_match_clause | match_clause)+ ~ where_clause? ~ (correl
 foreach_stmt = { foreach_clause }
 foreach_clause = { ^"FOREACH" ~ "(" ~ variable ~ in_op ~ expression ~ "|" ~ foreach_body+ ~ ")" }
 foreach_body = _{ set_clause | remove_clause | delete_clause | create_clause | merge_inline | foreach_clause }
-unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
+unwind_clause = { (&clause_word ~ ^"UNWIND") ~ expression ~ (&clause_word ~ ^"AS") ~ variable }
 // LOAD CSV (LANG-09). A reading clause: it produces one row per record, the way
 // UNWIND produces one row per list element, and everything downstream of it is
 // written against that row.
@@ -212,12 +212,12 @@ unwind_clause = { ^"UNWIND" ~ expression ~ ^"AS" ~ variable }
 // `WITH HEADERS` decides the *shape* of the bound value -- a map keyed by the
 // header row, or a list -- so it is not an optional detail: a query written for
 // one shape reads nothing from the other.
-load_csv_clause = { ^"LOAD" ~ ^"CSV" ~ (^"WITH" ~ ^"HEADERS")? ~ ^"FROM" ~ expression ~ ^"AS" ~ variable ~ (^"FIELDTERMINATOR" ~ string)? }
+load_csv_clause = { ^"LOAD" ~ ^"CSV" ~ ((&clause_word ~ ^"WITH") ~ ^"HEADERS")? ~ ^"FROM" ~ expression ~ (&clause_word ~ ^"AS") ~ variable ~ (^"FIELDTERMINATOR" ~ string)? }
 // LOAD PARQUET (LANG-09, #1098). The same reading clause over a Parquet file; each
 // record binds as a map keyed by the file's column names. No `WITH HEADERS` and no
 // `FIELDTERMINATOR`: the file carries its own schema, so neither is the query's to say.
-load_parquet_clause = { ^"LOAD" ~ ^"PARQUET" ~ ^"FROM" ~ expression ~ ^"AS" ~ variable }
-merge_inline = { ^"MERGE" ~ pattern ~ (on_create_set | on_match_set)* }
+load_parquet_clause = { ^"LOAD" ~ ^"PARQUET" ~ ^"FROM" ~ expression ~ (&clause_word ~ ^"AS") ~ variable }
+merge_inline = { (&clause_word ~ ^"MERGE") ~ pattern ~ (on_create_set | on_match_set)* }
 // A statement that *begins* with UNWIND. UNWIND was already allowed after a MATCH or a
 // WITH, but a leading one had no rule to match, so the batch-write idiom
 // `UNWIND $rows AS row CREATE (...)` was a parse error at column 1. Same tail as
@@ -231,8 +231,8 @@ unwind_stmt = { unwind_clause+ ~ ((optional_match_clause | match_clause)+ ~ wher
 load_csv_stmt = { load_csv_clause ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 // A statement that begins with LOAD PARQUET. Same tail as `load_csv_stmt`.
 load_parquet_stmt = { load_parquet_clause ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
-match_clause = { ^"MATCH" ~ pattern ~ using_hint* }
-optional_match_clause = { ^"OPTIONAL" ~ ^"MATCH" ~ pattern ~ using_hint* }
+match_clause = { (&clause_word ~ ^"MATCH") ~ pattern ~ using_hint* }
+optional_match_clause = { (&clause_word ~ ^"OPTIONAL") ~ (&clause_word ~ ^"MATCH") ~ pattern ~ using_hint* }
 // Planner hints (LANG-13, #1675), Neo4j's spelling, after the pattern and
 // before its WHERE: `MATCH (n:N) USING INDEX n:N(x) WHERE n.x = 1`.
 using_hint = { ^"USING" ~ (using_index_hint | using_scan_hint | using_join_hint) }
@@ -240,10 +240,10 @@ using_index_hint = { ^"INDEX" ~ ^"SEEK"? ~ variable ~ ":" ~ label ~ "(" ~ proper
 using_scan_hint = { ^"SCAN" ~ variable ~ ":" ~ label }
 using_join_hint = { ^"JOIN" ~ ^"ON" ~ variable ~ ("," ~ variable)* }
 where_clause = { ^"WHERE" ~ expression }
-with_clause = { ^"WITH" ~ distinct? ~ return_items ~ order_by_clause? ~ skip_clause? ~ limit_clause? ~ where_clause? }
-create_clause = { ^"CREATE" ~ pattern }
-delete_clause = { ^"DETACH"? ~ ^"DELETE" ~ expression ~ ("," ~ expression)* }
-set_clause = { ^"SET" ~ set_entry ~ ("," ~ set_entry)* }
+with_clause = { (&clause_word ~ ^"WITH") ~ distinct? ~ return_items ~ order_by_clause? ~ skip_clause? ~ limit_clause? ~ where_clause? }
+create_clause = { (&clause_word ~ ^"CREATE") ~ pattern }
+delete_clause = { (&clause_word ~ ^"DETACH")? ~ (&clause_word ~ ^"DELETE") ~ expression ~ ("," ~ expression)* }
+set_clause = { (&clause_word ~ ^"SET") ~ set_entry ~ ("," ~ set_entry)* }
 // `set_item` is tried first and needs a `.`, so `p:Admin` falls through to the
 // label form rather than being mistaken for a property assignment.
 // Order matters: `set_item` needs a `.`, so `n = {...}` and `n += {...}` fall
@@ -259,14 +259,14 @@ set_label_item = { variable ~ (":" ~ label)+ }
 // which copies its properties (`SET a = b`).
 set_entity_item = { variable ~ set_entity_op ~ expression }
 set_entity_op = { "+=" | "=" }
-remove_clause = { ^"REMOVE" ~ remove_item ~ ("," ~ remove_item)* }
+remove_clause = { (&clause_word ~ ^"REMOVE") ~ remove_item ~ ("," ~ remove_item)* }
 // `REMOVE n:L1:L3` removes both labels in one item, exactly as `SET n:A:B`
 // adds both. Accepting only one label made the multi-label form a syntax
 // error rather than a partial effect.
 remove_item = { property_access | variable ~ (":" ~ label)+ }
-return_clause = { ^"RETURN" ~ distinct? ~ return_items }
-distinct = { ^"DISTINCT" }
-order_by_clause = { ^"ORDER" ~ ^"BY" ~ order_items }
+return_clause = { (&clause_word ~ ^"RETURN") ~ distinct? ~ return_items }
+distinct = { (&clause_word ~ ^"DISTINCT") }
+order_by_clause = { (&clause_word ~ ^"ORDER") ~ (&clause_word ~ ^"BY") ~ order_items }
 // `SKIP`/`LIMIT` take an expression, not only a literal: `LIMIT
 // toInteger(ceil(1.7))` is legal Cypher. The grammar accepted `integer`
 // alone, so those queries failed to parse at all (#912). The expression may
@@ -277,8 +277,8 @@ order_by_clause = { ^"ORDER" ~ ^"BY" ~ order_items }
 // matched the `1` of `LIMIT 1 + 1` and left `+ 1` unconsumed, failing the whole
 // parse. A bare integer is a valid expression, so nothing is lost by trying the
 // wider rule first.
-skip_clause = { ^"SKIP" ~ (expression | integer) }
-limit_clause = { ^"LIMIT" ~ (expression | integer) }
+skip_clause = { (&clause_word ~ ^"SKIP") ~ (expression | integer) }
+limit_clause = { (&clause_word ~ ^"LIMIT") ~ (expression | integer) }
 
 // Standalone CREATE clause
 // Adjacent `CREATE` clauses are one create: `CREATE (a) CREATE (b)` and
@@ -381,7 +381,7 @@ property_key = @{ escaped_name | ((ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_
 // left-hand side. `RETURN *, extra` is legal, so the star is an item rather
 // than a replacement for the whole list.
 return_items = { return_item ~ ("," ~ return_item)* }
-return_item = { star_item | (expression ~ (^"AS" ~ variable)?) }
+return_item = { star_item | (expression ~ ((&clause_word ~ ^"AS") ~ variable)?) }
 star_item = { "*" }
 
 // ORDER BY items
@@ -449,7 +449,7 @@ pattern_predicate = { node ~ (edge_pattern ~ node)+ }
 count_star = { ^"COUNT" ~ "(" ~ distinct? ~ "*" ~ ")" }
 // `COUNT { pattern WHERE ... }` (#1235): how many matches. Braces, not
 // parentheses, so it cannot be mistaken for `count(*)` or `count(x)`.
-count_subquery = { ^"COUNT" ~ "{" ~ ^"MATCH"? ~ pattern ~ where_clause? ~ "}" }
+count_subquery = { ^"COUNT" ~ "{" ~ (&clause_word ~ ^"MATCH")? ~ pattern ~ where_clause? ~ "}" }
 
 // Query parameter: $name
 parameter = @{ "$" ~ (ASCII_ALPHANUMERIC | "_")+ }
@@ -491,7 +491,7 @@ pattern_comprehension = { "[" ~ (variable ~ "=")? ~ path ~ where_clause? ~ "|" ~
 // first and keeps its fast path. The `"}"` inside each alternative is what
 // lets a simple body that stops short (at `WITH`, say) fall through to the
 // full one.
-exists_subquery = { ^"EXISTS" ~ "{" ~ ((^"MATCH"? ~ pattern ~ where_clause? ~ (^"RETURN" ~ distinct? ~ return_items)? ~ "}") | (statement ~ "}")) }
+exists_subquery = { ^"EXISTS" ~ "{" ~ (((&clause_word ~ ^"MATCH")? ~ pattern ~ where_clause? ~ ((&clause_word ~ ^"RETURN") ~ distinct? ~ return_items)? ~ "}") | (statement ~ "}")) }
 
 // List comprehension: [x IN list WHERE cond | expr]
 // The `| expr` projection is optional; without it the iteration variable is
@@ -501,6 +501,18 @@ list_comprehension = { "[" ~ variable ~ in_op ~ expression ~ (where_kw ~ express
 // optional expression it is looking at: with the projection optional, two
 // expressions could be (list, filter) or (list, projection) (#578).
 where_kw = @{ ^"WHERE" ~ !(ASCII_ALPHANUMERIC | "_") }
+
+// A clause keyword as a whole word (#2359). Used only as a look-ahead in front
+// of the keyword it guards (`&clause_word ~ ^"RETURN"`), so it consumes nothing
+// and adds no pair to the tree: `RETURNtoFloat(a)` and `RETURNa` are refused
+// instead of reading as `RETURN toFloat(a)` and `RETURN a`. Atomic, so no
+// whitespace is skipped before the boundary check.
+clause_word = @{
+    (^"OPTIONAL" | ^"DISTINCT" | ^"DETACH" | ^"RETURN" | ^"UNWIND" | ^"CREATE" | ^"DELETE" | ^"REMOVE"
+     | ^"MERGE" | ^"MATCH" | ^"ORDER" | ^"LIMIT" | ^"YIELD" | ^"UNION" | ^"WITH" | ^"SKIP" | ^"CALL"
+     | ^"SET" | ^"BY" | ^"AS")
+    ~ !(ASCII_ALPHANUMERIC | "_")
+}
 pipe_op = { "|" }
 
 // CASE expression: CASE WHEN condition THEN result [WHEN...] [ELSE default] END
@@ -547,7 +559,7 @@ function_name = @{
 pow_op = { "^" }
 mul_div_mod_op = { "*" | "/" | "%" }
 add_sub_op = { "+" | "-" }
-comparison_op = { "<=" | "<>" | ">=" | "<" | ">" | "==" | "=~" | "=" | "!=" | ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS" }
+comparison_op = { "<=" | "<>" | ">=" | "<" | ">" | "==" | "=~" | "=" | "!=" | ^"STARTS" ~ (&clause_word ~ ^"WITH") | ^"ENDS" ~ (&clause_word ~ ^"WITH") | ^"CONTAINS" }
 in_op = @{ ^"IN" ~ !(ASCII_ALPHANUMERIC | "_") }
 and_op = @{ ^"AND" ~ !(ASCII_ALPHANUMERIC | "_") }
 or_op = @{ ^"OR" ~ !(ASCII_ALPHANUMERIC | "_") }
