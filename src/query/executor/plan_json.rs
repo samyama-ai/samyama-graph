@@ -55,6 +55,9 @@ fn estimated(node: &EstimatedNode, next_id: &mut i64) -> PropertyValue {
         ("details", text(&node.details)),
         ("estimated_rows", number(node.rows)),
         ("estimated_cost", number(node.cost)),
+        // EXPLAIN runs nothing, so nothing was held; the key is here so both
+        // documents give every node the same fields (#2013).
+        ("memory_bytes", PropertyValue::Null),
         ("children", PropertyValue::Array(children)),
     ])
 }
@@ -78,6 +81,7 @@ fn candidates(diag: Option<PlanDiagnostics>) -> Vec<(&'static str, PropertyValue
                 ("plan", PropertyValue::Integer(i as i64 + 1)),
                 ("cost", PropertyValue::Float(*cost)),
                 ("chosen", PropertyValue::Boolean(i == diag.chosen)),
+                ("rejected_because", rejection(i, *cost, &diag)),
                 ("description", text(description)),
             ])
         })
@@ -86,6 +90,24 @@ fn candidates(diag: Option<PlanDiagnostics>) -> Vec<(&'static str, PropertyValue
         ("candidates_evaluated", PropertyValue::Integer(diag.candidates_evaluated as i64)),
         ("candidate_plans", PropertyValue::Array(plans)),
     ]
+}
+
+/// Why candidate `i` is not the plan that runs, or `null` for the one that is
+/// (#2013). The planner ranks candidates by estimated cost, cheapest first and
+/// in enumeration order on a tie, and runs the first unless `CYPHER plan=N`
+/// picked another (#1616), so those are the only reasons there are.
+fn rejection(i: usize, cost: f64, diag: &PlanDiagnostics) -> PropertyValue {
+    let chosen = diag.chosen_plan_cost;
+    if i == diag.chosen {
+        PropertyValue::Null
+    } else if diag.chosen != 0 {
+        text(&format!("CYPHER plan={} chose plan {} instead", diag.chosen + 1, diag.chosen + 1))
+    } else if cost > chosen {
+        let ratio = if chosen > 0.0 { format!(" ({:.2}x)", cost / chosen) } else { String::new() };
+        text(&format!("estimated cost {cost:.2} against the chosen plan's {chosen:.2}{ratio}"))
+    } else {
+        text("same estimated cost as the chosen plan, which was enumerated first")
+    }
 }
 
 /// The per-operator row budget in force; `null` when it is disabled.
@@ -116,6 +138,16 @@ pub(super) fn explain(
     ];
     fields.extend(candidates(diag));
     map(fields)
+}
+
+/// An operator's own work counters (#1970) as a map, or `null` for one that
+/// reports none -- which is not a report of no work.
+fn work(node: &ProfileNode) -> PropertyValue {
+    let counters = node.work();
+    if counters.is_empty() {
+        return PropertyValue::Null;
+    }
+    map(counters.into_iter().map(|(k, v)| (k, PropertyValue::Integer(v as i64))).collect())
 }
 
 /// What PROFILE measured, alongside the plan it measured.
@@ -166,6 +198,10 @@ pub(super) fn profile(
             ("time_ms", millis(node.inclusive())),
             ("self_time_ms", millis(node.inclusive().saturating_sub(below))),
             ("q_error", number(node.q_error())),
+            // The most the operator held in buffered rows (#2078), `null` for
+            // one that buffers nothing.
+            ("memory_bytes", node.memory_bytes().map_or(PropertyValue::Null, |b| PropertyValue::Integer(b as i64))),
+            ("work", work(node)),
             (
                 "children",
                 PropertyValue::Array(children[i].iter().map(|&c| build(c, nodes, children, cost)).collect()),

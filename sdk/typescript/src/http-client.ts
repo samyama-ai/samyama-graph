@@ -29,13 +29,75 @@ export interface ConnectionOptions {
    * one slow server into a thundering herd of clients waking together.
    */
   retryBaseDelayMs?: number;
+  /**
+   * Most requests this client has open at once (API-06, #1741).
+   *
+   * The pool is the SDK's, not the HTTP library's: `fetch` reuses connections
+   * but sets no limit on how many it opens, so a loop that fires a thousand
+   * queries opens up to a thousand sockets and the server's connection quota
+   * refuses the rest. With a limit, the extra calls wait for a slot instead.
+   * A slot is held until the response body has been read -- or, for
+   * `queryStream`, until the stream ends -- because the connection is busy
+   * until then. A caller's `signal` also cancels a call still waiting.
+   */
+  maxConnections?: number;
 }
 
 const DEFAULTS: Required<ConnectionOptions> = {
   timeoutMs: 30_000,
   maxRetries: 2,
   retryBaseDelayMs: 100,
+  maxConnections: 10,
 };
+
+/**
+ * A counting semaphore: at most `size` holders, the rest queued in order.
+ *
+ * `acquire` resolves to the release function, which is idempotent, so a
+ * `finally` that runs twice cannot hand out a slot that was never returned.
+ */
+class ConnectionPool {
+  private active = 0;
+  private waiting: Array<() => void> = [];
+
+  constructor(private readonly size: number) {}
+
+  /** Requests holding a slot now. */
+  get inUse(): number {
+    return this.active;
+  }
+
+  /** Requests waiting for one. */
+  get queued(): number {
+    return this.waiting.length;
+  }
+
+  async acquire(signal?: AbortSignal): Promise<() => void> {
+    signal?.throwIfAborted();
+    if (this.active >= this.size) {
+      await new Promise<void>((resolve, reject) => {
+        const wake = () => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        const onAbort = () => {
+          this.waiting = this.waiting.filter((w) => w !== wake);
+          reject(signal!.reason);
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+        this.waiting.push(wake);
+      });
+    }
+    this.active++;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active--;
+      this.waiting.shift()?.();
+    };
+  }
+}
 
 /** Per-call overrides. `signal` lets a caller cancel. */
 export interface RequestOptions {
@@ -46,6 +108,44 @@ export interface RequestOptions {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * May a request be sent again after it was sent and failed (#2175)?
+ *
+ * `"safe"` for a request that cannot change anything: a `readOnly` query, NLQ
+ * translation, status, schema. `"unsafe"` for anything that may write: a
+ * timed-out write may already have been applied, and sending it again is how
+ * one `CREATE` became three nodes with the default settings.
+ */
+type Replay = "safe" | "unsafe";
+
+/**
+ * Error codes Node reports when the connection was never established, so the
+ * request never reached the server and may be sent again whatever it was.
+ */
+const NOT_CONNECTED = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "UND_ERR_CONNECT_TIMEOUT",
+]);
+
+/** Did this `fetch` failure happen before the request was sent? */
+function neverConnected(err: unknown): boolean {
+  const cause = (err as { cause?: unknown } | null)?.cause as
+    | { code?: string; errors?: { code?: string }[] }
+    | undefined;
+  if (!cause) return false; // a browser says nothing; assume it was sent
+  if (cause.code && NOT_CONNECTED.has(cause.code)) return true;
+  // Happy-eyeballs tries several addresses and reports an AggregateError.
+  return (
+    Array.isArray(cause.errors) &&
+    cause.errors.length > 0 &&
+    cause.errors.every((e) => !!e.code && NOT_CONNECTED.has(e.code))
+  );
+}
 
 /**
  * HTTP transport for the Samyama SDK.
@@ -65,6 +165,20 @@ export class HttpTransport {
       Object.entries(options).filter(([, v]) => v !== undefined),
     ) as ConnectionOptions;
     this.options = { ...DEFAULTS, ...given };
+    const max = this.options.maxConnections;
+    if (!(max === Infinity || (Number.isInteger(max) && max >= 1))) {
+      throw new RangeError(
+        `maxConnections must be a whole number of at least 1, or Infinity; got ${max}`,
+      );
+    }
+    this.pool = new ConnectionPool(max);
+  }
+
+  private pool: ConnectionPool;
+
+  /** Requests holding a connection slot, and requests waiting for one. */
+  get connections(): { inUse: number; queued: number } {
+    return { inUse: this.pool.inUse, queued: this.pool.queued };
   }
 
   /** The settings this transport was built with. */
@@ -75,14 +189,21 @@ export class HttpTransport {
   /**
    * Is this failure worth retrying?
    *
-   * A timeout or a connection failure, and nothing else. An HTTP error is the
-   * server answering; repeating a request it has already refused achieves
-   * nothing, and blindly repeating a write is how one duplicate becomes
-   * several. A caller's own `AbortSignal` firing is never retried — the caller
-   * asked to stop.
+   * A connection that was never established, for any request: it never
+   * reached the server. A timeout or a dropped connection only when `replay`
+   * is `"safe"`: the server may already have run the request, and repeating a
+   * write it has applied is how one `CREATE` became three (#2175). An HTTP
+   * error is the server answering and is never retried. A caller's own
+   * `AbortSignal` firing is never retried — the caller asked to stop.
    */
-  private static retryable(err: unknown, callerSignal?: AbortSignal): boolean {
+  private static retryable(
+    err: unknown,
+    replay: Replay,
+    callerSignal?: AbortSignal,
+  ): boolean {
     if (callerSignal?.aborted) return false;
+    if (err instanceof TypeError && neverConnected(err)) return true;
+    if (replay !== "safe") return false;
     if (err instanceof DOMException && err.name === "TimeoutError") return true;
     if (err instanceof DOMException && err.name === "AbortError") return true;
     return err instanceof TypeError; // fetch's network-failure shape
@@ -98,6 +219,7 @@ export class HttpTransport {
     path: string,
     init: RequestInit,
     opts: RequestOptions = {},
+    replay: Replay = "unsafe",
   ): Promise<Response> {
     const timeoutMs = opts.timeoutMs ?? this.options.timeoutMs;
     let delay = this.options.retryBaseDelayMs;
@@ -115,7 +237,7 @@ export class HttpTransport {
       } catch (err) {
         if (
           attempt >= this.options.maxRetries ||
-          !HttpTransport.retryable(err, opts.signal)
+          !HttpTransport.retryable(err, replay, opts.signal)
         ) {
           throw err;
         }
@@ -137,10 +259,18 @@ export class HttpTransport {
     path: string,
     init: RequestInit,
     opts?: RequestOptions,
+    replay: Replay = "unsafe",
   ): Promise<T> {
-    const response = await this.request(path, init, opts);
-    if (!response.ok) return HttpTransport.fail(response);
-    return (await response.json()) as T;
+    // The slot is held until the body has been read, error bodies included:
+    // the connection is busy until then.
+    const release = await this.pool.acquire(opts?.signal);
+    try {
+      const response = await this.request(path, init, opts, replay);
+      if (!response.ok) return await HttpTransport.fail(response);
+      return (await response.json()) as T;
+    } finally {
+      release();
+    }
   }
 
   /** Execute a Cypher query via POST /api/query */
@@ -161,6 +291,9 @@ export class HttpTransport {
         body: JSON.stringify(body),
       },
       opts,
+      // The server refuses a `read_only` write, so only that can be replayed
+      // after a timeout; anything else may be a write.
+      opts?.readOnly ? "safe" : "unsafe",
     );
   }
 
@@ -185,6 +318,8 @@ export class HttpTransport {
     graph: string = "default",
     opts: { signal?: AbortSignal } = {},
   ): AsyncGenerator<Record<string, unknown>, void, undefined> {
+    // Held for the whole stream: the connection is busy until it ends.
+    const release = await this.pool.acquire(opts.signal);
     const controller = new AbortController();
     const onAbort = () => controller.abort(opts.signal?.reason);
     opts.signal?.addEventListener("abort", onAbort, { once: true });
@@ -203,11 +338,22 @@ export class HttpTransport {
         body: JSON.stringify({ query: cypher, graph, read_only: true }),
         signal: controller.signal,
       });
+    } catch (err) {
+      opts.signal?.removeEventListener("abort", onAbort);
+      release();
+      throw err;
     } finally {
       clearTimeout(deadline);
     }
-    if (!response.ok) return HttpTransport.fail(response);
-    if (!response.body) throw new Error("the stream response has no body");
+    if (!response.ok || !response.body) {
+      opts.signal?.removeEventListener("abort", onAbort);
+      try {
+        if (!response.ok) return await HttpTransport.fail(response);
+        throw new Error("the stream response has no body");
+      } finally {
+        release();
+      }
+    }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -253,6 +399,7 @@ export class HttpTransport {
         // stops producing rows nobody will read.
         await reader.cancel().catch(() => undefined);
       }
+      release();
     }
   }
 
@@ -273,6 +420,7 @@ export class HttpTransport {
         body: JSON.stringify(body),
       },
       opts,
+      "safe", // translation has no side effects
     );
     if (typeof response.cypher !== "string") {
       throw new Error("/api/nlq response has no `cypher` string");
@@ -282,7 +430,7 @@ export class HttpTransport {
 
   /** Get server status via GET /api/status */
   async status(opts?: RequestOptions): Promise<ServerStatus> {
-    return this.json<ServerStatus>("/api/status", {}, opts);
+    return this.json<ServerStatus>("/api/status", {}, opts, "safe");
   }
 
   /**
@@ -302,7 +450,7 @@ export class HttpTransport {
 
   /** Get graph schema via GET /api/schema */
   async schema(opts?: RequestOptions): Promise<GraphSchema> {
-    return this.json<GraphSchema>("/api/schema", {}, opts);
+    return this.json<GraphSchema>("/api/schema", {}, opts, "safe");
   }
 
   /** Generic POST request returning typed JSON response */

@@ -31,6 +31,9 @@ pub const PROBES: usize = 20;
 /// Names of the checks that need a server, for when none answered.
 const SERVER_ONLY: [&str; 4] = ["persistence", "server memory", "metrics", "latency"];
 
+/// How long `nlq endpoint` waits for the provider to accept a connection.
+const NLQ_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// What a `GET` came back with: the status code and body, or why there is none.
 pub type Fetched = Result<(u16, String), String>;
 
@@ -171,15 +174,184 @@ fn check_data_dir(dir: &std::path::Path) -> Check {
     }
 }
 
+/// Can this shell reach the NLQ provider at all? (#2082)
+///
+/// `nlq config` says the variables are filled in; this says the address they
+/// name answers. A typo in `NLQ_API_BASE_URL`, an Ollama that is not running,
+/// or a firewall in front of the provider all pass `nlq config` and fail at a
+/// user's first question.
+///
+/// It opens a TCP connection and closes it: no request is sent, so no key
+/// leaves the machine and no tokens are spent. A connection is not an answer
+/// (a wrong key or model still fails later), so this checks the network path
+/// only. `Warn`, not `Fail`: NLQ is optional and the database runs without it.
+/// Like `nlq config`, it reads this shell's variables, not the server's.
+fn check_nlq_endpoint(get: impl Fn(&str) -> Option<String>, timeout: Duration) -> Check {
+    use samyama::persistence::tenant::LLMProvider;
+    use std::net::ToSocketAddrs;
+    const NAME: &str = "nlq endpoint";
+    if get("NLQ_PROVIDER").is_none_or(|p| p.trim().is_empty()) {
+        return Check::new(NAME, Verdict::Skipped, "NLQ_PROVIDER is not set in this shell");
+    }
+    // An invalid configuration is `nlq config`'s finding; reporting it twice
+    // would count one problem as two warnings.
+    let Ok(config) = samyama::nlq::config_from(&get) else {
+        return Check::new(NAME, Verdict::Skipped, "nlq config is not valid; see that check");
+    };
+    if matches!(config.provider, LLMProvider::ClaudeCode | LLMProvider::Mock) {
+        return Check::new(NAME, Verdict::Skipped,
+            format!("provider {:?} makes no network call", config.provider));
+    }
+    let base = samyama::nlq::client::api_base_url(&config);
+    // Only Azure has no default, and `config_from` refuses it until it is
+    // implemented; kept so that day does not turn into "not a usable URL".
+    if base.is_empty() {
+        return Check::new(NAME, Verdict::Warn, format!(
+            "provider {:?} has no default endpoint; set NLQ_API_BASE_URL", config.provider));
+    }
+    let parsed = url::Url::parse(&base).ok();
+    let target = parsed.as_ref().and_then(|u| Some((u.host_str()?.to_string(), u.port_or_known_default()?)));
+    let Some((host, port)) = target else {
+        return Check::new(NAME, Verdict::Warn, format!("{base} is not a usable URL"));
+    };
+    let addr = match (host.trim_matches(['[', ']']), port).to_socket_addrs() {
+        Ok(mut a) => a.next(),
+        Err(e) => return Check::new(NAME, Verdict::Warn, format!("cannot resolve {host}: {e}")),
+    };
+    let Some(addr) = addr else {
+        return Check::new(NAME, Verdict::Warn, format!("{host} resolves to no address"));
+    };
+    match std::net::TcpStream::connect_timeout(&addr, timeout) {
+        Ok(_) => Check::new(NAME, Verdict::Pass,
+            format!("{host}:{port} accepts connections (no request was sent)")),
+        Err(e) => Check::new(NAME, Verdict::Warn, format!("{host}:{port} ({addr}): {e}")),
+    }
+}
+
+/// Where a strict Snap cannot read without the `removable-media` plug.
+const REMOVABLE_MEDIA_ROOTS: [&str; 2] = ["/media", "/mnt"];
+
+/// A Snap path as an absolute, slash-separated string, without touching the
+/// filesystem. Snap paths use Unix syntax even in tests running on Windows.
+fn snap_path(dir: &std::path::Path) -> String {
+    let raw = dir.to_string_lossy();
+    let path = if raw.starts_with('/') {
+        raw.into_owned()
+    } else {
+        std::path::absolute(dir)
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .to_string_lossy()
+            .into_owned()
+    };
+    path.replace('\\', "/")
+}
+
+/// Component-aware prefix check for Unix-style paths supplied by snapd.
+fn snap_path_is_within(path: &str, root: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let root = root.trim_end_matches('/');
+    path == root || path.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Under a strict Snap, can `/media` and `/mnt` be read? (#2203)
+///
+/// A `.sgsnap` on a USB stick or a mounted disk is the usual way a graph
+/// reaches an edge gateway, and a strict Snap without the `removable-media`
+/// plug gets "permission denied" there -- an error that names the file, not
+/// the cause. The plug is not connected automatically on install.
+///
+/// `connected` is `snapctl is-connected removable-media`: `Some(true)` or
+/// `Some(false)`, or `None` when it could not be asked. A disconnected plug
+/// is `Warn` with the command that fixes it, and `Fail` when the data
+/// directory itself is on removable media, since the server cannot start
+/// there.
+fn check_snap_removable_media(
+    get: impl Fn(&str) -> Option<String>,
+    data_dir: &std::path::Path,
+    connected: impl FnOnce() -> Option<bool>,
+) -> Check {
+    const NAME: &str = "snap removable-media";
+    let Some(snap) = get("SNAP_NAME").filter(|_| get("SNAP").is_some()) else {
+        return Check::new(NAME, Verdict::Skipped, "not running as a Snap");
+    };
+    let fix = format!("run `sudo snap connect {snap}:removable-media`");
+    match connected() {
+        Some(true) => Check::new(NAME, Verdict::Pass,
+            format!("connected; {} are readable", REMOVABLE_MEDIA_ROOTS.join(" and "))),
+        Some(false) => {
+            let dir = snap_path(data_dir);
+            if REMOVABLE_MEDIA_ROOTS.iter().any(|r| snap_path_is_within(&dir, r)) {
+                Check::new(NAME, Verdict::Fail, format!(
+                    "not connected, and the data directory {} is on removable media; {fix}",
+                    dir))
+            } else {
+                Check::new(NAME, Verdict::Warn, format!(
+                    "not connected: a .sgsnap under {} cannot be read or imported; {fix}",
+                    REMOVABLE_MEDIA_ROOTS.join(" or ")))
+            }
+        }
+        None => Check::new(NAME, Verdict::Skipped,
+            "running as a Snap, but `snapctl is-connected removable-media` gave no answer"),
+    }
+}
+
+/// Is the data directory where a Snap refresh will not copy it? (#2203)
+///
+/// snapd copies `$SNAP_DATA` in full on every refresh so that `snap revert`
+/// can restore it; `$SNAP_COMMON` is shared by every revision and never
+/// copied. A 200 GB store under `$SNAP_DATA` is 200 GB more disk on each
+/// refresh, so it is `Warn` with where to move it.
+fn check_snap_data_dir(get: impl Fn(&str) -> Option<String>, data_dir: &std::path::Path) -> Check {
+    const NAME: &str = "snap data location";
+    if get("SNAP").is_none() {
+        return Check::new(NAME, Verdict::Skipped, "not running as a Snap");
+    }
+    let dir = snap_path(data_dir);
+    let under = |var: &str| get(var).filter(|v| !v.is_empty()).filter(|v| snap_path_is_within(&dir, v));
+    if let Some(common) = under("SNAP_COMMON") {
+        return Check::new(NAME, Verdict::Pass,
+            format!("{} is under $SNAP_COMMON ({common}), shared by every revision", dir));
+    }
+    if let Some(data) = under("SNAP_DATA") {
+        let to = get("SNAP_COMMON").map_or_else(|| "$SNAP_COMMON".to_string(), |c| format!("{c}/data"));
+        return Check::new(NAME, Verdict::Warn, format!(
+            "{} is under $SNAP_DATA ({data}), which every refresh copies in full; use {to}",
+            dir));
+    }
+    Check::new(NAME, Verdict::Pass,
+        format!("{} is outside the Snap's revisioned data, so a refresh does not copy it", dir))
+}
+
+/// `snapctl is-connected removable-media`, inside a Snap. Exit 0 is
+/// connected and 1 is not; anything else, or no `snapctl`, is no answer.
+fn removable_media_connected() -> Option<bool> {
+    let status = std::process::Command::new("snapctl")
+        .args(["is-connected", "removable-media"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
+}
+
 /// Everything that can be decided without talking to a server.
 pub fn local_checks(url: &str, data_dir: &std::path::Path) -> Vec<Check> {
+    let env = |v: &str| std::env::var(v).ok();
     vec![
         Check::new("client version", Verdict::Pass, env!("CARGO_PKG_VERSION")),
         check_url(url),
         check_memory(),
         check_data_dir(data_dir),
         check_open_files(open_file_limit().as_deref()),
-        check_nlq(|v| std::env::var(v).ok()),
+        check_nlq(env),
+        check_nlq_endpoint(env, NLQ_CONNECT_TIMEOUT),
+        // `snapctl` is run only inside a Snap; the check returns first outside one.
+        check_snap_removable_media(env, data_dir, removable_media_connected),
+        check_snap_data_dir(env, data_dir),
     ]
 }
 
@@ -422,6 +594,7 @@ pub fn report(checks: Vec<Check>) -> Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn a_failing_check_sets_a_non_zero_exit_code() {
@@ -682,6 +855,79 @@ mod tests {
         assert!(!c.detail.contains("not-a-real-key"), "{}", c.detail);
     }
 
+    /// Variables for `provider` with its key set, and `NLQ_API_BASE_URL` when given.
+    fn nlq_env(provider: &'static str, base: Option<String>) -> impl Fn(&str) -> Option<String> {
+        move |v: &str| match v {
+            "NLQ_PROVIDER" => Some(provider.to_string()),
+            "OPENAI_API_KEY" | "ANTHROPIC_API_KEY" | "GEMINI_API_KEY" | "AZURE_OPENAI_API_KEY" => {
+                Some("not-a-real-key".to_string())
+            }
+            "NLQ_API_BASE_URL" => base.clone(),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_nlq_endpoint_is_judged_by_whether_it_accepts_a_connection() {
+        let t = Duration::from_secs(2);
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = format!("http://127.0.0.1:{}/v1", l.local_addr().unwrap().port());
+        let c = check_nlq_endpoint(nlq_env("openai", Some(open)), t);
+        assert_eq!(c.verdict, Verdict::Pass, "{}", c.detail);
+        assert!(!c.detail.contains("not-a-real-key"), "{}", c.detail);
+        // Held but not listening, as in the RESP test: a closed port could be
+        // taken by a test running alongside.
+        let held = tokio::net::TcpSocket::new_v4().unwrap();
+        held.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let dead = format!("http://127.0.0.1:{}", held.local_addr().unwrap().port());
+        let c = check_nlq_endpoint(nlq_env("ollama", Some(dead)), t);
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+        assert!(c.detail.contains("127.0.0.1"), "names the address: {}", c.detail);
+        let c = check_nlq_endpoint(nlq_env("openai", Some("not a url".into())), t);
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+        let c = check_nlq_endpoint(nlq_env("openai", Some("http://no-such-host.invalid".into())), t);
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+        drop(l);
+    }
+
+    #[test]
+    fn the_nlq_endpoint_is_skipped_when_there_is_nothing_to_reach() {
+        let t = Duration::from_millis(100);
+        assert_eq!(check_nlq_endpoint(|_| None, t).verdict, Verdict::Skipped);
+        // A provider without its key is `nlq config`'s warning, not a second one.
+        let keyless = |v: &str| (v == "NLQ_PROVIDER").then(|| "openai".to_string());
+        assert_eq!(check_nlq_endpoint(keyless, t).verdict, Verdict::Skipped);
+        for p in ["claudecode", "mock"] {
+            assert!(samyama::nlq::config_from(nlq_env(p, None)).is_ok(), "{p} is a valid config");
+            let c = check_nlq_endpoint(nlq_env(p, None), t);
+            assert_eq!(c.verdict, Verdict::Skipped, "{p}: {}", c.detail);
+        }
+        // Azure and Anthropic are refused as not implemented, which `nlq
+        // config` reports; there is no endpoint to try.
+        for p in ["azure", "anthropic"] {
+            assert!(samyama::nlq::config_from(nlq_env(p, None)).is_err(), "{p}");
+            assert_eq!(check_nlq_endpoint(nlq_env(p, None), t).verdict, Verdict::Skipped, "{p}");
+        }
+    }
+
+    #[test]
+    fn the_nlq_endpoint_is_the_one_the_server_would_call() {
+        use samyama::persistence::tenant::{LLMProvider, NLQConfig};
+        let cfg = |provider, base: Option<&str>| NLQConfig {
+            enabled: true,
+            provider,
+            model: String::new(),
+            api_key: None,
+            api_base_url: base.map(str::to_string),
+            system_prompt: None,
+        };
+        let url = samyama::nlq::client::api_base_url;
+        assert_eq!(url(&cfg(LLMProvider::OpenAI, None)), "https://api.openai.com/v1");
+        assert_eq!(url(&cfg(LLMProvider::Ollama, None)), "http://localhost:11434");
+        assert_eq!(url(&cfg(LLMProvider::OpenAI, Some("http://proxy:9000"))), "http://proxy:9000");
+        assert_eq!(url(&cfg(LLMProvider::AzureOpenAI, None)), "");
+    }
+
     #[test]
     fn the_resp_port_is_checked_when_named() {
         let url = "http://127.0.0.1:8080";
@@ -703,5 +949,74 @@ mod tests {
         let cs = local_checks("http://localhost:8080", std::path::Path::new("."));
         assert!(cs.len() >= 4, "a doctor that checks nothing reports a clean bill of health");
         assert!(cs.iter().all(|c| !c.detail.is_empty()), "every check must show what it saw");
+    }
+
+    fn snap_env(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |k| vars.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string())
+    }
+
+    const IN_SNAP: &[(&str, &str)] = &[
+        ("SNAP", "/snap/samyama/x1"),
+        ("SNAP_NAME", "samyama"),
+        ("SNAP_DATA", "/var/snap/samyama/x1"),
+        ("SNAP_COMMON", "/var/snap/samyama/common"),
+    ];
+
+    #[test]
+    fn the_snap_checks_skip_outside_a_snap_without_asking_snapctl() {
+        let none = snap_env(&[]);
+        let c = check_snap_removable_media(&none, Path::new("/mnt/usb/data"), || {
+            panic!("snapctl asked outside a Snap")
+        });
+        assert_eq!(c.verdict, Verdict::Skipped);
+        assert_eq!(check_snap_data_dir(&none, Path::new("/var/snap/samyama/x1/data")).verdict, Verdict::Skipped);
+    }
+
+    #[test]
+    fn a_disconnected_removable_media_plug_says_how_to_connect_it() {
+        let env = snap_env(IN_SNAP);
+        let c = check_snap_removable_media(&env, Path::new("/var/snap/samyama/common/data"), || Some(false));
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+        assert!(c.detail.contains("sudo snap connect samyama:removable-media"), "{}", c.detail);
+        assert!(c.detail.contains("/media or /mnt"), "{}", c.detail);
+        // On removable media itself, the server cannot start: a failure.
+        for dir in ["/media/pi/usb/data", "/mnt/disk/data"] {
+            let c = check_snap_removable_media(&env, Path::new(dir), || Some(false));
+            assert_eq!(c.verdict, Verdict::Fail, "{dir}: {}", c.detail);
+            assert!(c.detail.contains(dir) && c.detail.contains("snap connect"), "{}", c.detail);
+        }
+        // `/mntx` is not `/mnt`.
+        let c = check_snap_removable_media(&env, Path::new("/mntx/data"), || Some(false));
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+    }
+
+    #[test]
+    fn a_connected_plug_passes_and_no_answer_is_a_skip() {
+        let env = snap_env(IN_SNAP);
+        let c = check_snap_removable_media(&env, Path::new("/mnt/disk/data"), || Some(true));
+        assert_eq!(c.verdict, Verdict::Pass, "{}", c.detail);
+        let c = check_snap_removable_media(&env, Path::new("/mnt/disk/data"), || None);
+        assert_eq!(c.verdict, Verdict::Skipped, "{}", c.detail);
+    }
+
+    #[test]
+    fn the_snap_name_in_the_hint_is_the_installed_one() {
+        // A parallel install (`snap install samyama_test`) has its own name.
+        let env = snap_env(&[("SNAP", "/snap/samyama_test/x1"), ("SNAP_NAME", "samyama_test")]);
+        let c = check_snap_removable_media(&env, Path::new("/srv/data"), || Some(false));
+        assert!(c.detail.contains("samyama_test:removable-media"), "{}", c.detail);
+    }
+
+    #[test]
+    fn a_data_directory_under_snap_data_warns_and_names_snap_common() {
+        let env = snap_env(IN_SNAP);
+        let c = check_snap_data_dir(&env, Path::new("/var/snap/samyama/x1/data"));
+        assert_eq!(c.verdict, Verdict::Warn, "{}", c.detail);
+        assert!(c.detail.contains("/var/snap/samyama/common/data"), "{}", c.detail);
+        let c = check_snap_data_dir(&env, Path::new("/var/snap/samyama/common/data"));
+        assert_eq!(c.verdict, Verdict::Pass, "{}", c.detail);
+        assert!(c.detail.contains("$SNAP_COMMON"), "{}", c.detail);
+        let c = check_snap_data_dir(&env, Path::new("/srv/samyama"));
+        assert_eq!(c.verdict, Verdict::Pass, "{}", c.detail);
     }
 }

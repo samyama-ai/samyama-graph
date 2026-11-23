@@ -66,6 +66,13 @@ bytes = "1.5"
 tracing = "0.1"
 # `json`: SAMYAMA_LOG_FORMAT=json (#2076).
 tracing-subscriber = { version = "0.3", features = ["json"] }
+# OpenTelemetry trace export (#2077), behind the `otel` feature. Exports only
+# when OTEL_EXPORTER_OTLP_ENDPOINT (or ..._TRACES_ENDPOINT) is set; unset, no
+# exporter is built and no thread or connection exists.
+opentelemetry = { version = "0.33", optional = true, default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.33", optional = true, default-features = false, features = ["trace"] }
+opentelemetry-otlp = { version = "0.33", optional = true, default-features = false, features = ["trace", "http-proto", "reqwest-blocking-client"] }
+tracing-opentelemetry = { version = "0.34", optional = true, default-features = false }
 
 # Persistence (Phase 3)
 rocksdb = { version = "0.22", default-features = false, features = ["lz4", "zstd"] }
@@ -179,8 +186,11 @@ samyama-gpu = { path = "crates/samyama-gpu", version = "1.16.0", optional = true
 # mimalloc is the server's and the benchmarks' global allocator (ADR-038). A
 # library never installs one: samyama-sdk depends on this crate without default
 # features, so embedded users keep their host's allocator.
-default = ["mimalloc"]
+default = ["mimalloc", "otel"]
 mimalloc = ["dep:mimalloc"]
+# OpenTelemetry trace export (#2077). In the server's default build; a library
+# user (samyama-sdk builds without default features) does not compile it.
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 # Enable in-engine GPU acceleration. Off by default so users who do not want the
 # large wgpu/cudarc dep tree never compile it. See docs/ADR/ADR-025.
 gpu = ["dep:samyama-gpu", "samyama-graph-algorithms/gpu"]
@@ -308,6 +318,19 @@ harness = false
 name = "ann_benchmark"
 harness = false
 
+# Resource and cost profile of the vector index per quantization (#1989):
+# bytes per vector, build/dump/restart time, $ per million queries. Its
+# arithmetic is in benches/vector_cost_common, tested by tests/vector_cost_profile.rs.
+[[bench]]
+name = "vector_cost_profile"
+harness = false
+
+# Recall stability under insert, delete and update (#1986). Its shared code
+# is in benches/churn_common and is tested by tests/vector_churn_harness.rs.
+[[bench]]
+name = "vector_churn_benchmark"
+harness = false
+
 [[bench]]
 name = "vector_distance"
 harness = false
@@ -399,4 +422,14 @@ harness = false
 
 [[bench]]
 name = "filtered_ann_benchmark"
+harness = false
+
+# Graph + vector hybrid (GraphRAG-shaped) queries (#1987). Its shared code is
+# in benches/graph_vector_hybrid and is tested by tests/graph_vector_hybrid_harness.rs.
+[[bench]]
+name = "graph_vector_hybrid_benchmark"
+harness = false
+
+[[bench]]
+name = "hybrid_retrieval_benchmark"
 harness = false

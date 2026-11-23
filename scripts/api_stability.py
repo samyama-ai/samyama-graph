@@ -30,6 +30,10 @@ reason:
                   the *field* is still defended even though its value is not.
   cache           `/api/status` reports hit and miss counters that depend on
                   everything run before; the key is kept, the counts are not.
+  stats           a query response's `elapsed_ms` and `lock_wait_ms` are
+                  wall-clock times (#2079). Each is reduced to a check that
+                  it is a number; `rows` and `is_write`, which do not move,
+                  are compared as they are.
 
 Nothing else is normalised. Node ids are left alone deliberately: they are
 part of what a client sees, the fixture is built by a fixed sequence of
@@ -428,6 +432,12 @@ def normalise(body):
                 out[k] = "<version>"
             elif k == "plan_hash":
                 out[k] = "<hex>" if isinstance(v, str) and v else v
+            elif k == "stats" and isinstance(v, dict):
+                out[k] = {
+                    sk: ("<ms>" if isinstance(sv, (int, float)) and not isinstance(sv, bool) else sv)
+                    if sk in ("elapsed_ms", "lock_wait_ms") else normalise(sv)
+                    for sk, sv in v.items()
+                }
             elif k == "cache" and isinstance(v, dict):
                 out[k] = {ck: "<count>" for ck in sorted(v)}
             elif k == "version":

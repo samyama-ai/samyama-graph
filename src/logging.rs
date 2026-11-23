@@ -89,12 +89,51 @@ where
 /// it line by line would fail on the first banner line. stderr carries the
 /// log events and nothing else. Both go through `SubscriberInitExt::init`,
 /// which also forwards `log`-crate records.
+///
+/// With OpenTelemetry export asked for (#2077, see `crate::otel`), the same
+/// log output is kept, filtered at `info` as the plain subscriber is, and the
+/// export layer is added beside it; without it the subscriber is exactly the
+/// one above.
 pub fn init(format: LogFormat) {
     use tracing_subscriber::util::SubscriberInitExt;
+    #[cfg(feature = "otel")]
+    let export = crate::otel::from_env();
+    #[cfg(feature = "otel")]
+    if let crate::otel::Startup::On { provider, endpoint } = &export {
+        use tracing_subscriber::filter::LevelFilter;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::Layer;
+        let logs = match format {
+            LogFormat::Text => tracing_subscriber::fmt::layer().boxed(),
+            LogFormat::Json => tracing_subscriber::fmt::layer()
+                .json()
+                .with_current_span(true)
+                .with_span_list(true)
+                .with_writer(std::io::stderr)
+                .boxed(),
+        };
+        tracing_subscriber::registry()
+            .with(logs.with_filter(LevelFilter::INFO))
+            .with(crate::otel::layer(provider))
+            .init();
+        // Through the subscriber, so it is JSON under `--log-format json`.
+        tracing::info!(endpoint = %endpoint, "OpenTelemetry traces export started");
+        return;
+    }
     match format {
         LogFormat::Text => tracing_subscriber::fmt::init(),
         LogFormat::Json => json_subscriber(std::io::stderr).init(),
     }
+    #[cfg(feature = "otel")]
+    if let crate::otel::Startup::Failed { endpoint, error } = &export {
+        tracing::warn!(endpoint = %endpoint, error = %error, "OpenTelemetry export not started");
+    }
+}
+
+/// Flush what is still waiting to be exported. Call on the way out.
+pub fn shutdown() {
+    #[cfg(feature = "otel")]
+    crate::otel::shutdown();
 }
 
 // ── Request correlation (#2076) ────────────────────────────────────────────

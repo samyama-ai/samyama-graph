@@ -1,0 +1,66 @@
+# .deb and .rpm for the release binary (#2203).
+#
+#   cargo build --release --bin samyama
+#   VERSION=1.16.0 ARCH=amd64 nfpm package -f ops/nfpm.yaml -p deb -t dist/
+#
+# ARCH is Debian's name (amd64, arm64); nfpm writes x86_64 / aarch64 into the
+# .rpm itself. tag-release.yml builds both formats for both architectures from
+# the binary it has just smoke-tested, and attaches them to the release.
+name: samyama
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+release: 1
+section: database
+priority: optional
+maintainer: Samyama Graph Database Team <enquiry@samyama.ai>
+vendor: Samyama.ai
+homepage: https://github.com/samyama-ai/samyama-graph
+license: Apache-2.0
+description: |
+  Samyama graph database server.
+  OpenCypher, vector search, graph algorithms and natural-language query in
+  one binary, speaking RESP on 6379 and HTTP on 8080. Installs a hardened
+  systemd unit; start it with `systemctl enable --now samyama`.
+
+contents:
+  # nfpm expands variables in fields, not in file paths.
+  - src: target/release/samyama
+    dst: /usr/bin/samyama
+    file_info:
+      mode: 0755
+  - src: ops/systemd/samyama.service
+    dst: /usr/lib/systemd/system/samyama.service
+    file_info:
+      mode: 0644
+  # An upgrade keeps an edited copy; a fresh one is written beside it.
+  - src: ops/systemd/samyama.env
+    dst: /etc/samyama/samyama.env
+    type: config|noreplace
+    file_info:
+      mode: 0644
+  - src: LICENSE
+    dst: /usr/share/doc/samyama/LICENSE
+    file_info:
+      mode: 0644
+
+# The binary is built against glibc 2.34 (ops/packaging/build-portable.sh,
+# which fails past it), so a system with an older one refuses the package
+# rather than installing a service that cannot start.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.34)
+      - libgcc-s1
+      - libstdc++6
+  rpm:
+    depends:
+      - glibc >= 2.34
+      - libgcc
+      - libstdc++
+
+scripts:
+  preinstall: ops/packaging/preinstall.sh
+  postinstall: ops/packaging/postinstall.sh
+  preremove: ops/packaging/preremove.sh
+  postremove: ops/packaging/postremove.sh

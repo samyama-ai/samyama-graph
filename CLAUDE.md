@@ -27,6 +27,9 @@ cargo bench --bench full_benchmark             # Full suite (ingestion, vector, 
 cargo bench --bench vector_benchmark           # HNSW vector search
 cargo bench --bench ann_benchmark -- --synthetic 100000x128  # recall@k vs QPS sweep over ef
 cargo bench --bench ann_benchmark -- --dataset data/ann/sift-128-euclidean  # after scripts/download_ann_datasets.py
+cargo bench --bench vector_cost_profile -- --synthetic 1000000x768 --dollars-per-hour 0.252  # bytes/vector, build/restart, $ per 1M queries per quantization
+cargo bench --bench graph_vector_hybrid_benchmark  # GraphRAG-shaped vector + traversal queries vs a brute-force reference (--export DIR for the Neo4j/Qdrant script)
+cargo bench --bench vector_churn_benchmark -- --synthetic 100000x128 --cycles 20  # recall under insert/delete/update (--mode drift, --runbook)
 cargo bench --bench graphalytics_benchmark     # LDBC Graphalytics algorithms
 cargo bench --bench mvcc_benchmark             # MVCC & arena allocation
 cargo bench --bench late_materialization_bench  # Late materialization traversal
@@ -158,7 +161,7 @@ samyama-gpu, samyama-sdk, samyama-convert, samyama-cli), `sdk/` (Python, TypeScr
 
 ## Cypher Support
 
-**Supported clauses:** MATCH, OPTIONAL MATCH, CREATE, DELETE, SET, REMOVE, MERGE, WITH, UNWIND, UNION, RETURN DISTINCT, ORDER BY, SKIP, LIMIT, EXPLAIN, EXISTS subqueries.
+**Supported clauses:** MATCH, OPTIONAL MATCH, CREATE, DELETE, SET, REMOVE, MERGE, WITH, UNWIND, UNION, RETURN DISTINCT, ORDER BY, SKIP, LIMIT, EXPLAIN, EXISTS subqueries, `USING INDEX` / `USING SCAN` / `USING JOIN` planner hints (mandatory, as in Neo4j), `ANALYZE [:Label]`.
 
 **Supported functions (30+):** toUpper, toLower, trim, replace, substring, left, right, reverse, toString, toInteger, toFloat, abs, ceil, floor, round, sqrt, sign, count, sum, avg, min, max, collect, size, length, head, last, tail, keys, id, labels, type, exists, coalesce.
 
@@ -234,7 +237,7 @@ Benchmarks are the opposite — always `--release`, on a quiet host, with the
 calibration line compared before the timings (#529).
 
 - **Unit and integration tests** across the workspace; `scripts/coverage.sh` measures coverage for the current checkout.
-- **33 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
+- **35 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
 - **Integration tests**: Rust suites in `tests/` and Python scripts in `tests/integration/`
 - **20 demos on built-in data** in `examples/`
 - **17 dataset loaders and post-processing passes** in `examples/`

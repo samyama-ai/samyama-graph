@@ -145,6 +145,9 @@ pub struct Query {
     pub show_indexes: bool,
     /// ANALYZE flag -- recompute the planner's statistics (LANG-13).
     pub analyze: bool,
+    /// `ANALYZE :Label` -- the label whose statistics the row reports. The
+    /// recomputation is the same either way: the store caches one set.
+    pub analyze_label: Option<Label>,
     /// Planner hints from every MATCH in the query (#1675). Keyed by variable,
     /// which names one node across the whole query.
     pub hints: Vec<PlanHint>,
@@ -310,6 +313,9 @@ pub struct CreateVectorIndexClause {
     /// `m`, `ef_construction` and the default `ef` (#1971). The defaults
     /// unless the DDL gave them.
     pub params: crate::vector::HnswParams,
+    /// HNSW unless the DDL said `kind: 'ivf'`, with its IVF parameters
+    /// (#1975).
+    pub kind: crate::vector::IndexKind,
 }
 
 /// CREATE INDEX clause
@@ -426,6 +432,21 @@ pub enum PlanHint {
     /// `USING JOIN ON n` -- accepted; this planner joins comma-separated
     /// patterns on their shared variables already, so it is checked and kept.
     Join { variables: Vec<String> },
+}
+
+impl std::fmt::Display for PlanHint {
+    /// The hint as it is written in the query, so EXPLAIN can name it.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlanHint::Index { variable, label, properties } => {
+                write!(f, "USING INDEX {variable}:{}({})", label.as_str(), properties.join(", "))
+            }
+            PlanHint::Scan { variable, label } => {
+                write!(f, "USING SCAN {variable}:{}", label.as_str())
+            }
+            PlanHint::Join { variables } => write!(f, "USING JOIN ON {}", variables.join(", ")),
+        }
+    }
 }
 
 /// Options written as `CYPHER key=value …` before a query (LANG-06, #1616):
@@ -668,18 +689,21 @@ impl PathSelector {
     /// Whether this selector makes an otherwise unbounded search finite (#1648).
     ///
     /// ISO/IEC 39075 Sec. 5 lets a selector stand in for a restrictor in bounding an
-    /// unbounded quantifier. It does so here only for the selectors that want **one
-    /// path per endpoint pair**: a first-reach breadth-first traversal produces
-    /// exactly that and terminates through its visited set, with no bound on length.
+    /// unbounded quantifier. It does so here for the selectors that want **one path
+    /// per endpoint pair**. Those are answered by a shortest-first search over the
+    /// states `(node, min(depth, min_hops))`: each state is visited once, so the
+    /// search ends after at most `|N| * (min_hops + 1)` states whatever the length
+    /// bound, and the first walk to reach a node at depth `>= min_hops` is a shortest
+    /// one, which is a conforming answer to both `ANY` and `ANY SHORTEST`.
     ///
-    /// The answer it gives is admissible under every restrictor, which is the part
-    /// that makes this sound rather than merely convenient: a first-reach path never
-    /// revisits a node, so it is simple, and a simple path satisfies WALK, TRAIL,
-    /// ACYCLIC and SIMPLE alike. Being shortest, it also satisfies ANY SHORTEST.
+    /// Keyed on the pair rather than on the node because the node alone is what
+    /// broke the first attempt: a first-reach traversal marks its source visited at
+    /// depth zero and can never reach it again, so the `(v, v)` pair a cycle
+    /// produces was lost. `(source, 0)` and `(source, min_hops)` are different states.
     ///
-    /// `ALL SHORTEST` is excluded. It wants *every* minimum-length path and
-    /// first-reach keeps one, so answering from first-reach would be a wrong answer
-    /// rather than a different legal choice.
+    /// `ALL SHORTEST` is excluded. It wants *every* minimum-length walk and this
+    /// search keeps one, so answering from it would be a wrong answer rather than a
+    /// different legal choice.
     pub fn bounds_an_unbounded_search(self) -> bool {
         self.is_single()
     }
@@ -1494,6 +1518,20 @@ impl Query {
             Clause::Call(call) => AlgorithmOperator::call_writes(&call.procedure_name, &call.arguments),
             _ => false,
         }) || self.calls_a_writing_vector_procedure()
+            || self.calls_a_writing_feature_procedure()
+    }
+
+    /// `feature.define` / `feature.materialize` / `feature.drop` (ML-07),
+    /// which change the store's feature registry.
+    fn calls_a_writing_feature_procedure(&self) -> bool {
+        use crate::query::executor::feature_ops::call_writes;
+        self.call_clause
+            .as_ref()
+            .is_some_and(|c| call_writes(&c.procedure_name))
+            || self.clauses.iter().any(|c| match c {
+                Clause::Call(call) => call_writes(&call.procedure_name),
+                _ => false,
+            })
     }
 
     /// `vector.knnGraph` / `vector.similarityJoin` with `write: true` (#1979),
@@ -1547,6 +1585,7 @@ impl Query {
             graph_projection_ddl: None,
             show_indexes: false,
             analyze: false,
+            analyze_label: None,
             hints: Vec::new(),
             plan_options: PlanOptions::default(),
             show_constraints: false,

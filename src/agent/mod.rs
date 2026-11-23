@@ -2,15 +2,19 @@
 //!
 //! Implements agents that can use tools to enrich the graph.
 
-pub mod executor;
-pub mod planner;
-pub mod tools;
 pub mod enrich;
+pub mod executor;
+pub mod memory;
+pub mod planner;
+pub mod signature;
+pub mod tools;
 
 use crate::graph::GraphStore;
 use crate::nlq::client::NLQClient;
 use crate::persistence::tenant::{AgentConfig, NLQConfig};
+use crate::persistence::PersistedWriter;
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,6 +38,18 @@ pub enum AgentError {
 
 pub type AgentResult<T> = Result<T, AgentError>;
 
+#[derive(Deserialize)]
+struct StructuredToolPlan {
+    calls: Vec<StructuredToolCall>,
+}
+
+#[derive(Deserialize)]
+struct StructuredToolCall {
+    tool: String,
+    args_json: String,
+    parallel_with_prev: bool,
+}
+
 /// Trait for agent tools
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -47,10 +63,11 @@ pub trait Tool: Send + Sync {
 pub struct AgentRuntime {
     config: AgentConfig,
     tools: HashMap<String, Arc<dyn Tool>>,
-    /// Optional graph store for telemetry writes from plan execution.
-    /// When set, `execute_plan` / `plan_and_execute` record each tool
-    /// call as a `(:Question)-[:USED_TOOL]->(:Tool)` edge.
-    store: Option<Arc<RwLock<GraphStore>>>,
+    /// Optional writer for telemetry from plan execution, and the tenant
+    /// the telemetry belongs to. When set, `execute_plan` /
+    /// `plan_and_execute` record each tool call as a
+    /// `(:Question)-[:USED_TOOL]->(:Tool)` edge.
+    telemetry: Option<(PersistedWriter, String)>,
 }
 
 impl AgentRuntime {
@@ -58,13 +75,21 @@ impl AgentRuntime {
         Self {
             config,
             tools: HashMap::new(),
-            store: None,
+            telemetry: None,
         }
     }
 
-    /// Attach a graph store handle so plan execution emits telemetry edges.
-    pub fn with_store(mut self, store: Arc<RwLock<GraphStore>>) -> Self {
-        self.store = Some(store);
+    /// Attach a graph store handle so plan execution emits telemetry edges,
+    /// in memory only and under the `default` tenant. A server with
+    /// persistence uses [`Self::with_writer`], or the telemetry does not
+    /// survive a restart.
+    pub fn with_store(self, store: Arc<RwLock<GraphStore>>) -> Self {
+        self.with_writer(PersistedWriter::in_memory(store), "default")
+    }
+
+    /// Record telemetry through `writer`, persisted under `tenant` (#2241).
+    pub fn with_writer(mut self, writer: PersistedWriter, tenant: impl Into<String>) -> Self {
+        self.telemetry = Some((writer, tenant.into()));
         self
     }
 
@@ -98,17 +123,14 @@ impl AgentRuntime {
 
     /// Execute a pre-built plan against the registered tools, writing
     /// telemetry edges to the attached store.
-    pub async fn execute_plan(
-        &self,
-        prompt: &str,
-        plan: &ToolPlan,
-    ) -> AgentResult<PlanRunResult> {
-        let store = self.store.as_ref().ok_or_else(|| {
+    pub async fn execute_plan(&self, prompt: &str, plan: &ToolPlan) -> AgentResult<PlanRunResult> {
+        let (writer, tenant) = self.telemetry.as_ref().ok_or_else(|| {
             AgentError::ConfigError(
-                "AgentRuntime has no store; call with_store() before execute_plan".into(),
+                "AgentRuntime has no store; call with_store() or with_writer() before execute_plan"
+                    .into(),
             )
         })?;
-        let exec = PlanExecutor::new(self.tools.clone(), store.clone());
+        let exec = PlanExecutor::new(self.tools.clone(), writer.clone(), tenant.clone());
         exec.execute(prompt, plan).await
     }
 
@@ -134,21 +156,65 @@ impl AgentRuntime {
                 })
             })
             .collect();
-        let planner_prompt = format!(
-            "You are a tool-call planner. Given the user prompt and a catalogue of tools, \
-output ONLY a JSON plan matching `{{\"calls\": [{{\"tool\": string, \"args\": object, \"parallel_with_prev\": bool}}]}}`. \
-Do not repeat a tool in a plan. Choose parallel_with_prev=true only when the call does not depend on the previous one.\n\n\
-Tools: {}\n\nContext: {}\n\nPrompt: {}",
-            serde_json::to_string(&tool_catalog).unwrap_or_default(),
-            context,
-            prompt,
-        );
-
-        let raw = client
-            .generate_cypher(&planner_prompt)
-            .await
-            .map_err(|e| AgentError::LLMError(e.to_string()))?;
-        let plan = ToolPlan::from_llm_json(&raw)?;
+        let allowed_tools = tool_catalog
+            .iter()
+            .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(str::to_owned))
+            .collect();
+        let signature = signature::SignatureSpec {
+            id: "smriti.tool_planner.v1",
+            instruction: "Choose registered tools for the user request. Return each call's arguments as a JSON object encoded in args_json. Use parallel_with_prev only when independent of the previous call. Do not repeat a tool.".into(),
+            input_schema: serde_json::json!({"type":"object"}),
+            output_schema: serde_json::json!({
+                "type":"object",
+                "properties":{"calls":{"type":"array","items":{"type":"object","properties":{
+                    "tool":{"type":"string"},
+                    "args_json":{"type":"string"},
+                    "parallel_with_prev":{"type":"boolean"}
+                },"required":["tool","args_json","parallel_with_prev"]}}},
+                "required":["calls"]
+            }),
+            demos: vec![],
+            invariants: vec![
+                signature::OutputInvariant::RegisteredToolNamesOnly {
+                    field: "calls".into(),
+                    allowed: allowed_tools,
+                },
+                signature::OutputInvariant::ValidJsonObjectsInArray {
+                    field: "calls".into(),
+                    string_field: "args_json".into(),
+                },
+            ],
+        };
+        let runner = signature::SignatureRunner::default();
+        let structured = runner
+            .invoke_without_store::<_, StructuredToolPlan>(
+                &client,
+                &signature,
+                &serde_json::json!({
+                    "tools": tool_catalog,
+                    "context": context,
+                    "prompt": prompt,
+                }),
+            )
+            .await?;
+        let calls = structured
+            .output
+            .calls
+            .into_iter()
+            .map(|call| {
+                let args = serde_json::from_str(&call.args_json).map_err(|error| {
+                    AgentError::ExecutionError(format!(
+                        "validated tool arguments could not be decoded: {error}"
+                    ))
+                })?;
+                Ok(ToolCall {
+                    tool: call.tool,
+                    args,
+                    parallel_with_prev: call.parallel_with_prev,
+                })
+            })
+            .collect::<AgentResult<Vec<_>>>()?;
+        let plan = ToolPlan { calls };
         self.execute_plan(prompt, &plan).await
     }
 }
@@ -226,14 +292,23 @@ mod tests {
     async fn process_trigger_maps_llm_failures_to_llm_error() {
         let runtime = AgentRuntime::new(ollama_config(&dead_base_url()));
         let err = runtime.process_trigger("p", "c").await.unwrap_err();
-        assert!(matches!(err, AgentError::LLMError(ref m) if m.contains("Network error")), "{err:?}");
+        assert!(
+            matches!(err, AgentError::LLMError(ref m) if m.contains("Network error")),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
     async fn execute_plan_without_store_is_a_config_error() {
         let runtime = AgentRuntime::new(mock_agent_config());
-        let err = runtime.execute_plan("p", &ToolPlan::default()).await.unwrap_err();
-        assert!(matches!(err, AgentError::ConfigError(ref m) if m.contains("with_store")), "{err:?}");
+        let err = runtime
+            .execute_plan("p", &ToolPlan::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, AgentError::ConfigError(ref m) if m.contains("with_store")),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]
@@ -257,34 +332,44 @@ mod tests {
 
     #[tokio::test]
     async fn plan_and_execute_sends_tool_catalogue_and_runs_the_returned_plan() {
-        let plan = r#"```json
-{"calls": [{"tool": "web_search", "args": {"query": "samyama"}}]}
-```"#;
+        let plan = r#"{"calls":[{"tool":"web_search","args_json":"{\"query\":\"samyama\"}","parallel_with_prev":false}]}"#;
         let srv = MockHttp::serve(vec![ollama_says(plan)]);
         let store = Arc::new(RwLock::new(GraphStore::new()));
         let mut runtime = AgentRuntime::new(ollama_config(&srv.base_url)).with_store(store.clone());
         runtime.register_tool(Arc::new(tools::WebSearchTool::new("k".into())));
 
-        let run = runtime.plan_and_execute("tell me about samyama", "ctx-123").await.unwrap();
+        let run = runtime
+            .plan_and_execute("tell me about samyama", "ctx-123")
+            .await
+            .unwrap();
         assert_eq!(run.records.len(), 1);
         assert_eq!(run.records[0].tool, "web_search");
         assert_eq!(run.records[0].args, serde_json::json!({"query": "samyama"}));
 
         let sent = srv.requests()[0].json();
         let prompt = sent["prompt"].as_str().unwrap();
-        assert!(prompt.contains("\"name\":\"web_search\""), "tool catalogue missing: {prompt}");
-        assert!(prompt.contains("Context: ctx-123"));
-        assert!(prompt.contains("Prompt: tell me about samyama"));
+        assert!(
+            prompt.contains("\"name\":\"web_search\""),
+            "tool catalogue missing: {prompt}"
+        );
+        assert!(prompt.contains("\"context\":\"ctx-123\""));
+        assert!(prompt.contains("\"prompt\":\"tell me about samyama\""));
+        assert!(
+            sent["format"]["properties"]["calls"]["items"]["properties"]["args_json"].is_object()
+        );
     }
 
     #[tokio::test]
     async fn plan_and_execute_rejects_an_unparseable_plan() {
-        let srv = MockHttp::serve(vec![ollama_says("I cannot help with that.")]);
+        let srv = MockHttp::serve(vec![ollama_says("I cannot help with that."); 3]);
         let runtime = AgentRuntime::new(ollama_config(&srv.base_url))
             .with_store(Arc::new(RwLock::new(GraphStore::new())));
         let err = runtime.plan_and_execute("p", "c").await.unwrap_err();
-        assert!(matches!(err, AgentError::ExecutionError(ref m) if m.contains("could not parse plan")), "{err:?}");
-        assert_eq!(srv.requests().len(), 1);
+        assert!(
+            matches!(err, AgentError::ExecutionError(ref m) if m.contains("failed after 3 attempt(s)")),
+            "{err:?}"
+        );
+        assert_eq!(srv.requests().len(), 3);
     }
 
     #[tokio::test]
@@ -294,11 +379,54 @@ mod tests {
         assert!(matches!(err, AgentError::LLMError(_)), "{err:?}");
     }
 
+    /// #2241: the plan executor took the store's write lock itself and wrote
+    /// telemetry that no persist step followed. `PersistedWriter` is the one
+    /// place an agent writer gets the lock; this keeps it that way. Functions
+    /// that take `&mut GraphStore` (`enrich::quarantine`, `verify`, `retract`)
+    /// are bodies: whoever calls them already holds a persisted write path
+    /// (`AppState::mutate` on HTTP).
+    #[test]
+    fn no_agent_writer_takes_the_write_lock_outside_the_persisted_writer() {
+        let sources = [
+            ("enrich.rs", include_str!("enrich.rs")),
+            ("executor.rs", include_str!("executor.rs")),
+            ("memory.rs", include_str!("memory.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("planner.rs", include_str!("planner.rs")),
+            ("signature.rs", include_str!("signature.rs")),
+            ("tools.rs", include_str!("tools.rs")),
+        ];
+        let lock_calls = [".write()", "write_owned(", "blocking_write(", "try_write("];
+        let mut offenders = Vec::new();
+        for (file, source) in sources {
+            let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+            for (i, line) in production.lines().enumerate() {
+                if lock_calls.iter().any(|call| line.contains(call)) {
+                    offenders.push(format!("{file}:{}: {}", i + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "these take a write lock directly, so what they write is not journalled \
+             and does not survive a restart; write through `PersistedWriter`: {offenders:?}"
+        );
+    }
+
     #[test]
     fn agent_error_messages_name_their_kind() {
-        assert_eq!(AgentError::ConfigError("a".into()).to_string(), "Configuration error: a");
-        assert_eq!(AgentError::ToolError("b".into()).to_string(), "Tool error: b");
+        assert_eq!(
+            AgentError::ConfigError("a".into()).to_string(),
+            "Configuration error: a"
+        );
+        assert_eq!(
+            AgentError::ToolError("b".into()).to_string(),
+            "Tool error: b"
+        );
         assert_eq!(AgentError::LLMError("c".into()).to_string(), "LLM error: c");
-        assert_eq!(AgentError::ExecutionError("d".into()).to_string(), "Execution error: d");
+        assert_eq!(
+            AgentError::ExecutionError("d".into()).to_string(),
+            "Execution error: d"
+        );
     }
 }

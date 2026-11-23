@@ -75,6 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
+use samyama_optimization::constraints::{Constrained, ConstraintHandling};
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, CMAESSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
 
@@ -529,6 +530,54 @@ pub(crate) mod statement_clock {
     impl Drop for Guard {
         fn drop(&mut self) {
             NOW.with(|c| c.set(None));
+        }
+    }
+}
+
+/// The random source `rand()` and `randomUUID()` draw from (ML-08, #1747).
+///
+/// Unseeded, each call draws from the thread's generator, as before. Seeded --
+/// `POST /api/query/export` with `seed` -- the statement draws from one
+/// generator built from that seed, so the same query over the same graph with
+/// the same seed returns the same rows, byte for byte. Without that, a dataset
+/// sampled with `WHERE rand() < 0.1` could never be rebuilt.
+///
+/// Thread-local, like `statement_clock`: a statement runs on one thread, and a
+/// filter that calls `rand()` is never split across threads (see
+/// `FilterOperator::predicate_is_parallel`), so the draws come in row order.
+/// The generator is `StdRng` from `rand` 0.8, whose stream is fixed for that
+/// version; the export manifest records the engine version for that reason.
+pub mod statement_rng {
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+    use std::cell::RefCell;
+
+    thread_local! {
+        static RNG: RefCell<Option<StdRng>> = const { RefCell::new(None) };
+    }
+
+    /// Seed this thread's statement generator. The guard unseeds it on drop.
+    pub fn seed(seed: u64) -> Guard {
+        RNG.with(|r| *r.borrow_mut() = Some(StdRng::seed_from_u64(seed)));
+        Guard
+    }
+
+    /// The next `rand()` value in `[0, 1)`.
+    pub fn next_f64() -> f64 {
+        RNG.with(|r| match r.borrow_mut().as_mut() {
+            Some(g) => g.gen::<f64>(),
+            None => rand::thread_rng().gen::<f64>(),
+        })
+    }
+
+    /// 128 random bits from the seeded generator, or `None` when unseeded.
+    pub fn seeded_u128() -> Option<u128> {
+        RNG.with(|r| r.borrow_mut().as_mut().map(|g| g.gen::<u128>()))
+    }
+
+    pub struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            RNG.with(|r| *r.borrow_mut() = None);
         }
     }
 }
@@ -3090,8 +3139,9 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint",
     "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
     "tostringornull", "toupper", "touppercase", "trim", "type", "valuetype",
-    "vector.distance", "vector.similarity.cosine", "vector.similarity.euclidean",
-    "vector.similarity.maxsim", "vector.similarity.sparsedot", "vector_distance",
+    "vector.distance", "vector.muvera.encode", "vector.similarity.cosine",
+    "vector.similarity.euclidean", "vector.similarity.maxsim", "vector.similarity.sparsedot",
+    "vector_distance",
 ];
 
 /// Is `name` a function this engine implements?
@@ -3285,6 +3335,7 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("vector.similarity.euclidean", 2),
     ("vector.similarity.maxsim", 2),
     ("vector.similarity.sparsedot", 2),
+    ("vector.muvera.encode", 2),
     ("vector.distance", 3),
     ("vector_distance", 3),
 ];
@@ -3753,11 +3804,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 _ => Err(ExecutionError::TypeError("exp() requires numeric".to_string())),
             }
         }
-        "rand" => {
-            use rand::Rng;
-            let val = rand::thread_rng().gen::<f64>();
-            Ok(Value::Property(PropertyValue::Float(val)))
-        }
+        "rand" => Ok(Value::Property(PropertyValue::Float(statement_rng::next_f64()))),
         "timestamp" => {
             let ts = statement_clock::now().timestamp_millis();
             Ok(Value::Property(PropertyValue::Integer(ts)))
@@ -4884,6 +4931,69 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let (a, b) = (sparse_vector_arg(&args[0], who)?, sparse_vector_arg(&args[1], who)?);
             Ok(Value::Property(PropertyValue::Float(sparse_dot(&a, &b))))
         }
+        // A MUVERA fixed-dimensional encoding of a multi-vector (#1978): one
+        // vector whose inner product with another side's encoding estimates
+        // MaxSim, so a multi-vector can go in an ordinary vector index for
+        // candidate generation. Rerank with `vector.similarity.maxSim`.
+        "vector.muvera.encode" => {
+            let who = "vector.muvera.encode";
+            let tokens = multi_vector_arg(&args[0], who)?;
+            use crate::vector::muvera::{encode, Params, Role};
+            let role = match &args[1] {
+                Value::Property(PropertyValue::String(r)) => match r.to_ascii_uppercase().as_str() {
+                    "QUERY" => Role::Query,
+                    "DOCUMENT" => Role::Document,
+                    other => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "`{who}()`: unknown role '{other}'; expected QUERY or DOCUMENT"
+                        )))
+                    }
+                },
+                _ => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{who}()` takes the role as a string, QUERY or DOCUMENT"
+                    )))
+                }
+            };
+            let mut params = Params::default();
+            match args.get(2) {
+                None => {}
+                Some(Value::Property(PropertyValue::Map(options))) => {
+                    for (key, value) in options {
+                        let n = match value {
+                            PropertyValue::Integer(i) if *i >= 0 => *i as u64,
+                            _ => {
+                                return Err(ExecutionError::bad_argument(format!(
+                                    "`{who}()`: option `{key}` must be a non-negative integer"
+                                )))
+                            }
+                        };
+                        let small = || usize::try_from(n).unwrap_or(usize::MAX);
+                        match key.as_str() {
+                            "bits" => params.bits = small(),
+                            "projection" => params.projection = small(),
+                            "repetitions" => params.repetitions = small(),
+                            "seed" => params.seed = n,
+                            other => {
+                                return Err(ExecutionError::bad_argument(format!(
+                                    "`{who}()`: unknown option `{other}`; expected bits, \
+                                     projection, repetitions or seed"
+                                )))
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{who}()` takes its options as a map, such as \
+                         {{bits: 4, projection: 8, repetitions: 8, seed: 0}}"
+                    )))
+                }
+            }
+            let encoded = encode(&tokens, role, &params)
+                .map_err(|e| ExecutionError::bad_argument(format!("`{who}()`: {e}")))?;
+            Ok(Value::Property(PropertyValue::Vector(encoded)))
+        }
         // A distance, lower is better, by the metric named in the third
         // argument -- Neo4j's `vector_distance`, under both spellings.
         "vector.distance" | "vector_distance" => {
@@ -4942,7 +5052,9 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "randomuuid" => {
             use std::time::{SystemTime, UNIX_EPOCH};
             let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-            let seed = t.as_nanos();
+            // A seeded statement draws the bits from its seed, so an export
+            // that mints ids rebuilds with the same ones (ML-08, #1747).
+            let seed = statement_rng::seeded_u128().unwrap_or(t.as_nanos());
             // Simple v4-like UUID (not cryptographically secure, but unique enough)
             let uuid = format!("{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
                 (seed & 0xFFFFFFFF) as u32,
@@ -6401,6 +6513,105 @@ impl Problem for GraphOptimizationProblem {
 
         penalty
     }
+
+    fn can_repair(&self) -> bool {
+        true
+    }
+
+    fn repair(&self, variables: &Array1<f64>) -> Option<Array1<f64>> {
+        Some(self.repair_point(variables))
+    }
+}
+
+impl GraphOptimizationProblem {
+    /// The repair behind `constraintHandling: 'repair'` (OPT-10, #2266).
+    ///
+    /// Greedy, deterministic, and a no-op on a feasible point:
+    ///
+    /// 1. clamp each variable to `[lower, upper]` (a NaN goes to `lower`);
+    /// 2. short of `minTotal`: raise the cheapest variables first, to `upper`;
+    /// 3. over `budget`: lower the most expensive first, but only by the
+    ///    surplus above `minTotal`;
+    /// 4. still over: move quantity from the most expensive variable to the
+    ///    cheapest one with room, which keeps the total and lowers the cost.
+    ///
+    /// Each limit is aimed at from a hair inside (1e-9 relative): feasibility
+    /// is checked strictly, and a point repaired exactly onto the boundary can
+    /// land 1e-15 outside it by rounding. When the constraints cannot all be
+    /// met within the bounds the result is as close as these steps get, and it
+    /// is reported infeasible like any other.
+    fn repair_point(&self, x: &Array1<f64>) -> Array1<f64> {
+        let (lo, hi) = (self.lower, self.upper);
+        let mut y = x.mapv(|v| if v.is_nan() { lo } else { v.clamp(lo, hi) });
+        let n = self.dim.min(y.len());
+        let costs: Vec<f64> = (0..n).map(|i| self.costs.get(i).copied().unwrap_or(1.0)).collect();
+        let inside = |limit: f64| 1e-9 * limit.abs().max(1.0);
+        let cost_of = |y: &Array1<f64>| (0..n).map(|i| y[i] * costs[i]).sum::<f64>();
+        let by_cost = |descending: bool| {
+            let mut order: Vec<usize> = (0..n).collect();
+            order.sort_by(|&a, &b| {
+                let o = costs[a].total_cmp(&costs[b]).then(a.cmp(&b));
+                if descending { o.reverse() } else { o }
+            });
+            order
+        };
+
+        if let Some(min_total) = self.min_total {
+            let mut short = min_total + inside(min_total) - y.sum();
+            for i in by_cost(false) {
+                if short <= 0.0 {
+                    break;
+                }
+                let d = (hi - y[i]).min(short).max(0.0);
+                y[i] += d;
+                short -= d;
+            }
+        }
+
+        if let Some(budget) = self.budget {
+            let target = budget - inside(budget);
+            let mut over = cost_of(&y) - target;
+            if over > 0.0 {
+                let mut surplus = self
+                    .min_total
+                    .map_or(f64::INFINITY, |m| (y.sum() - m - inside(m)).max(0.0));
+                for i in by_cost(true) {
+                    if over <= 0.0 || surplus <= 0.0 {
+                        break;
+                    }
+                    if costs[i] <= 0.0 {
+                        continue;
+                    }
+                    let d = (y[i] - lo).min(surplus).min(over / costs[i]).max(0.0);
+                    y[i] -= d;
+                    surplus -= d;
+                    over -= d * costs[i];
+                }
+                // Each step saturates a variable or closes the gap, so 2n
+                // steps are enough; the cap is a guard against rounding.
+                for _ in 0..(2 * n + 2) {
+                    if over <= 0.0 {
+                        break;
+                    }
+                    let from = by_cost(true).into_iter().find(|&i| y[i] > lo);
+                    let to = by_cost(false).into_iter().find(|&j| y[j] < hi);
+                    let (Some(i), Some(j)) = (from, to) else { break };
+                    let saving = costs[i] - costs[j];
+                    if saving <= 0.0 {
+                        break;
+                    }
+                    let d = (y[i] - lo).min(hi - y[j]).min(over / saving).max(0.0);
+                    if d <= 0.0 {
+                        break;
+                    }
+                    y[i] -= d;
+                    y[j] += d;
+                    over -= d * saving;
+                }
+            }
+        }
+        y
+    }
 }
 
 impl MultiObjectiveProblem for GraphOptimizationProblem {
@@ -6420,12 +6631,27 @@ impl MultiObjectiveProblem for GraphOptimizationProblem {
         results
     }
 
+    /// The budget and minimum-total violation, as one constraint (OPT-10).
+    /// Without it the multi-objective solvers ran with no constraint at all:
+    /// a budget was only checked after the run, to report `feasible`.
+    fn penalties(&self, variables: &Array1<f64>) -> Vec<f64> {
+        vec![Problem::penalty(self, variables)]
+    }
+
     fn dim(&self) -> usize { self.dim }
     fn bounds(&self) -> (Array1<f64>, Array1<f64>) {
         (
             Array1::from_elem(self.dim, self.lower),
             Array1::from_elem(self.dim, self.upper)
         )
+    }
+
+    fn can_repair(&self) -> bool {
+        true
+    }
+
+    fn repair(&self, variables: &Array1<f64>) -> Option<Array1<f64>> {
+        Some(self.repair_point(variables))
     }
 }
 
@@ -6557,6 +6783,14 @@ pub trait PhysicalOperator: Send {
 
     /// Reset the operator to start from the beginning
     fn reset(&mut self);
+
+    /// Work this operator did that its time and row counts do not show, as
+    /// `(counter, value)` pairs, for PROFILE (#1970). Empty for an operator
+    /// with nothing to add. Read when the operator first produces and when it
+    /// finishes, like [`memory_bytes`](Self::memory_bytes).
+    fn work(&self) -> Vec<(&'static str, u64)> {
+        Vec::new()
+    }
 
     /// Bytes this operator holds in rows it has buffered, or `None` for one
     /// that streams a row at a time (#2078).
@@ -7951,6 +8185,13 @@ impl FilterOperator {
     /// Unset in normal use. `0` forces parallel, a large value forces
     /// sequential.
     pub fn predicate_is_parallel(predicate: &Expression) -> bool {
+        // A predicate that draws random numbers stays on one thread: split
+        // across threads, the rows would take the draws in a different order
+        // each run, and a seeded statement would stop being reproducible
+        // (ML-08, #1747). `WHERE rand() < 0.1` is how datasets are sampled.
+        if super::planner::is_volatile(predicate) {
+            return false;
+        }
         let threshold = std::env::var("SAMYAMA_FILTER_PARALLEL_COST")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -10560,6 +10801,7 @@ impl VarLengthExpandOperator {
         // rather than failing (#671).
         if matches!(source_val, Value::Null) || matches!(source_val.as_property(), Some(PropertyValue::Null)) {
             self.pending.clear();
+            self.pending_ends.clear();
             return Ok(());
         }
         let source_id = source_val.node_id().ok_or_else(|| {
@@ -10574,6 +10816,16 @@ impl VarLengthExpandOperator {
         // reach it again, so a cycle is only found by enumerating trails, which
         // repeat nodes and not relationships.
         let closes_on_source = self.bound_end == Some(source_id);
+
+        // `ANY` / `ANY SHORTEST` over an unbounded WALK (#1648). Every route below
+        // either enumerates walks, which never ends on a cycle, or reaches each node
+        // once, which loses the source as an end node. See `expand_shortest_walks`.
+        if self.restrictor == crate::query::ast::PathRestrictor::Walk
+            && self.selector.bounds_an_unbounded_search()
+            && self.max_hops == usize::MAX
+        {
+            return self.expand_shortest_walks(record, source_id, store);
+        }
 
         // Edges an earlier segment of this clause already walked. This segment
         // may not retake them (#710). Empty for the first segment of a clause
@@ -10732,6 +10984,80 @@ impl VarLengthExpandOperator {
         Ok(())
     }
 
+    /// One shortest walk per end node, for `ANY` and `ANY SHORTEST` over an
+    /// unbounded WALK (#1648).
+    ///
+    /// The standard allows the query because the answer is finite: one walk per
+    /// endpoint pair. The search has to be finite too, and neither existing route
+    /// is. Enumerating walks never ends on a graph with a cycle. The first-reach
+    /// BFS ends, but it marks the source visited at depth zero, so the `(v, v)`
+    /// pair a cycle produces is lost: on `a -> b -> c -> a`,
+    /// `ANY SHORTEST (a)-[*1..]->(y)` must answer `a` (three hops) as well as `b`
+    /// and `c`.
+    ///
+    /// So the search is breadth-first over **states** `(node, k)`, where
+    /// `k = min(depth, min_hops)` says whether the walk is long enough yet. Each
+    /// state is visited once, which is what bounds it: at most
+    /// `|N| * (min_hops + 1)` states, whatever the length bound. A walk reaches
+    /// `(n, min_hops)` exactly when it ends at `n` with at least `min_hops` edges,
+    /// and breadth-first reaches it first by the shortest such walk. That one walk
+    /// is a conforming answer to `ANY SHORTEST`, and so to `ANY`.
+    ///
+    /// The walk may repeat nodes and edges, as WALK allows: the shortest walk of
+    /// at least five edges from `a` to `c` on that triangle goes round once. Edges
+    /// an earlier segment walked are not banned, as in `expand_trails`, whose
+    /// WALK branch reuses edges too.
+    fn expand_shortest_walks(
+        &mut self,
+        record: &Record,
+        source_id: NodeId,
+        store: &GraphStore,
+    ) -> ExecutionResult<()> {
+        type State = (NodeId, usize);
+        if self.min_hops > self.max_hops {
+            return Ok(());
+        }
+        self.ensure_type_ids(store);
+        let type_ids: Option<Vec<u16>> = self.type_ids.clone();
+        let type_filter = type_ids.as_deref();
+        let min = self.min_hops;
+
+        let start: State = (source_id, 0);
+        let mut parent: std::collections::HashMap<State, (State, crate::graph::EdgeId)> =
+            std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<State> = std::collections::HashSet::new();
+        seen.insert(start);
+        // The zero-length walk. With `min_hops == 0` every state has `k == 0`, so
+        // `start` is the source's only state and it is never emitted twice.
+        if min == 0 && self.emit_ok(source_id, store) {
+            self.buffer_walk(record, source_id, vec![source_id], Vec::new(), store);
+        }
+
+        let mut frontier = vec![start];
+        let mut depth = 0usize;
+        while !frontier.is_empty() && depth < self.max_hops {
+            depth += 1;
+            let mut next: Vec<State> = Vec::new();
+            for &(cur, k) in &frontier {
+                let reached = (k + 1).min(min);
+                self.for_each_neighbor(cur, type_filter, store, |nb, eid| {
+                    if seen.insert((nb, reached)) {
+                        parent.insert((nb, reached), ((cur, k), eid));
+                        next.push((nb, reached));
+                    }
+                });
+            }
+            for &(nb, k) in &next {
+                if k == min && self.emit_ok(nb, store) {
+                    let (nodes, edges) = walk_to(&parent, start, (nb, k));
+                    self.buffer_walk(record, nb, nodes, edges, store);
+                }
+            }
+            frontier = next;
+        }
+        Ok(())
+    }
+
     /// Whether `node` qualifies as an emitted endpoint (target-label filter).
     fn emit_ok(&self, node: NodeId, store: &GraphStore) -> bool {
         // A target the row already binds: only that node ends a match (#1237).
@@ -10881,6 +11207,30 @@ impl VarLengthExpandOperator {
     }
 }
 
+/// The walk `start` → `end` recorded by `expand_shortest_walks`, as nodes and edges
+/// in the order walked. Keyed on states, so a node the walk passes twice is two
+/// different entries.
+fn walk_to(
+    parent: &std::collections::HashMap<(NodeId, usize), ((NodeId, usize), crate::graph::EdgeId)>,
+    start: (NodeId, usize),
+    end: (NodeId, usize),
+) -> (Vec<NodeId>, Vec<crate::graph::EdgeId>) {
+    let mut nodes = vec![end.0];
+    let mut edges = Vec::new();
+    let mut cur = end;
+    while cur != start {
+        let Some(&(prev, eid)) = parent.get(&cur) else {
+            break;
+        };
+        edges.push(eid);
+        nodes.push(prev.0);
+        cur = prev;
+    }
+    nodes.reverse();
+    edges.reverse();
+    (nodes, edges)
+}
+
 /// Reconstruct the BFS path source→target from a parent map.
 fn reconstruct_path(
     parent: &std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)>,
@@ -10921,6 +11271,15 @@ impl PhysicalOperator for VarLengthExpandOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         loop {
             if let Some(rec) = self.pending.pop_front() {
+                // In step with `pending`, always. `apply_selector` reads the ends of
+                // the rows the *current* input record produced as `skip(first_new)`,
+                // where `first_new` is `pending.len()`. An end left behind for a row
+                // already returned shifted that window onto the previous record's
+                // ends, so from the second input row on a selector partitioned on
+                // stale endpoints: `ANY SHORTEST (a)-[:E*1..3]->(b)` over a
+                // three-node cycle answered 6 rows where every one of the 3 sources
+                // reaches all 3 (#1648).
+                self.pending_ends.pop_front();
                 return Ok(Some(rec));
             }
             match self.input.next(store)? {
@@ -10933,6 +11292,7 @@ impl PhysicalOperator for VarLengthExpandOperator {
     fn reset(&mut self) {
         self.input.reset();
         self.pending.clear();
+        self.pending_ends.clear();
     }
 
     fn describe(&self) -> OperatorDescription {
@@ -14822,12 +15182,32 @@ pub struct VectorSearchOperator {
     /// index's default.
     ef: Option<usize>,
     plan: Option<crate::vector::strategy::FilterPlan>,
+    /// The index's kind, when the planner knew it, for EXPLAIN (#1975).
+    kind: Option<crate::vector::IndexKind>,
     /// The hierarchy subtree the search is restricted to (#445).
     scope: Option<HierarchyScope>,
     /// Search results
     results: Vec<(NodeId, f32)>,
     /// Current index in results
     current: usize,
+    /// What the search did, for PROFILE (#1970); `None` until it has run.
+    work: Option<SearchWork>,
+}
+
+/// The work one vector search did (#1970): what its strategy cost, which its
+/// time alone does not say.
+#[derive(Clone, Copy, Debug, Default)]
+struct SearchWork {
+    /// Distances computed, by the graph walk and by exact scans.
+    distances: u64,
+    /// HNSW searches the widening loop ran; 0 when the plan went straight to
+    /// an exact scan.
+    graph_searches: u64,
+    /// Times widening abandoned the graph for an exact scan.
+    exact_fallbacks: u64,
+    /// Times the WHERE pushed into the search (#1969), or the hierarchy
+    /// scope (#445), was evaluated for a candidate.
+    filter_checks: u64,
 }
 
 impl VectorSearchOperator {
@@ -14851,9 +15231,11 @@ impl VectorSearchOperator {
             filter: None,
             ef: None,
             plan: None,
+            kind: None,
             scope: None,
             results: Vec::new(),
             current: 0,
+            work: None,
         }
     }
 
@@ -14866,6 +15248,12 @@ impl VectorSearchOperator {
     /// Search with this width rather than the index's default (#1971).
     pub fn with_ef(mut self, ef: Option<usize>) -> Self {
         self.ef = ef;
+        self
+    }
+
+    /// The kind of the index searched, so EXPLAIN can name it (#1975).
+    pub fn with_kind(mut self, kind: Option<crate::vector::IndexKind>) -> Self {
+        self.kind = kind;
         self
     }
 
@@ -14890,6 +15278,23 @@ impl VectorSearchOperator {
         if !self.results.is_empty() || self.current > 0 {
             return Ok(());
         }
+        let before = crate::vector::work::Work::now();
+        let checks = std::cell::Cell::new(0u64);
+        let outcome = self.search(store, &checks);
+        let did = crate::vector::work::Work::now().since(before);
+        // Added to, not replaced: a search that found nothing runs again on
+        // the next pull, and PROFILE's time covers both runs.
+        let w = self.work.get_or_insert_with(SearchWork::default);
+        w.distances += did.distances;
+        w.graph_searches += did.graph_searches;
+        w.exact_fallbacks += did.exact_fallbacks;
+        w.filter_checks += checks.get();
+        outcome
+    }
+
+    /// Run the search into `self.results`, counting each filter evaluation
+    /// in `checks`.
+    fn search(&mut self, store: &GraphStore, checks: &std::cell::Cell<u64>) -> ExecutionResult<()> {
         // A missing index is reported by the search itself (#1660), so a
         // missing metric here only means there is nothing to score.
         self.metric = store.vector_index.metric(&self.label, &self.property_key);
@@ -14934,6 +15339,7 @@ impl VectorSearchOperator {
         // "no match".
         let error = std::cell::RefCell::new(None);
         let keep = |id: NodeId| {
+            checks.set(checks.get() + 1);
             if error.borrow().is_some() || !in_scope(id) {
                 return false;
             }
@@ -15012,10 +15418,25 @@ impl PhysicalOperator for VectorSearchOperator {
         self.current = 0;
     }
 
+    fn work(&self) -> Vec<(&'static str, u64)> {
+        let Some(w) = self.work else { return Vec::new() };
+        vec![
+            ("distances", w.distances),
+            ("graph_searches", w.graph_searches),
+            ("exact_fallbacks", w.exact_fallbacks),
+            ("filter_checks", w.filter_checks),
+        ]
+    }
+
     fn describe(&self) -> OperatorDescription {
         let mut details = format!("{}.{}, k={}", self.label, self.property_key, self.k);
+        if let Some(kind) = self.kind {
+            details.push_str(&format!(", index={}", kind.name()));
+        }
         if let Some(ef) = self.ef {
-            details.push_str(&format!(", ef={ef}"));
+            // An IVF index's search width is its `nprobe` (#1975).
+            let width = if self.kind.is_some_and(|k| k.is_ivf()) { "nprobe" } else { "ef" };
+            details.push_str(&format!(", {width}={ef}"));
         }
         if let Some(f) = &self.filter {
             details.push_str(&format!(", filter: {}", format_expression(f)));
@@ -15976,6 +16397,8 @@ pub struct CreateVectorIndexOperator {
     quantization: crate::vector::index::Quantization,
     /// `m`, `ef_construction` and the default `ef` (#1971).
     params: crate::vector::HnswParams,
+    /// HNSW or IVF (#1975).
+    kind: crate::vector::IndexKind,
     /// The name the DDL gave this index, kept so Neo4j's form of
     /// `db.index.vector.queryNodes(indexName, k, vector)` can resolve it (#1041).
     name: Option<String>,
@@ -15991,6 +16414,7 @@ impl CreateVectorIndexOperator {
             similarity,
             quantization: crate::vector::index::Quantization::None,
             params: crate::vector::HnswParams::default(),
+            kind: crate::vector::IndexKind::Hnsw,
             name: None,
             executed: false,
         }
@@ -16008,6 +16432,11 @@ impl CreateVectorIndexOperator {
 
     pub fn with_params(mut self, params: crate::vector::HnswParams) -> Self {
         self.params = params;
+        self
+    }
+
+    pub fn with_kind(mut self, kind: crate::vector::IndexKind) -> Self {
+        self.kind = kind;
         self
     }
 }
@@ -16031,9 +16460,9 @@ impl PhysicalOperator for CreateVectorIndexOperator {
             _ => return Err(ExecutionError::RuntimeError(format!("Unsupported similarity metric: {}", self.similarity))),
         };
 
-        store.create_vector_index_with_params(self.name.as_deref(), self.label.as_str(),
-                                              &self.property_key, self.dimensions, metric,
-                                              self.quantization, self.params)
+        store.create_vector_index_with_kind(self.name.as_deref(), self.label.as_str(),
+                                            &self.property_key, self.dimensions, metric,
+                                            self.quantization, self.params, self.kind)
             .map_err(|e| ExecutionError::GraphError(e.to_string()))?;
 
         // Backfill nodes that already carry the embedding. Registering the index without
@@ -16062,11 +16491,19 @@ impl PhysicalOperator for CreateVectorIndexOperator {
             Some(name) => format!("{} ON {}", name, target),
             None => target,
         };
+        // HNSW prints its parameters as before #1975; IVF names its kind.
+        let params = match self.kind {
+            crate::vector::IndexKind::Hnsw => self.params.to_string(),
+            crate::vector::IndexKind::Ivf(p) => {
+                let show = |v: Option<usize>| v.map_or_else(|| "auto".to_string(), |v| v.to_string());
+                format!("kind=ivf, nlist={}, nprobe={}", show(p.nlist), show(p.nprobe))
+            }
+        };
         OperatorDescription {
             name: "CreateVectorIndex".to_string(),
             details: format!(
                 "{} dims={} {} quantization={:?} {}",
-                named, self.dimensions, self.similarity, self.quantization, self.params
+                named, self.dimensions, self.similarity, self.quantization, params
             ),
             children: Vec::new(),
         }
@@ -16513,11 +16950,16 @@ impl PhysicalOperator for ShowIndexesOperator {
             // find out whether it had been created was to search it and read
             // an empty result -- which is what a correct index over no matching
             // data also returns.
-            let mut rows: Vec<(String, String, String)> = store
+            // The fourth field is a vector index's dead entries and its live
+            // ones (#1972); `None` for every other kind.
+            type Row = (String, String, String, Option<(usize, usize)>);
+            let mut rows: Vec<Row> = store
                 .property_index
                 .list_indexes()
                 .into_iter()
-                .map(|(label, property)| (label.as_str().to_string(), property, "BTREE".to_string()))
+                .map(|(label, property)| {
+                    (label.as_str().to_string(), property, "BTREE".to_string(), None)
+                })
                 .collect();
             rows.extend(
                 store
@@ -16527,12 +16969,19 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .map(|k| {
                         // With its HNSW parameters (#1971), in the bracket the
                         // other kinds use for their name.
-                        let params = store
-                            .vector_index
-                            .get_index(&k.label, &k.property_key)
-                            .map(|i| i.read().unwrap().params())
-                            .unwrap_or_default();
-                        (k.label, k.property_key, format!("VECTOR[{params}]"))
+                        let index = store.vector_index.get_index(&k.label, &k.property_key);
+                        let index = index.as_ref().map(|i| i.read().unwrap());
+                        // An IVF index names its kind instead (#1975).
+                        let params = index
+                            .as_ref()
+                            .map(|i| i.describe())
+                            .unwrap_or_else(|| crate::vector::HnswParams::default().to_string());
+                        // Deleted and replaced vectors stay in the graph until
+                        // a fifth of it is dead and it is rebuilt (#1968), and a
+                        // search walks through them. How many there are is what
+                        // says how far from that rebuild the index is (#1972).
+                        let dead = index.as_ref().map(|i| (i.superseded(), i.len()));
+                        (k.label, k.property_key, format!("VECTOR[{params}]"), dead)
                     }),
             );
             // Full-text indexes too, or the only way to learn that one exists
@@ -16545,7 +16994,7 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .listing()
                     .into_iter()
                     .map(|(name, label, property)| {
-                        (label, property, format!("FULLTEXT[{name}]"))
+                        (label, property, format!("FULLTEXT[{name}]"), None)
                     }),
             );
             rows.extend(
@@ -16553,18 +17002,34 @@ impl PhysicalOperator for ShowIndexesOperator {
                     .point_index
                     .listing()
                     .into_iter()
-                    .map(|(name, label, property)| (label, property, format!("POINT[{name}]"))),
+                    .map(|(name, label, property)| {
+                        (label, property, format!("POINT[{name}]"), None)
+                    }),
             );
             // Both registries are hash maps, so the listing order is otherwise
             // arbitrary and differs run to run.
             rows.sort();
 
             let mut records = Vec::new();
-            for (label, property, kind) in rows {
+            for (label, property, kind, dead) in rows {
                 let mut record = Record::new();
                 record.bind("label".to_string(), Value::Property(PropertyValue::String(label)));
                 record.bind("property".to_string(), Value::Property(PropertyValue::String(property)));
                 record.bind("type".to_string(), Value::Property(PropertyValue::String(kind)));
+                // `superseded`: entries still in a vector index's graph that no
+                // longer answer for a node. `supersededRatio`: their share of
+                // the graph, which triggers a rebuild at 0.2. Null for the
+                // kinds that delete in place.
+                let (superseded, ratio) = match dead {
+                    Some((dead, live)) => {
+                        let total = dead + live;
+                        let ratio = if total == 0 { 0.0 } else { dead as f64 / total as f64 };
+                        (PropertyValue::Integer(dead as i64), PropertyValue::Float(ratio))
+                    }
+                    None => (PropertyValue::Null, PropertyValue::Null),
+                };
+                record.bind("superseded".to_string(), Value::Property(superseded));
+                record.bind("supersededRatio".to_string(), Value::Property(ratio));
                 records.push(record);
             }
             self.results = Some(records.into_iter());
@@ -18358,6 +18823,10 @@ impl AlgorithmOperator {
         ("symptomexplanation", "it reads each relationship's time, which a projection does not keep"),
         ("pca", "it reads node properties, which a projection does not keep"),
         ("or.solve", "it optimises over node properties, not over a graph view"),
+        ("split", "it can read node properties (time, source), which a projection does not keep"),
+        ("traintestsplit", "it can read node properties (time, source), which a projection does not keep"),
+        ("splitleakage", "it reads the stored split from node properties, which a projection does not keep"),
+        ("leakagecheck", "it reads the stored split from node properties, which a projection does not keep"),
         ("or.constrainedshortestpath", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
         ("or.shortestpathwithconstraints", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
     ];
@@ -18475,8 +18944,13 @@ impl AlgorithmOperator {
     /// a `SET`. Any `writeProperty`, even an invalid one, counts: the refusal
     /// for an invalid one then comes from the write path, with its reason,
     /// instead of a read executor saying only that it cannot write.
+    ///
+    /// An embedding procedure with `write: false` streams (#1736), so it reads
+    /// -- unless it also names a `writeProperty`, which is then refused on the
+    /// write path for asking both.
     pub fn call_writes(name: &str, args: &[Expression]) -> bool {
-        Self::procedure_is_mutating(name) || Self::config_has_key(args, Self::WRITE_PROPERTY_KEY)
+        (Self::procedure_is_mutating(name) && !Self::embedding_streams(name, args))
+            || Self::config_has_key(args, Self::WRITE_PROPERTY_KEY)
     }
 
     /// Whether any literal config map among `args` holds `key`.
@@ -18521,6 +18995,7 @@ impl AlgorithmOperator {
         (&["effectivesize"], "value"),
         (&["constraint", "burtconstraint"], "value"),
         (&["bellmanford"], "distance"),
+        (&["split", "traintestsplit"], "split"),
     ];
 
     /// Whether this algorithm can run on a named projection: not one of
@@ -19321,6 +19796,499 @@ impl AlgorithmOperator {
             bind(&mut rec, "node2", p.b);
             rec.bind("score".to_string(), Value::Property(PropertyValue::Float(p.score)));
             self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// The config keys every literal map argument holds, merged.
+    fn config_map(&self) -> std::collections::HashMap<String, PropertyValue> {
+        let mut out = std::collections::HashMap::new();
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                out.extend(m.iter().map(|(k, v)| (k.clone(), v.clone())));
+            }
+        }
+        out
+    }
+
+    /// A string config value, or `None` when absent; anything else is refused.
+    fn config_string(
+        cfg: &std::collections::HashMap<String, PropertyValue>,
+        call: &str,
+        key: &str,
+    ) -> ExecutionResult<Option<String>> {
+        match cfg.get(key) {
+            None | Some(PropertyValue::Null) => Ok(None),
+            Some(PropertyValue::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+            Some(other) => Err(ExecutionError::bad_argument(format!(
+                "{call}: `{key}` must be a non-empty string, got {other:?}"
+            ))),
+        }
+    }
+
+    /// `strategy`, required and one of the known ones. `random` is a split
+    /// (the negative control) but has no boundary for the leakage check to test.
+    fn split_strategy(
+        cfg: &std::collections::HashMap<String, PropertyValue>,
+        call: &str,
+        allow_random: bool,
+    ) -> ExecutionResult<String> {
+        let known: &[&str] = if allow_random {
+            &["entity", "community", "time", "source", "random"]
+        } else {
+            &["entity", "community", "time", "source"]
+        };
+        let strategy = Self::config_string(cfg, call, "strategy")?
+            .map(|s| s.to_ascii_lowercase())
+            .ok_or_else(|| {
+                ExecutionError::bad_argument(format!(
+                    "{call}: `strategy` is required: one of {}",
+                    known.join(", ")
+                ))
+            })?;
+        if !known.contains(&strategy.as_str()) {
+            return Err(ExecutionError::bad_argument(format!(
+                "{call}: unknown strategy `{strategy}`; expected one of {}{}",
+                known.join(", "),
+                if strategy == "random" {
+                    ". A random split keeps nothing together, so there is no boundary to \
+                     check it against: check it with the strategy it should have respected \
+                     (entity, community, time or source) to measure the leak it makes"
+                } else {
+                    ""
+                }
+            )));
+        }
+        Ok(strategy)
+    }
+
+    /// A sortable time from a property: a number, or a date/datetime as epoch
+    /// milliseconds. `true` marks a temporal value, so the two are not mixed.
+    /// A time of day has no date and so no place on a timeline; it is refused.
+    fn split_time_key(value: &PropertyValue) -> Option<(bool, f64)> {
+        match value {
+            PropertyValue::Integer(i) => Some((false, *i as f64)),
+            PropertyValue::Float(f) if !f.is_nan() => Some((false, *f)),
+            PropertyValue::Date(_)
+            | PropertyValue::DateTime(_)
+            | PropertyValue::LocalDateTime { .. }
+            | PropertyValue::ZonedDateTime { .. } => {
+                value.as_epoch_millis().map(|ms| (true, ms as f64))
+            }
+            _ => None,
+        }
+    }
+
+    /// `property` read from every node in the view, refusing loudly when any
+    /// node lacks it: a node with no timestamp or source cannot be placed, and
+    /// dropping it silently would make the split smaller than the caller thinks.
+    fn split_property_values(
+        store: &GraphStore,
+        view: &crate::algo::GraphView,
+        call: &str,
+        strategy: &str,
+        property: &str,
+    ) -> ExecutionResult<Vec<(u64, PropertyValue)>> {
+        let mut ids = view.index_to_node.clone();
+        ids.sort_unstable();
+        let mut out = Vec::with_capacity(ids.len());
+        let mut missing = Vec::new();
+        for id in ids {
+            match store.node_property(NodeId::new(id), property) {
+                Some(v) if !matches!(v, PropertyValue::Null) => out.push((id, v)),
+                _ => missing.push(id),
+            }
+        }
+        if !missing.is_empty() {
+            return Err(ExecutionError::bad_argument(format!(
+                "{call}: {strategy} reads `{property}` from every node, and {} of {} \
+                 node(s) have none (first: {:?}). Narrow the nodes with `label`, or set the \
+                 property, so none is left out without anyone noticing",
+                missing.len(),
+                missing.len() + out.len(),
+                &missing[..missing.len().min(5)]
+            )));
+        }
+        Ok(out)
+    }
+
+    /// The times of every node, all numbers or all dates.
+    fn split_times(
+        values: &[(u64, PropertyValue)],
+        call: &str,
+        property: &str,
+    ) -> ExecutionResult<Vec<(u64, f64)>> {
+        let mut kind = None;
+        let mut out = Vec::with_capacity(values.len());
+        for (id, v) in values {
+            let Some((temporal, t)) = Self::split_time_key(v) else {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `{property}` on node {id} is {v:?}; a time split needs a number \
+                     or a date/datetime on every node"
+                )));
+            };
+            if *kind.get_or_insert(temporal) != temporal {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{call}: `{property}` mixes numbers and dates (node {id}), which have no \
+                     common order"
+                )));
+            }
+            out.push((*id, t));
+        }
+        Ok(out)
+    }
+
+    /// A group key for a source value, keeping types apart: `1` and `'1'`
+    /// are different sources.
+    fn split_group_key(v: &PropertyValue) -> String {
+        format!("{v:?}")
+    }
+
+    /// `algo.split({strategy, ...})` -- a train/validation/test split that
+    /// keeps whole groups on one side of the boundary (ML-05, #1730).
+    ///
+    /// One row per node: `node`, `split` (`train`/`val`/`test`, or
+    /// `train`/`test` for two ratios) and `group` -- the entity component,
+    /// community, source value or time that decided it (null for `random`).
+    /// `writeProperty` stores `split` on each node, which is what
+    /// `algo.splitLeakage` reads back.
+    fn execute_split(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const CALL: &str = "algo.split";
+        Self::reject_unknown_config_keys(
+            &self.args,
+            CALL,
+            &[
+                "edgeType", "label", "property", "ratios", "seed", "strategy",
+            ],
+        )?;
+        let cfg = self.config_map();
+        let strategy = Self::split_strategy(&cfg, CALL, true)?;
+        let ratios: Vec<f64> = match cfg.get("ratios") {
+            None => vec![0.8, 0.1, 0.1],
+            Some(v) => {
+                let items = v.as_list_items().unwrap_or_default();
+                let nums: Vec<f64> = items
+                    .iter()
+                    .filter_map(|x| match x {
+                        PropertyValue::Integer(i) => Some(*i as f64),
+                        PropertyValue::Float(f) => Some(*f),
+                        _ => None,
+                    })
+                    .collect();
+                let sum: f64 = nums.iter().sum();
+                if !(2..=3).contains(&items.len())
+                    || nums.len() != items.len()
+                    || nums.iter().any(|r| !r.is_finite() || *r < 0.0)
+                    || (sum - 1.0).abs() > 1e-6
+                    || nums[0] <= 0.0
+                {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "{CALL}: `ratios` must be [train, test] or [train, val, test]: \
+                         non-negative numbers summing to 1, with train above 0; got {v:?}"
+                    )));
+                }
+                nums
+            }
+        };
+        let seed = match cfg.get("seed") {
+            None => 42u64,
+            Some(PropertyValue::Integer(n)) => *n as u64,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `seed` must be an integer, got {other:?}"
+                )))
+            }
+        };
+        let label = Self::config_string(&cfg, CALL, "label")?;
+        let edge_type = Self::config_string(&cfg, CALL, "edgeType")?;
+        let property = Self::config_string(&cfg, CALL, "property")?;
+        if strategy == "entity" && edge_type.is_none() {
+            return Err(ExecutionError::bad_argument(format!(
+                "{CALL}: strategy `entity` needs `edgeType`, the relationship that links two \
+                 records of one entity (SAME_AS, say). Without it every relationship would \
+                 count as \"same entity\" and the split would keep whole connected components \
+                 together"
+            )));
+        }
+        let needs_property = strategy == "time" || strategy == "source";
+        if needs_property != property.is_some() {
+            return Err(ExecutionError::bad_argument(if needs_property {
+                format!("{CALL}: strategy `{strategy}` needs `property`, the node property holding each record's {}",
+                    if strategy == "time" { "timestamp" } else { "source" })
+            } else {
+                format!("{CALL}: strategy `{strategy}` does not read `property`; only time and source do")
+            }));
+        }
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
+
+        // Groups, each sorted, ordered by their smallest node so the seed alone
+        // decides placement; and each node's `group` value.
+        let mut group_value: std::collections::HashMap<u64, PropertyValue> = Default::default();
+        let grouped = |mut groups: Vec<Vec<u64>>| {
+            for g in &mut groups {
+                g.sort_unstable();
+            }
+            groups.sort_unstable_by_key(|g| g[0]);
+            groups
+        };
+        let assigned: Vec<(u64, usize)> = match strategy.as_str() {
+            "random" => {
+                let groups = grouped(view.index_to_node.iter().map(|&n| vec![n]).collect());
+                crate::algo::assign_groups(&groups, &ratios, seed)
+            }
+            "entity" => {
+                let wcc = crate::algo::weakly_connected_components(&view);
+                let groups = grouped(wcc.components.into_values().collect());
+                for (i, g) in groups.iter().enumerate() {
+                    for &n in g {
+                        group_value.insert(n, PropertyValue::Integer(i as i64));
+                    }
+                }
+                crate::algo::assign_groups(&groups, &ratios, seed)
+            }
+            "community" => {
+                let comms = crate::algo::louvain(&view, 20);
+                let mut by: std::collections::BTreeMap<usize, Vec<u64>> = Default::default();
+                for (n, c) in crate::algo::with_ids(&view, &comms) {
+                    group_value.insert(n, PropertyValue::Integer(c as i64));
+                    by.entry(c).or_default().push(n);
+                }
+                crate::algo::assign_groups(&grouped(by.into_values().collect()), &ratios, seed)
+            }
+            "source" => {
+                let property = property.as_deref().unwrap_or_default();
+                let values = Self::split_property_values(
+                    store,
+                    &view,
+                    CALL,
+                    &format!("strategy `{strategy}`"),
+                    property,
+                )?;
+                let mut by: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
+                for (n, v) in values {
+                    by.entry(Self::split_group_key(&v)).or_default().push(n);
+                    group_value.insert(n, v);
+                }
+                crate::algo::assign_groups(&grouped(by.into_values().collect()), &ratios, seed)
+            }
+            _ => {
+                // time
+                let property = property.as_deref().unwrap_or_default();
+                let values = Self::split_property_values(
+                    store,
+                    &view,
+                    CALL,
+                    &format!("strategy `{strategy}`"),
+                    property,
+                )?;
+                let times = Self::split_times(&values, CALL, property)?;
+                group_value.extend(values);
+                crate::algo::time_split(&times, &ratios)
+            }
+        };
+
+        let names = crate::algo::split_names(ratios.len());
+        let mut assigned = assigned;
+        assigned.sort_unstable();
+        for (id, s) in assigned {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            rec.bind(
+                "split".to_string(),
+                Value::Property(PropertyValue::String(names[s].to_string())),
+            );
+            rec.bind(
+                "group".to_string(),
+                Value::Property(group_value.remove(&id).unwrap_or(PropertyValue::Null)),
+            );
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.splitLeakage({strategy, splitProperty, ...})` -- every leak across
+    /// a stored split's boundary (ML-05, #1730). No rows means a clean split.
+    ///
+    /// Reads the split from `splitProperty` (default `split`), so it checks a
+    /// split made anywhere -- `algo.split` with `writeProperty`, or a naive
+    /// `SET n.split = CASE WHEN rand() < 0.8 ...`, which is the negative
+    /// control. One row per leak: `node1, node2, split1, split2, reason`.
+    ///
+    /// * entity: two nodes within `hops` (default 3) over `edgeType`, in
+    ///   different splits. Walked hop by hop, not read from components.
+    /// * community: a Louvain community, recomputed on the graph as it is now,
+    ///   found in two splits -- one row per pair of splits, with its two
+    ///   smallest nodes and the count on each side in `reason`.
+    /// * source: likewise, for a value of `property`.
+    /// * time: a node whose time is after the earliest time of a later split,
+    ///   paired with that earliest node.
+    fn execute_split_leakage(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const CALL: &str = "algo.splitLeakage";
+        Self::reject_unknown_config_keys(
+            &self.args,
+            CALL,
+            &[
+                "edgeType",
+                "hops",
+                "label",
+                "property",
+                "splitProperty",
+                "strategy",
+            ],
+        )?;
+        let cfg = self.config_map();
+        let strategy = Self::split_strategy(&cfg, CALL, false)?;
+        let label = Self::config_string(&cfg, CALL, "label")?;
+        let edge_type = Self::config_string(&cfg, CALL, "edgeType")?;
+        let property = Self::config_string(&cfg, CALL, "property")?;
+        let split_property = Self::config_string(&cfg, CALL, "splitProperty")?
+            .unwrap_or_else(|| "split".to_string());
+        let hops = match cfg.get("hops") {
+            None => 3usize,
+            Some(PropertyValue::Integer(n)) if *n >= 1 => *n as usize,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `hops` must be an integer of at least 1, got {other:?}"
+                )))
+            }
+        };
+        if strategy == "entity" && edge_type.is_none() {
+            return Err(ExecutionError::bad_argument(format!(
+                "{CALL}: strategy `entity` needs `edgeType`, the relationship that links two \
+                 records of one entity (SAME_AS, say)"
+            )));
+        }
+        let needs_property = strategy == "time" || strategy == "source";
+        if needs_property != property.is_some() {
+            return Err(ExecutionError::bad_argument(if needs_property {
+                format!("{CALL}: strategy `{strategy}` needs `property`")
+            } else {
+                format!("{CALL}: strategy `{strategy}` does not read `property`; only time and source do")
+            }));
+        }
+        if strategy != "entity" && cfg.contains_key("hops") {
+            return Err(ExecutionError::bad_argument(format!(
+                "{CALL}: `hops` bounds the entity walk; strategy `{strategy}` does not read it"
+            )));
+        }
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
+
+        // The stored split of every node, refused when absent or not a split name.
+        let names = crate::algo::split_names(3);
+        let membership =
+            Self::split_property_values(store, &view, CALL, "split membership", &split_property)?;
+        let mut split_of = std::collections::HashMap::with_capacity(membership.len());
+        for (id, v) in &membership {
+            let s = match v {
+                PropertyValue::String(s) => names.iter().position(|n| n == s),
+                _ => None,
+            };
+            let Some(s) = s else {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `{split_property}` on node {id} is {v:?}; expected one of {}",
+                    names.join(", ")
+                )));
+            };
+            split_of.insert(*id, s);
+        }
+
+        let push = |this: &mut Self, a: u64, b: u64, sa: usize, sb: usize, reason: String| {
+            let mut rec = Record::new();
+            this.bind_node(store, &mut rec, "node1", a);
+            this.bind_node(store, &mut rec, "node2", b);
+            rec.bind(
+                "split1".to_string(),
+                Value::Property(PropertyValue::String(names[sa].to_string())),
+            );
+            rec.bind(
+                "split2".to_string(),
+                Value::Property(PropertyValue::String(names[sb].to_string())),
+            );
+            rec.bind(
+                "reason".to_string(),
+                Value::Property(PropertyValue::String(reason)),
+            );
+            this.results.push(rec);
+        };
+        match strategy.as_str() {
+            "entity" => {
+                let edge = edge_type.as_deref().unwrap_or_default();
+                for (a, b, d) in crate::algo::entity_leaks(&view, &split_of, hops) {
+                    push(
+                        self,
+                        a,
+                        b,
+                        split_of[&a],
+                        split_of[&b],
+                        format!("same entity: {d} {edge} hop(s) apart"),
+                    );
+                }
+            }
+            "community" | "source" => {
+                let keys: Vec<(u64, String)> = if strategy == "community" {
+                    let comms = crate::algo::louvain(&view, 20);
+                    crate::algo::with_ids(&view, &comms)
+                        .into_iter()
+                        .map(|(n, c)| (n, c.to_string()))
+                        .collect()
+                } else {
+                    let property = property.as_deref().unwrap_or_default();
+                    Self::split_property_values(
+                        store,
+                        &view,
+                        CALL,
+                        &format!("strategy `{strategy}`"),
+                        property,
+                    )?
+                    .iter()
+                    .map(|(n, v)| (*n, Self::split_group_key(v)))
+                    .collect()
+                };
+                for l in crate::algo::group_leaks(&keys, &split_of) {
+                    let what = if strategy == "community" {
+                        format!("community {}", l.key)
+                    } else {
+                        format!("source {}", l.key)
+                    };
+                    push(
+                        self,
+                        l.node_a,
+                        l.node_b,
+                        l.split_a,
+                        l.split_b,
+                        format!(
+                            "{what} is on both sides: {} node(s) in {}, {} in {}",
+                            l.count_a, names[l.split_a], l.count_b, names[l.split_b]
+                        ),
+                    );
+                }
+            }
+            _ => {
+                let property = property.as_deref().unwrap_or_default();
+                let values = Self::split_property_values(
+                    store,
+                    &view,
+                    CALL,
+                    &format!("strategy `{strategy}`"),
+                    property,
+                )?;
+                let times = Self::split_times(&values, CALL, property)?;
+                let time_of: std::collections::HashMap<u64, &PropertyValue> =
+                    values.iter().map(|(n, v)| (*n, v)).collect();
+                for (late, early, sl, se) in crate::algo::time_leaks(&times, &split_of, 3) {
+                    push(
+                        self,
+                        late,
+                        early,
+                        sl,
+                        se,
+                        format!(
+                            "{} {} is after {}'s earliest {}",
+                            names[sl], time_of[&late], names[se], time_of[&early]
+                        ),
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -20423,26 +21391,197 @@ impl AlgorithmOperator {
         Ok(())
     }
 
-    /// `CALL algo.fastRP(label?, {embeddingDimension, iterationWeights, seed,
-    /// normalize, writeProperty, edgeType}) YIELD node, embedding` -- FastRP
-    /// graph embeddings (ML-06).
+    /// The config key that turns an embedding call into a stream (#1736):
+    /// `CALL algo.fastRP('Node', {write: false})` returns the rows and stores
+    /// nothing.
     ///
-    /// Requires write access, like `algo.or.solve`: ML-06 asks for the
-    /// embedding "stored as vector properties", not only streamed, so this
-    /// writes `writeProperty` (default `embedding`) on every node in scope
-    /// before returning it as a row. That is a deliberate difference from
-    /// every other algorithm here, which streams and leaves persistence to
-    /// the caller's own `SET` -- ALGO-06's generic `write`/`mutate` modes
-    /// remain unbuilt, but ML-06 specifically asks this algorithm to persist
-    /// its own result.
+    /// The embeddings write by default, unlike every other algorithm here,
+    /// because ML-06 asks for them "stored as vector properties" (see
+    /// `execute_fastrp`). Turning that default round would silently stop
+    /// existing callers' writes, so the stream is the opt-in instead.
+    pub const EMBEDDING_WRITE_KEY: &'static str = "write";
+
+    /// The procedures that write by default and stream on `write: false`.
+    pub const EMBEDDING_PROCEDURES: &'static [&'static str] = &["fastrp", "node2vec"];
+
+    /// Is this a `CALL` to an embedding procedure that asks not to write?
+    ///
+    /// Read from literal config maps, as `call_writes` reads `writeProperty`,
+    /// so the router and the operator see the same request. Only the literal
+    /// `false` counts; anything else is refused by `embedding_write_target`
+    /// on the write path, with its reason.
+    pub fn embedding_streams(name: &str, args: &[Expression]) -> bool {
+        Self::EMBEDDING_PROCEDURES.contains(&Self::canonical_name(name).as_str())
+            && args.iter().any(|arg| {
+                matches!(
+                    arg,
+                    Expression::Literal(PropertyValue::Map(m))
+                        if m.get(Self::EMBEDDING_WRITE_KEY) == Some(&PropertyValue::Boolean(false))
+                )
+            })
+    }
+
+    /// Where an embedding call stores its vectors: `Some(property)` to write
+    /// (`writeProperty`, default `embedding`), `None` to stream only.
+    ///
+    /// `write: false` with a `writeProperty` is refused rather than resolved
+    /// one way or the other: the call asks for two opposite things, and
+    /// either guess loses a write or makes one the caller did not ask for.
+    fn embedding_write_target(&self, call: &str) -> ExecutionResult<Option<String>> {
+        let mut write = true;
+        let mut property = None;
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                match m.get(Self::EMBEDDING_WRITE_KEY) {
+                    None => {}
+                    Some(PropertyValue::Boolean(b)) => write = *b,
+                    Some(other) => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "{call}: `{}` must be a boolean, got {other:?}",
+                            Self::EMBEDDING_WRITE_KEY
+                        )))
+                    }
+                }
+                match m.get(Self::WRITE_PROPERTY_KEY) {
+                    None => {}
+                    Some(PropertyValue::String(s)) if !s.trim().is_empty() => {
+                        property = Some(s.clone())
+                    }
+                    Some(other) => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "{call}: `{}` must be a non-empty property name, got {other:?}",
+                            Self::WRITE_PROPERTY_KEY
+                        )))
+                    }
+                }
+            }
+        }
+        match (write, property) {
+            (false, Some(p)) => Err(ExecutionError::bad_argument(format!(
+                "{call}: `{}: false` asks for no write and `{}: '{p}'` asks for one. \
+                 Drop one of them.",
+                Self::EMBEDDING_WRITE_KEY,
+                Self::WRITE_PROPERTY_KEY
+            ))),
+            (false, None) => Ok(None),
+            (true, p) => Ok(Some(p.unwrap_or_else(|| "embedding".to_string()))),
+        }
+    }
+
+    /// Store each embedding (when `target` names a property) and emit its row.
+    ///
+    /// Stored as `PropertyValue::Vector`, `f32` per dimension -- the type a
+    /// float list literal parses to and the one the vector index reads
+    /// directly -- rather than an `Array` of `Float` values, each of which is
+    /// a full `PropertyValue` (#1736). The narrowing to `f32` is deliberate
+    /// here and nowhere else: a list literal stays 64-bit (#628), but an
+    /// embedding is a vector, and 4 bytes a dimension instead of a whole
+    /// `PropertyValue` is what makes one per node affordable. The row carries the same `f32` values,
+    /// so what a stream returns is exactly what a write would have stored.
+    fn emit_embeddings(
+        &mut self,
+        store: &mut GraphStore,
+        tenant_id: &str,
+        call: &str,
+        target: Option<&str>,
+        embeddings: Vec<(NodeId, Vec<f64>)>,
+    ) -> ExecutionResult<()> {
+        for (id, embedding) in embeddings {
+            let vector: Vec<f32> = embedding.into_iter().map(|f| f as f32).collect();
+            if let Some(property) = target {
+                store
+                    .set_node_property(
+                        tenant_id,
+                        id,
+                        property.to_string(),
+                        PropertyValue::Vector(vector.clone()),
+                    )
+                    .map_err(|e| {
+                        ExecutionError::RuntimeError(format!(
+                            "{call}: failed to write `{property}`: {e}"
+                        ))
+                    })?;
+            }
+            self.push_embedding_row(store, id, vector);
+        }
+        Ok(())
+    }
+
+    /// The read-path run of fastRP or node2vec: `write: false`, streamed.
+    ///
+    /// The write target is still read, so `write: false` together with a
+    /// `writeProperty` is refused with its reason here too. Kept out of the
+    /// dispatch match so the arm stays one line: the catalogue test reads
+    /// algorithm names from lines there that start with a string literal.
+    fn execute_embedding_stream(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        let fastrp = Self::canonical_name(&self.name) == "fastrp";
+        let call = if fastrp { "algo.fastRP" } else { "algo.node2vec" };
+        if self.embedding_write_target(call)?.is_some() {
+            return Err(ExecutionError::RuntimeError(format!(
+                "{call} writes unless `{}: false`, and writing requires write \
+                 access (MutQueryExecutor)",
+                Self::EMBEDDING_WRITE_KEY
+            )));
+        }
+        let embeddings = if fastrp {
+            self.fastrp_embeddings(store)?
+        } else {
+            self.node2vec_embeddings(store)?
+        };
+        self.stream_embeddings(store, embeddings);
+        Ok(())
+    }
+
+    /// The read path's half of `emit_embeddings`: rows only, nothing stored.
+    fn stream_embeddings(&mut self, store: &GraphStore, embeddings: Vec<(NodeId, Vec<f64>)>) {
+        for (id, embedding) in embeddings {
+            let vector: Vec<f32> = embedding.into_iter().map(|f| f as f32).collect();
+            self.push_embedding_row(store, id, vector);
+        }
+    }
+
+    fn push_embedding_row(&mut self, store: &GraphStore, id: NodeId, vector: Vec<f32>) {
+        if let Some(node) = store.get_node(id) {
+            let mut record = Record::new();
+            record.bind("node".to_string(), Value::Node(id, Box::new(node.clone())));
+            record.bind(
+                "embedding".to_string(),
+                Value::List(
+                    vector
+                        .into_iter()
+                        .map(|f| Value::Property(PropertyValue::Float(f as f64)))
+                        .collect(),
+                ),
+            );
+            self.results.push(record);
+        }
+    }
+
+    /// `CALL algo.fastRP(label?, {embeddingDimension, iterationWeights, seed,
+    /// normalize, writeProperty, write, edgeType}) YIELD node, embedding` --
+    /// FastRP graph embeddings (ML-06).
+    ///
+    /// Writes by default, unlike every other algorithm here: ML-06 asks for
+    /// the embedding "stored as vector properties", not only streamed, so this
+    /// stores `writeProperty` (default `embedding`) on every node in scope
+    /// before returning it as a row, and needs write access to do it, like
+    /// `algo.or.solve`. `write: false` streams instead, stores nothing, and
+    /// runs on the read path (#1736). Running it again overwrites the stored
+    /// vectors, which is how they are refreshed.
     fn execute_fastrp(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
+        let target = self.embedding_write_target("algo.fastRP")?;
+        let embeddings = self.fastrp_embeddings(store)?;
+        self.emit_embeddings(store, tenant_id, "algo.fastRP", target.as_deref(), embeddings)
+    }
+
+    /// FastRP's config and run, shared by the write and the read path.
+    fn fastrp_embeddings(&self, store: &GraphStore) -> ExecutionResult<Vec<(NodeId, Vec<f64>)>> {
         Self::reject_unknown_config_keys(&self.args, "fastRP", &[
             "label", "edgeType", "embeddingDimension", "iterationWeights", "seed",
-            "normalize", "writeProperty",
+            "normalize", "writeProperty", "write",
         ])?;
         let view = self.structural_view(store)?;
         let mut config = crate::algo::FastRpConfig::default();
-        let mut write_property = "embedding".to_string();
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
                 if let Some(v) = m.get("embeddingDimension") {
@@ -20473,36 +21612,20 @@ impl AlgorithmOperator {
                 }
                 if let Some(PropertyValue::Integer(v)) = m.get("seed") { config.seed = *v as u64; }
                 if let Some(PropertyValue::Boolean(b)) = m.get("normalize") { config.normalize = *b; }
-                if let Some(PropertyValue::String(s)) = m.get("writeProperty") { write_property = s.clone(); }
             }
         }
-
         let embeddings = crate::algo::fastrp(&view, &config);
-        for (idx, embedding) in embeddings.into_iter().enumerate() {
-            let id = NodeId::new(view.index_to_node[idx]);
-            let values: Vec<PropertyValue> = embedding.into_iter().map(PropertyValue::Float).collect();
-            store
-                .set_node_property(tenant_id, id, write_property.clone(), PropertyValue::Array(values.clone()))
-                .map_err(|e| ExecutionError::RuntimeError(format!(
-                    "algo.fastRP: failed to write `{write_property}`: {e}"
-                )))?;
-            if let Some(node) = store.get_node(id) {
-                let mut record = Record::new();
-                record.bind("node".to_string(), Value::Node(id, Box::new(node.clone())));
-                record.bind(
-                    "embedding".to_string(),
-                    Value::List(values.into_iter().map(Value::Property).collect()),
-                );
-                self.results.push(record);
-            }
-        }
-        Ok(())
+        Ok(embeddings
+            .into_iter()
+            .enumerate()
+            .map(|(idx, e)| (NodeId::new(view.index_to_node[idx]), e))
+            .collect())
     }
 
     /// `CALL algo.node2vec(label?, {embeddingDimension, walkLength,
     /// walksPerNode, returnFactor, inOutFactor, windowSize, seed,
-    /// writeProperty, edgeType}) YIELD node, embedding` -- node2vec graph
-    /// embeddings (ML-06).
+    /// writeProperty, write, edgeType}) YIELD node, embedding` -- node2vec
+    /// graph embeddings (ML-06).
     ///
     /// **This runs node2vec's real biased 2nd-order random walks
     /// (`returnFactor` = p, `inOutFactor` = q) but embeds them with a
@@ -20511,15 +21634,22 @@ impl AlgorithmOperator {
     /// for what that means and why. Calling this "node2vec" is only honest
     /// with that caveat attached, so it is repeated at both call sites.
     ///
-    /// Requires write access for the same reason `algo.fastRP` does above.
+    /// Writes by default and streams on `write: false`, as `algo.fastRP` does
+    /// above.
     fn execute_node2vec(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
+        let target = self.embedding_write_target("algo.node2vec")?;
+        let embeddings = self.node2vec_embeddings(store)?;
+        self.emit_embeddings(store, tenant_id, "algo.node2vec", target.as_deref(), embeddings)
+    }
+
+    /// node2vec's config and run, shared by the write and the read path.
+    fn node2vec_embeddings(&self, store: &GraphStore) -> ExecutionResult<Vec<(NodeId, Vec<f64>)>> {
         Self::reject_unknown_config_keys(&self.args, "node2vec", &[
             "label", "edgeType", "embeddingDimension", "walkLength", "walksPerNode",
-            "returnFactor", "inOutFactor", "windowSize", "seed", "writeProperty",
+            "returnFactor", "inOutFactor", "windowSize", "seed", "writeProperty", "write",
         ])?;
         let view = self.structural_view(store)?;
         let mut config = crate::algo::Node2VecConfig::default();
-        let mut write_property = "embedding".to_string();
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
                 if let Some(v) = m.get("embeddingDimension") {
@@ -20573,30 +21703,15 @@ impl AlgorithmOperator {
                     config.window_size = *v as usize;
                 }
                 if let Some(PropertyValue::Integer(v)) = m.get("seed") { config.seed = *v as u64; }
-                if let Some(PropertyValue::String(s)) = m.get("writeProperty") { write_property = s.clone(); }
             }
         }
 
         let embeddings = crate::algo::node2vec(&view, &config);
-        for (idx, embedding) in embeddings.into_iter().enumerate() {
-            let id = NodeId::new(view.index_to_node[idx]);
-            let values: Vec<PropertyValue> = embedding.into_iter().map(PropertyValue::Float).collect();
-            store
-                .set_node_property(tenant_id, id, write_property.clone(), PropertyValue::Array(values.clone()))
-                .map_err(|e| ExecutionError::RuntimeError(format!(
-                    "algo.node2vec: failed to write `{write_property}`: {e}"
-                )))?;
-            if let Some(node) = store.get_node(id) {
-                let mut record = Record::new();
-                record.bind("node".to_string(), Value::Node(id, Box::new(node.clone())));
-                record.bind(
-                    "embedding".to_string(),
-                    Value::List(values.into_iter().map(Value::Property).collect()),
-                );
-                self.results.push(record);
-            }
-        }
-        Ok(())
+        Ok(embeddings
+            .into_iter()
+            .enumerate()
+            .map(|(idx, e)| (NodeId::new(view.index_to_node[idx]), e))
+            .collect())
     }
 
     /// CALL algo.pca(label, properties, nComponents?) YIELD node, projection
@@ -20888,6 +22003,40 @@ impl AlgorithmOperator {
         Ok(Some(number))
     }
 
+    /// `constraintHandling` from an `or.solve` config (OPT-10, #2266):
+    /// `penalty`, `repair` or `feasibility` (Deb's rules).
+    ///
+    /// The default is what each kind of solver did before: `penalty` for a
+    /// single-objective solver, whose fitness has always been objective plus
+    /// penalty, and `feasibility` for a multi-objective one, whose constrained
+    /// dominance is Deb's rules -- now given the budget and minimum, which it
+    /// was not before.
+    fn or_solve_constraint_handling(
+        config: &HashMap<String, PropertyValue>,
+        is_multi_objective: bool,
+    ) -> ExecutionResult<ConstraintHandling> {
+        match config
+            .get("constraintHandling")
+            .or_else(|| config.get("constraint_handling"))
+        {
+            None => Ok(if is_multi_objective {
+                ConstraintHandling::FeasibilityRules
+            } else {
+                ConstraintHandling::Penalty
+            }),
+            Some(PropertyValue::String(name)) => ConstraintHandling::from_name(name).ok_or_else(|| {
+                ExecutionError::bad_argument(format!(
+                    "or.solve: unknown constraintHandling `{name}`; use one of {}",
+                    ConstraintHandling::NAMES.join(", ")
+                ))
+            }),
+            Some(other) => Err(ExecutionError::bad_argument(format!(
+                "or.solve: `constraintHandling` must be one of {}, got {other:?}",
+                ConstraintHandling::NAMES.join(", ")
+            ))),
+        }
+    }
+
     /// Bind the four result-envelope columns every `or.solve` row carries
     /// (OPT-09, #1776), so the single- and multi-objective branches cannot
     /// drift apart on their names:
@@ -20928,7 +22077,8 @@ impl AlgorithmOperator {
         // reported success. Both spellings are accepted now, and anything else
         // is refused (#1341).
         Self::reject_unknown_config_keys(&self.args, "or.solve", &[
-            "algorithm", "bestKnown", "best_known", "budget", "costProperties", "costProperty",
+            "algorithm", "bestKnown", "best_known", "budget", "constraintHandling",
+            "constraint_handling", "costProperties", "costProperty",
             "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
             "max_iterations",
             "minTotal", "min", "min_total", "populationSize", "population_size",
@@ -20950,14 +22100,26 @@ impl AlgorithmOperator {
         let property = config_map.get("property").and_then(|v| v.as_string())
             .ok_or_else(|| ExecutionError::RuntimeError("Missing 'property' in config".to_string()))?;
         
-        let cfg_f = |a: &str, b: &str| {
-            config_map.get(a).or_else(|| config_map.get(b)).and_then(|v| v.as_float())
+        // A number, whole or not. `as_float` is `Some` for a `Float` only, so
+        // `{budget: 10}` used to read as no budget at all and `{upperBound:
+        // 10}` as the default 100 -- a constraint the caller wrote, silently
+        // dropped (OPT-10, #2266). Anything present and not a number is
+        // refused for the same reason.
+        let cfg_f = |a: &str, b: &str| -> ExecutionResult<Option<f64>> {
+            match config_map.get(a).map(|v| (a, v)).or_else(|| config_map.get(b).map(|v| (b, v))) {
+                None => Ok(None),
+                Some((_, PropertyValue::Float(f))) => Ok(Some(*f)),
+                Some((_, PropertyValue::Integer(i))) => Ok(Some(*i as f64)),
+                Some((key, other)) => Err(ExecutionError::bad_argument(format!(
+                    "or.solve: `{key}` must be a number, got {other:?}"
+                ))),
+            }
         };
         let cfg_i = |a: &str, b: &str| {
             config_map.get(a).or_else(|| config_map.get(b)).and_then(|v| v.as_integer())
         };
-        let min_val = cfg_f("lowerBound", "min").unwrap_or(0.0);
-        let max_val = cfg_f("upperBound", "max").unwrap_or(100.0);
+        let min_val = cfg_f("lowerBound", "min")?.unwrap_or(0.0);
+        let max_val = cfg_f("upperBound", "max")?.unwrap_or(100.0);
         // The solvers draw their starting population with
         // `gen_range(lower..upper)`, which panics on an empty or inverted
         // range, so `{lowerBound: 5, upperBound: 5}` died with "cannot sample
@@ -20986,12 +22148,13 @@ impl AlgorithmOperator {
             }
         }
 
-        let budget = config_map.get("budget").and_then(|v| v.as_float());
-        let min_total = cfg_f("minTotal", "min_total");
+        let budget = cfg_f("budget", "budget")?;
+        let min_total = cfg_f("minTotal", "min_total")?;
 
         let best_known = Self::or_solve_best_known(config_map)?;
         let is_multi_objective =
             Self::MULTI_OBJECTIVE_SOLVERS.contains(&algorithm) || cost_props.len() > 1;
+        let constraint_handling = Self::or_solve_constraint_handling(config_map, is_multi_objective)?;
         // A gap is a distance between two numbers; a Pareto front has a vector
         // per point and no single best known value. Ignoring the key would
         // report `gap: null` for a value the caller did supply. Checked before
@@ -21088,6 +22251,11 @@ impl AlgorithmOperator {
             lower: min_val,
             upper: max_val,
         };
+        // The constraint strategy (OPT-10, #2266), applied around the problem
+        // so every solver gets it. `resolve` below turns a solver's answer into
+        // the point actually evaluated: the repaired one under `repair`.
+        let problem = Constrained::new(problem, constraint_handling)
+            .map_err(|e| ExecutionError::bad_argument(format!("or.solve: {e}")))?;
 
         let solver_config = SolverConfig {
             population_size: pop_size,
@@ -21115,9 +22283,11 @@ impl AlgorithmOperator {
             };
             let total_time_ms = duration_ms(started.elapsed());
 
-            // Write back first individual from Pareto Front
-            if let Some(best) = res.pareto_front.first() {
-                for (i, &val) in best.variables.iter().enumerate() {
+            // Write back first individual from Pareto Front: the point it was
+            // scored at, which `repair` may have moved.
+            let resolved = res.pareto_front.first().map(|best| problem.resolve_multi(&best.variables));
+            if let Some(best) = &resolved {
+                for (i, &val) in best.iter().enumerate() {
                     let node_id = node_ids[i];
                     store
                         .set_node_property(
@@ -21144,14 +22314,20 @@ impl AlgorithmOperator {
             // breaks the budget, and reading it would report every point
             // feasible. `objective` is the raw objective vector, which here is
             // `fitness` itself: no penalty is added to it.
-            let (objective, feasible) = match res.pareto_front.first() {
+            // `objective` is the raw objective vector of the point written
+            // back: under `penalty` the solver's `fitness` has the penalty
+            // folded into every objective, so it is recomputed here without.
+            let (objective, feasible) = match &resolved {
                 Some(best) => (
                     Value::Property(PropertyValue::Array(
-                        best.fitness.iter().map(|&f| PropertyValue::Float(f)).collect(),
+                        MultiObjectiveProblem::objectives(problem.inner(), best)
+                            .into_iter()
+                            .map(PropertyValue::Float)
+                            .collect(),
                     )),
                     Value::Property(PropertyValue::Boolean(is_feasible(Problem::penalty(
-                        &problem,
-                        &best.variables,
+                        problem.inner(),
+                        best,
                     )))),
                 ),
                 None => (Value::Null, Value::Null),
@@ -21212,8 +22388,10 @@ impl AlgorithmOperator {
             };
             let total_time_ms = duration_ms(started.elapsed());
 
-            // 4. Write back results
-            for (i, &val) in result.best_variables.iter().enumerate() {
+            // 4. Write back results: the point the answer was scored at, which
+            // `repair` may have moved (OPT-10).
+            let best_variables = problem.resolve(&result.best_variables);
+            for (i, &val) in best_variables.iter().enumerate() {
                 let node_id = node_ids[i];
                 store
                     .set_node_property(
@@ -21255,8 +22433,8 @@ impl AlgorithmOperator {
             // The result envelope (OPT-09, #1776). `fitness` is objective plus
             // penalty, so on its own it cannot say whether the answer obeys the
             // budget and minimum: these columns separate the two.
-            let objective = problem.objective(&result.best_variables);
-            let feasible = is_feasible(problem.penalty(&result.best_variables));
+            let objective = Problem::objective(problem.inner(), &best_variables);
+            let feasible = is_feasible(Problem::penalty(problem.inner(), &best_variables));
             let gap = match best_known {
                 Some(best) => Value::Property(PropertyValue::Float(gap_to_best_known(objective, best))),
                 None => Value::Null,
@@ -21556,7 +22734,9 @@ impl PhysicalOperator for AlgorithmOperator {
             // `Query::is_write()`; the message stays for a caller who builds a read
             // executor directly.
             if let Some(why) = Self::mutating_procedure_refusal(&self.name) {
-                return Err(ExecutionError::RuntimeError(why.to_string()));
+                if !Self::embedding_streams(&self.name, &self.args) {
+                    return Err(ExecutionError::RuntimeError(why.to_string()));
+                }
             }
             // Likewise a write-back call (ALGO-06), which `Query::is_write()`
             // routes to the write executor.
@@ -21640,9 +22820,14 @@ impl PhysicalOperator for AlgorithmOperator {
                 "effectivesize" => self.execute_structural_holes(store, true)?,
                 "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
                 "reciprocity" => self.execute_reciprocity(store)?,
-                // The three mutating procedures are refused from `MUTATING_PROCEDURES`
-                // before this match, so that the refusal and the routing decision read
-                // the same list (#1468).
+                "split" | "traintestsplit" => self.execute_split(store)?,
+                "splitleakage" | "leakagecheck" => self.execute_split_leakage(store)?,
+                // An embedding reaches here only with `write: false` (#1736):
+                // without it the refusal above has already fired.
+                "fastrp" | "node2vec" => self.execute_embedding_stream(store)?,
+                // `or.solve`, the remaining mutating procedure, is refused from
+                // `MUTATING_PROCEDURES` before this match, so that the refusal and
+                // the routing decision read the same list (#1468).
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             self.check_projection_used()?;
@@ -21747,6 +22932,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "effectivesize" => self.execute_structural_holes(store, true)?,
                 "constraint" | "burtconstraint" => self.execute_structural_holes(store, false)?,
                 "reciprocity" => self.execute_reciprocity(store)?,
+                "split" | "traintestsplit" => self.execute_split(store)?,
+                "splitleakage" | "leakagecheck" => self.execute_split_leakage(store)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             // Before the write-back, so a call refused here writes nothing.

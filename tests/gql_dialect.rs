@@ -178,6 +178,25 @@ fn gql_does_not_smuggle_an_unbounded_walk_past_validation() {
     );
 }
 
+/// Under GQL the bare `*` is an unbounded WALK, so a single-path selector is what
+/// makes it answerable (#1648): one walk per endpoint pair. GQL reads `*` as `{0,}`,
+/// so the source is an end at length 0, and the answer is a, b and c once each.
+#[test]
+fn gql_answers_a_single_path_selector_over_an_unbounded_walk() {
+    let s = fixture();
+    for q in [
+        "MATCH ANY SHORTEST (x:N)-[:E*]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid",
+        "MATCH ANY (x:N)-[:E*]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid",
+    ] {
+        assert_eq!(rows(&s, q, Dialect::Gql), 3, "{q}");
+    }
+    // And ALL SHORTEST is still refused, rather than run past validation.
+    let q = "MATCH ALL SHORTEST (x:N)-[:E*]->(y:N) WHERE x.name = 'a' RETURN x.eid, y.eid";
+    assert!(QueryEngine::new()
+        .execute_with_dialect(q, &s, Dialect::Gql)
+        .is_err());
+}
+
 /// The same pattern with a restrictor named out loud stays runnable in both dialects:
 /// the rewrite only touches what the parser defaulted, so an explicit TRAIL is still
 /// bounded by the edge count.

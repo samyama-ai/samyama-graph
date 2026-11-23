@@ -129,6 +129,58 @@ fn candidate_plans_are_numbered_as_cypher_plan_takes_them() {
 }
 
 #[test]
+fn each_candidate_not_run_says_why() {
+    let reasons = |chosen: usize, costs: &[f64]| -> Vec<PropertyValue> {
+        let diag = PlanDiagnostics {
+            candidates_evaluated: costs.len(),
+            chosen_plan_cost: costs[chosen],
+            candidate_costs: costs.iter().map(|c| ("p".to_string(), *c)).collect(),
+            chosen,
+        };
+        let fields: HashMap<_, _> = candidates(Some(diag)).into_iter().collect();
+        let PropertyValue::Array(plans) = &fields["candidate_plans"] else { panic!() };
+        plans.iter().map(|p| field(p, "rejected_because").clone()).collect()
+    };
+    let s = |t: &str| PropertyValue::String(t.into());
+    // Cheapest runs; the rest cost more, and one ties with it.
+    assert_eq!(
+        reasons(0, &[2.0, 5.0, 2.0]),
+        vec![
+            PropertyValue::Null,
+            s("estimated cost 5.00 against the chosen plan's 2.00 (2.50x)"),
+            s("same estimated cost as the chosen plan, which was enumerated first"),
+        ]
+    );
+    // `CYPHER plan=2` overrides the ranking: even the cheaper plan was passed over for it.
+    assert_eq!(
+        reasons(1, &[2.0, 5.0, 9.0]),
+        vec![s("CYPHER plan=2 chose plan 2 instead"), PropertyValue::Null, s("CYPHER plan=2 chose plan 2 instead")]
+    );
+    // A zero-cost chosen plan gets no ratio rather than an infinite one.
+    assert_eq!(reasons(0, &[0.0, 3.0])[1], s("estimated cost 3.00 against the chosen plan's 0.00"));
+}
+
+#[test]
+fn every_node_has_memory_bytes_and_profile_fills_it_where_rows_were_held() {
+    let store = people();
+    // ORDER BY buffers every row it sorts; the scan under it buffers none.
+    let q = "MATCH (p:Person) RETURN p.age AS age ORDER BY age DESC";
+    let mut ran = Vec::new();
+    let profiled = plan_of(&store, &format!("PROFILE (FORMAT JSON) {q}"));
+    walk(field(&profiled, "root"), &mut ran);
+    let held: Vec<_> = ran.iter().map(|n| field(n, "memory_bytes").clone()).collect();
+    assert!(held.iter().any(|m| matches!(m, PropertyValue::Integer(b) if *b > 0)), "{held:?}");
+    assert!(held.iter().all(|m| matches!(m, PropertyValue::Integer(_) | PropertyValue::Null)), "{held:?}");
+    let leaf = ran.iter().find(|n| children(n).is_empty()).unwrap();
+    assert_eq!(field(leaf, "memory_bytes"), &PropertyValue::Null, "a scan holds no rows: {leaf:?}");
+    // EXPLAIN runs nothing: the key is present and null on every node.
+    let explained = plan_of(&store, &format!("EXPLAIN (FORMAT JSON) {q}"));
+    let mut planned = Vec::new();
+    walk(field(&explained, "root"), &mut planned);
+    assert!(planned.iter().all(|n| field(n, "memory_bytes") == &PropertyValue::Null));
+}
+
+#[test]
 fn profile_json_reports_what_ran() {
     let store = people();
     assert!(matches!(plan_of(&store, &format!("PROFILE {QUERY}")), PropertyValue::String(_)));
@@ -190,4 +242,47 @@ fn explain_json_on_a_write_describes_it_and_writes_nothing() {
     assert_eq!(field(json, "kind"), &PropertyValue::String("explain".into()));
     assert!(matches!(field(field(json, "root"), "operator"), PropertyValue::String(_)));
     assert_eq!(store.node_count(), before, "EXPLAIN must not run the write");
+}
+
+
+/// A write followed by `WITH` is parsed by the general clause pipeline, not the
+/// shape-specific rules: the path the merge agent's hold on #2059 named.
+const PIPELINE: &str = "MATCH (p:Person) SET p.seen = true WITH p RETURN p.age AS age";
+
+#[test]
+fn profile_on_the_clause_pipeline_is_a_profile_not_an_explain() {
+    for prefix in ["PROFILE", "PROFILE (FORMAT JSON)"] {
+        let q = parse_query(&format!("{prefix} {PIPELINE}")).unwrap();
+        assert!(q.needs_clause_pipeline, "the fixture must take the pipeline path");
+        assert!(q.profile && !q.explain, "{prefix}: profile={} explain={}", q.profile, q.explain);
+    }
+    let q = parse_query(&format!("EXPLAIN (FORMAT JSON) {PIPELINE}")).unwrap();
+    assert!(q.explain && !q.profile && q.plan_json);
+}
+
+#[test]
+fn the_write_executor_refuses_profile_json_rather_than_answering_something_else() {
+    // It does not profile. Answering with an EXPLAIN document, or running the
+    // statement and returning its rows, would both be read as a profile.
+    for cypher in [
+        format!("PROFILE (FORMAT JSON) {PIPELINE}"),
+        "PROFILE (FORMAT JSON) CREATE (n:Person {age: 50}) RETURN n".to_string(),
+    ] {
+        let mut store = people();
+        let q = parse_query(&cypher).unwrap();
+        let err = crate::query::executor::MutQueryExecutor::new(&mut store, "default".to_string())
+            .execute(&q)
+            .expect_err(&cypher);
+        assert!(err.to_string().contains("EXPLAIN (FORMAT JSON)"), "{cypher}: {err}");
+        assert_eq!(store.node_count(), 3, "{cypher} wrote");
+        let seen = parse_query("MATCH (p:Person) WHERE p.seen = true RETURN p").unwrap();
+        assert!(QueryExecutor::new(&store).execute(&seen).unwrap().records.is_empty(), "{cypher} wrote");
+    }
+    // EXPLAIN (FORMAT JSON) of the same statement still answers, and writes nothing.
+    let mut store = people();
+    let q = parse_query(&format!("EXPLAIN (FORMAT JSON) {PIPELINE}")).unwrap();
+    let b = crate::query::executor::MutQueryExecutor::new(&mut store, "default".to_string())
+        .execute(&q)
+        .unwrap();
+    assert_eq!(b.columns, vec!["plan".to_string()]);
 }
