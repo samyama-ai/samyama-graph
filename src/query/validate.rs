@@ -25,6 +25,10 @@ pub enum ValidationError {
     DuplicateColumn(String),
     UnionColumnMismatch { left: Vec<String>, right: Vec<String> },
     MixedUnionAndUnionAll,
+    /// The query ends with a `WITH` (#2358): openCypher requires a `RETURN`,
+    /// an updating clause or a procedure call last. Neo4j: "Query cannot
+    /// conclude with WITH", InvalidClauseComposition.
+    ConcludesWithWith,
     CreateOnBoundVariable(String),
     CreateRelationshipWithoutType,
     CreateUndirectedRelationship,
@@ -136,6 +140,7 @@ impl ValidationError {
             Self::DuplicateColumn { .. } => c::CLAUSE_CONFLICT,
             Self::UnionColumnMismatch { .. } => c::CLAUSE_CONFLICT,
             Self::MixedUnionAndUnionAll { .. } => c::CLAUSE_CONFLICT,
+            Self::ConcludesWithWith => c::CLAUSE_CONFLICT,
             Self::UnaliasedWithItem { .. } => c::CLAUSE_CONFLICT,
             Self::PatternInProjection { .. } => c::CLAUSE_CONFLICT,
             Self::ExistsSubqueryPosition => c::CLAUSE_CONFLICT,
@@ -342,6 +347,11 @@ impl std::fmt::Display for ValidationError {
             Self::MixedUnionAndUnionAll => write!(
                 f,
                 "Cannot mix UNION and UNION ALL in the same query"
+            ),
+            Self::ConcludesWithWith => write!(
+                f,
+                "Query cannot conclude with WITH (must be a RETURN clause, an update clause, \
+                 a unit subquery call, or a procedure call with no YIELD)"
             ),
             Self::CreateOnBoundVariable(name) => write!(
                 f,
@@ -2917,7 +2927,48 @@ fn validate_unbounded_walk_is_refused(query: &Query) -> Result<(), ValidationErr
     Ok(())
 }
 
+/// A query may not end with `WITH` (#2358).
+///
+/// `MATCH (m) WITH m.city AS city, count(m) AS n ORDER BY n DESC LIMIT 1` used
+/// to run and return a row with a column `m`, which that `WITH` did not even
+/// keep: an answer-shaped reply to a statement openCypher refuses. NLQ models
+/// write this shape, so a wrong query looked like a right one.
+///
+/// Both AST shapes are read. In the clause pipeline the last clause decides,
+/// past a `WHERE` that belongs to the `WITH`. In the older shape a `WITH` is
+/// last when nothing reads, writes, calls or returns after it.
+fn validate_query_conclusion(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+    let ends_with_with = if !query.clauses.is_empty() {
+        matches!(
+            query.clauses.iter().rev().find(|c| !matches!(c, Clause::Where(_))),
+            Some(Clause::With(_))
+        )
+    } else {
+        // `with_clause` is always the latest WITH; earlier ones and what
+        // followed them are in `extra_with_stages`. So only what follows the
+        // latest one is read here: the MATCHes past `with_split_index` and an
+        // UNWIND after it.
+        let reads_after_with = query.with_split_index.is_some_and(|i| query.match_clauses.len() > i)
+            || !query.post_with_unwind_clauses.is_empty();
+        query.with_clause.is_some()
+            && !reads_after_with
+            && query.return_clause.is_none()
+            && query.write_clause().is_none()
+            && query.merge_clause.is_none()
+            && query.foreach_clause.is_none()
+            && query.call_clause.is_none()
+            && query.call_subquery.is_none()
+            && query.correlated_call.is_none()
+    };
+    if ends_with_with {
+        return Err(ValidationError::ConcludesWithWith);
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_query_conclusion(query)?;
     validate_exists_body_positions(query)?;
     validate_unbounded_walk_is_refused(query)?;
     validate_variables_are_bound(query)?;
