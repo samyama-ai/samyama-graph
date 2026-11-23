@@ -7,6 +7,9 @@ import type {
   SampleResult,
   CsvImportResult,
   JsonImportResult,
+  IconStyle,
+  IconStyleResponse,
+  PutIconsResult,
 } from "./types.js";
 import { HttpTransport } from "./http-client.js";
 
@@ -142,6 +145,16 @@ export class SamyamaClient {
   /** Get graph schema (node types, edge types, indexes, constraints, statistics) */
   async schema(): Promise<GraphSchema> {
     return this.http.schema();
+  }
+
+  /** The graph's node style: icon, colour and caption per label (#2029) */
+  async getIcons(graph: string = "default"): Promise<IconStyleResponse> {
+    return this.http.getIcons(graph);
+  }
+
+  /** Replace the graph's node style; the next snapshot export carries it (#2029) */
+  async putIcons(style: IconStyle, graph: string = "default"): Promise<PutIconsResult> {
+    return this.http.putIcons(style, graph);
   }
 
   /**

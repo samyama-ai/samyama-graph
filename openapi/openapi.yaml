@@ -1366,7 +1366,17 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '200':
-          description: The snapshot was imported
+          description: >
+            The snapshot was imported. `icons` reports the style the header
+            carried (#2029), which replaces the graph's style; a header without
+            one clears it.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  icons:
+                    $ref: '#/components/schemas/IconReport'
 
   /api/enrich/policy:
     post:
@@ -1805,6 +1815,99 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /api/icons:
+    get:
+      operationId: getIcons
+      summary: The graph's node style (icons, colours, captions)
+      description: >
+        The style (`samyama.icons/1`) the last snapshot import loaded from its
+        header, or the last one set with `PUT`. A graph with no style answers
+        with empty `nodes` and `edges` and `source: none`; clients then draw
+        every label by their own rules. The next snapshot export writes this
+        style into the header.
+      parameters:
+        - name: graph
+          in: query
+          required: false
+          schema:
+            type: string
+            default: default
+          description: Target graph/tenant name
+      responses:
+        '200':
+          description: The graph's style
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IconStyleResponse'
+        '400':
+          description: A graph other than the one this build serves
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The subject may not read this graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      operationId: putIcons
+      summary: Replace the graph's node style
+      description: >
+        Replaces the whole style; `format` may be left out. Unlike a snapshot
+        import, which skips an invalid entry with a warning, any mistake refuses
+        the body and changes nothing. Labels the graph does not have yet are
+        kept and listed in `icons.unknown_labels`. An empty style clears it. At
+        most 64 KiB and 1024 entries. Requires write access to the graph.
+      parameters:
+        - name: graph
+          in: query
+          required: false
+          schema:
+            type: string
+            default: default
+          description: Target graph/tenant name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IconStyle'
+      responses:
+        '200':
+          description: The style after the replacement, and what it covers
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/IconStyleResponse'
+                  - type: object
+                    properties:
+                      icons:
+                        $ref: '#/components/schemas/IconReport'
+        '400':
+          description: >
+            `invalid_style`: the body is not JSON or not a valid style; `problems`
+            lists every mistake
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IconStyleError'
+        '403':
+          description: The subject may not write to this graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: '`style_too_large`: the body is over 64 KiB'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IconStyleError'
+
   /api/structure:
     get:
       operationId: getStructure
@@ -2032,6 +2135,95 @@ components:
           schema:
             $ref: '#/components/schemas/ErrorResponse'
   schemas:
+    IconStyle:
+      type: object
+      description: >
+        A graph's node style, `samyama.icons/1` (#2029). Every field of an entry
+        is optional; a label left out is drawn by the client's own rules.
+      properties:
+        format:
+          type: string
+          enum: [samyama.icons/1]
+        nodes:
+          type: object
+          description: Keyed by node label.
+          additionalProperties:
+            type: object
+            additionalProperties: false
+            properties:
+              color:
+                type: string
+                pattern: '^#[0-9A-Fa-f]{6}$'
+              icon:
+                type: string
+                pattern: '^lucide:[A-Za-z0-9]{1,64}$'
+                description: An icon name, never image data.
+              caption:
+                type: string
+                maxLength: 128
+                description: The property shown as the node's text.
+        edges:
+          type: object
+          description: Keyed by relationship type.
+          additionalProperties:
+            type: object
+            additionalProperties: false
+            properties:
+              color:
+                type: string
+                pattern: '^#[0-9A-Fa-f]{6}$'
+      example:
+        format: samyama.icons/1
+        nodes:
+          Country: { color: '#2563EB', icon: 'lucide:Flag', caption: name }
+        edges:
+          IN_REGION: { color: '#94A3B8' }
+    IconStyleResponse:
+      allOf:
+        - $ref: '#/components/schemas/IconStyle'
+        - type: object
+          properties:
+            source:
+              type: string
+              enum: [header, api, none]
+              description: >
+                Where the style came from: a snapshot header, `PUT /api/icons`,
+                or nowhere (no style).
+    IconReport:
+      type: object
+      description: What a style covers of the graph's schema.
+      properties:
+        source:
+          type: string
+          enum: [header, api, none]
+        styled:
+          type: integer
+        unstyled:
+          type: array
+          items: { type: string }
+        unknown_labels:
+          type: array
+          items: { type: string }
+        unknown_edge_types:
+          type: array
+          items: { type: string }
+        warnings:
+          type: array
+          items: { type: string }
+          description: Entries or fields skipped on import, and why.
+    IconStyleError:
+      type: object
+      properties:
+        code:
+          type: string
+          enum: [invalid_style, style_too_large]
+        error:
+          type: string
+        problems:
+          type: array
+          items: { type: string }
+        limit:
+          type: integer
     QueryRequest:
       type: object
       required:
