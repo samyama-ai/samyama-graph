@@ -1756,6 +1756,27 @@ components:
             Return `snapshot_hash`, the content hash of the graph the statement
             saw (TRUST-06). Opt-in, because it is one pass over the graph the
             first time after a write.
+        plan:
+          type: integer
+          minimum: 1
+          description: >-
+            Run the N-th cheapest candidate plan of each MATCH (LANG-06), exactly
+            as if the query began with `CYPHER plan=N`. A plan the query does not
+            have is a 400 that says how many it has, never plan 1. EXPLAIN under
+            `planner: cost` prints `Forceable plans: K`, the range to loop over.
+        planner:
+          type: string
+          enum: [cost, legacy]
+          description: >-
+            `CYPHER planner=…` as a field: `cost` plans every MATCH with the
+            cost-based enumerator, `legacy` with the default planner. Any other
+            value is a 400.
+        runtime:
+          type: string
+          enum: [volcano, interpreted]
+          description: >-
+            `CYPHER runtime=…` as a field. There is one runtime, so this only
+            refuses (400) a runtime the engine does not have.
 
     QueryResponse:
       type: object
