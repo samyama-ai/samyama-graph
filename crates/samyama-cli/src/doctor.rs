@@ -956,6 +956,9 @@ mod tests {
         assert_eq!(check_snap_data_dir(&none, Path::new("/var/snap/samyama/x1/data")).verdict, Verdict::Skipped);
     }
 
+    // Unix only: Snap exists only on Linux, and these compare paths written
+    // with `/`, which `Path::join` on Windows writes with a backslash (#2203).
+    #[cfg(unix)]
     #[test]
     fn a_disconnected_removable_media_plug_says_how_to_connect_it() {
         let env = snap_env(IN_SNAP);
@@ -991,6 +994,9 @@ mod tests {
         assert!(c.detail.contains("samyama_test:removable-media"), "{}", c.detail);
     }
 
+    // Unix only: Snap exists only on Linux, and these compare paths written
+    // with `/`, which `Path::join` on Windows writes with a backslash (#2203).
+    #[cfg(unix)]
     #[test]
     fn a_data_directory_under_snap_data_warns_and_names_snap_common() {
         let env = snap_env(IN_SNAP);
