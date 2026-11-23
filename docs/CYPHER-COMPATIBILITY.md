@@ -149,6 +149,7 @@ One thing, verified:
 | | Null propagation — arithmetic | ✅ | `1 + null` → `null`; `p.a + p.missing` nulls only its own row. Fixed in #457 |
 | | Temporal types | ✅ | `date()`, component access on a variable **and directly on an expression** (`date('2024-05-06').year`, fixed for LANG-16), arithmetic. No temporal index |
 | | Duration arithmetic | ✅ | |
+| | `x WITHIN <duration>` | ✅ | Not openCypher. True when `x` falls in `[now - duration, now]`; `x` is a time, or a series (a list of samples, each a time or a `[time, value, ...]` list), which is within when any sample is. Binds like a comparison. Null when it cannot be decided (a null `x`, or a sample that does not compare with a datetime), so `NOT x WITHIN d` skips entities with no time; a non-duration window is an error. Also callable as `temporal.within(x, d)`. A filter, not an index seek (NDS-03b, #1665, `tests/within_time_predicate.rs`) |
 | **Geospatial** | `point({latitude, longitude})` / `point({x, y})` | ✅ | Returns a map with `x`/`y`, the `latitude`/`longitude` aliases, `srid` and `crs`. Not a distinct type: a point is a map, so it round-trips through property storage and there is no type error for a map that merely looks like one |
 | | `point.distance(a, b)` / `distance(a, b)` | ✅ | Metres for WGS-84, haversine on a sphere (~0.5% off an ellipsoid); Euclidean for cartesian. Mixing the two is an error, not a number |
 | | `point.withinBBox(p, lowerLeft, upperRight)` | ✅ | Closed on the boundary |

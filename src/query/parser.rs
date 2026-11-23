@@ -81,7 +81,8 @@ static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         // NOT sits between AND and the comparisons: `NOT a STARTS WITH b` negates the
         // comparison, while `NOT a AND b` still groups as `(NOT a) AND b`.
         .op(Op::prefix(Rule::not_op))
-        .op(Op::infix(Rule::comparison_op, Assoc::Left))
+        // `WITHIN` is a comparison: `a WITHIN d AND b` groups as `(a WITHIN d) AND b`.
+        .op(Op::infix(Rule::comparison_op, Assoc::Left) | Op::infix(Rule::within_op, Assoc::Left))
         // `IN` binds **tighter than every comparison operator**, so
         // `a < b IN c` is `a < (b IN c)` and not `(a < b) IN c` (#833).
         //
@@ -3002,6 +3003,13 @@ fn parse_expression(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression
             let left = left?;
             let right = right?;
             
+            if op.as_rule() == Rule::within_op {
+                return Ok(Expression::Function {
+                    name: "temporal.within".to_string(),
+                    args: vec![left, right],
+                    distinct: false,
+                });
+            }
             let op = match op.as_rule() {
                 Rule::or_op => BinaryOp::Or,
                 Rule::xor_op => BinaryOp::Xor,
