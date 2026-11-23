@@ -28,6 +28,11 @@ fn catalogue() -> Vec<(ValidationError, &'static str, &'static str)> {
             "Cannot mix UNION and UNION ALL",
         ),
         (
+            V::ConcludesWithWith,
+            c::CLAUSE_CONFLICT,
+            "Query cannot conclude with WITH",
+        ),
+        (
             V::CreateOnBoundVariable("n".into()),
             c::INVALID_WRITE_PATTERN,
             "Variable `n` already declared",
