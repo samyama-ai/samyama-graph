@@ -4836,6 +4836,21 @@ impl QueryPlanner {
             // by name, and gets it.
             return self.plan_match(match_clause, where_clause, store);
         }
+        let nearest_pending = self.nearest.lock().unwrap().is_some();
+        if graph_native
+            && !asked_for_cost
+            && (nearest_pending || where_clause.is_some_and(|w| Self::uses_default_only_index(&w.predicate)))
+        {
+            // The same, for predicates only the default planner answers from an
+            // index: `subsumes()` from a hierarchy (OEH) index and the
+            // `point.*` functions from a point index (NDS-04). The enumerator
+            // plans them as generic filters, which on a hierarchy query meant
+            // a plan that ran past its deadline and on a point query a full
+            // scan (hier_cross_hierarchy, index_definitions_survive_restart).
+            // A pending nearest scan (`ORDER BY point.distance(...) LIMIT k`,
+            // found before the MATCH is planned) is consumed only there too.
+            return self.plan_match(match_clause, where_clause, store);
+        }
         if graph_native {
             match self.plan_match_native(match_clause, where_clause, store, 0) {
                 Ok(plan) => {
@@ -4855,6 +4870,23 @@ impl QueryPlanner {
             }
         } else {
             self.plan_match(match_clause, where_clause, store)
+        }
+    }
+
+    /// Whether a WHERE calls a function only the default planner answers from
+    /// an index: `subsumes` (hierarchy index) or `point.*` (point index). Looks
+    /// through AND/OR/NOT and comparisons, where those planners find them.
+    fn uses_default_only_index(e: &Expression) -> bool {
+        match e {
+            Expression::Function { name, args, .. } => {
+                let n = name.to_ascii_lowercase();
+                n == "subsumes" || n.starts_with("point.") || args.iter().any(Self::uses_default_only_index)
+            }
+            Expression::Binary { left, right, .. } => {
+                Self::uses_default_only_index(left) || Self::uses_default_only_index(right)
+            }
+            Expression::Unary { expr, .. } => Self::uses_default_only_index(expr),
+            _ => false,
         }
     }
 
