@@ -16,6 +16,31 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
+pyo3::create_exception!(
+    samyama,
+    RequestTimeoutError,
+    PyRuntimeError,
+    "The server did not answer in time (#2175).\n\n\
+     If the request was a write, the server may or may not have applied it, so \
+     it was not sent again. Retry it only if the statement is safe to run twice \
+     (MERGE on a key, a write under a unique constraint, SET to a fixed value). \
+     A subclass of RuntimeError, so existing `except RuntimeError` handlers \
+     still catch it."
+);
+
+/// The Python exception for an SDK error.
+///
+/// A timeout raises `RequestTimeoutError`, everything else `RuntimeError`.
+/// Both used to raise `RuntimeError: HTTP error: error sending request`, so a
+/// caller could not tell a write that may have happened from one that
+/// certainly did not (#2175).
+fn sdk_err(e: samyama_sdk::SamyamaError) -> PyErr {
+    match e {
+        samyama_sdk::SamyamaError::Timeout(_) => RequestTimeoutError::new_err(e.to_string()),
+        e => PyRuntimeError::new_err(e.to_string()),
+    }
+}
+
 /// Create a shared tokio runtime for all async operations
 fn get_runtime() -> &'static Runtime {
     use std::sync::OnceLock;
@@ -205,7 +230,7 @@ impl QueryStream {
                     Ok(row) => row,
                     Err(e) => {
                         slf.inner = None;
-                        return Err(PyRuntimeError::new_err(e.to_string()));
+                        return Err(sdk_err(e));
                     }
                 }
             }
@@ -540,7 +565,7 @@ impl SamyamaClient {
         };
         match result {
             Ok(r) => convert_query_result(r),
-            Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
+            Err(e) => Err(sdk_err(e)),
         }
     }
 
@@ -561,7 +586,7 @@ impl SamyamaClient {
         };
         match result {
             Ok(r) => convert_query_result(r),
-            Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
+            Err(e) => Err(sdk_err(e)),
         }
     }
 
@@ -587,7 +612,7 @@ impl SamyamaClient {
         match &*self.inner {
             ClientInner::Remote(c) => {
                 let stream = wait(py, cancel.as_ref(), c.query_stream(graph, cypher))?
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    .map_err(|e| sdk_err(e))?;
                 Ok(QueryStream {
                     columns: stream.columns().to_vec(),
                     inner: Some(StreamSource::Remote(stream)),
@@ -596,7 +621,7 @@ impl SamyamaClient {
             }
             ClientInner::Embedded(c) => {
                 let result = wait(py, cancel.as_ref(), c.query_readonly(graph, cypher))?
-                    .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+                    .map_err(|e| sdk_err(e))?;
                 Ok(QueryStream {
                     columns: result.columns,
                     inner: Some(StreamSource::Buffered(result.records.into_iter())),
@@ -660,7 +685,7 @@ impl SamyamaClient {
                 wait(py, cancel.as_ref(), c.nlq_with(question, &settings))?
             }
         };
-        result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        result.map_err(|e| sdk_err(e))
     }
 
     /// Get server status
@@ -676,7 +701,7 @@ impl SamyamaClient {
                 nodes: s.storage.nodes,
                 edges: s.storage.edges,
             }),
-            Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
+            Err(e) => Err(sdk_err(e)),
         }
     }
 
@@ -686,7 +711,7 @@ impl SamyamaClient {
             ClientInner::Embedded(c) => wait(py, None, c.ping())?,
             ClientInner::Remote(c) => wait(py, None, c.ping())?,
         };
-        result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        result.map_err(|e| sdk_err(e))
     }
 
     /// Delete a graph
@@ -696,7 +721,7 @@ impl SamyamaClient {
             ClientInner::Embedded(c) => wait(py, None, c.delete_graph(graph))?,
             ClientInner::Remote(c) => wait(py, None, c.delete_graph(graph))?,
         };
-        result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        result.map_err(|e| sdk_err(e))
     }
 
     /// List graphs
@@ -708,7 +733,7 @@ impl SamyamaClient {
                 ClientInner::Remote(c) => rt.block_on(c.list_graphs()),
             }
         });
-        result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+        result.map_err(|e| sdk_err(e))
     }
 
     // ========================================================================
@@ -998,7 +1023,7 @@ impl SamyamaClient {
             _ => DistanceMetric::Cosine,
         };
         py.detach(|| rt.block_on(client.create_vector_index(label, property, dimensions, dist)))
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| sdk_err(e))
     }
 
     /// Add a vector for a node in a vector index.
@@ -1013,7 +1038,7 @@ impl SamyamaClient {
         let client = self.require_embedded()?;
         let rt = get_runtime();
         py.detach(|| rt.block_on(client.add_vector(label, property, NodeId(node_id), &vector)))
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))
+            .map_err(|e| sdk_err(e))
     }
 
     /// Search for k nearest neighbors. Returns list of (node_id, distance) tuples.
@@ -1029,7 +1054,7 @@ impl SamyamaClient {
         let client = self.require_embedded()?;
         let rt = get_runtime();
         let results = py.detach(|| rt.block_on(client.vector_search(label, property, &query_vector, k)))
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+            .map_err(|e| sdk_err(e))?;
         Ok(results.into_iter().map(|(nid, dist)| (nid.0, dist)).collect())
     }
 
@@ -1050,5 +1075,9 @@ fn samyama(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<QueryStream>()?;
     m.add_class::<CancelToken>()?;
     m.add("RequestCancelled", m.py().get_type::<RequestCancelled>())?;
+    m.add(
+        "RequestTimeoutError",
+        m.py().get_type::<RequestTimeoutError>(),
+    )?;
     Ok(())
 }
