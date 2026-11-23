@@ -29,8 +29,9 @@ pub enum ValidationError {
     CreateRelationshipWithoutType,
     CreateUndirectedRelationship,
     CreateVariableLengthRelationship,
-    /// `WALK` with an unbounded quantifier under `ALL` (#1141). Its own variant
-    /// rather than a generic message, so a caller can branch on it.
+    /// `WALK` with an unbounded quantifier under `ALL` or `ALL SHORTEST` (#1141,
+    /// #1648). Its own variant rather than a generic message, so a caller can branch
+    /// on it.
     UnboundedWalk,
     CreateOnBoundRelationship(String),
     MergeRelationshipWithoutType,
@@ -364,12 +365,11 @@ impl std::fmt::Display for ValidationError {
                 "an unbounded WALK under ALL has no finite answer: a walk may reuse \
                  edges and nodes, so any cycle makes the result infinite, and \
                  ISO/IEC 39075 forbids the combination. Give the quantifier an upper \
-                 bound (`*1..4`), or use TRAIL, ACYCLIC or SIMPLE, each of which is \
-                 finite by construction. A selector does not rescue it in this \
-                 engine: candidates are enumerated before the selector is applied, \
-                 so an unbounded walk never reaches it. Bounding the search from a \
-                 selector needs a traversal that can re-reach its own start node, \
-                 which the first-reach one cannot (#1648)"
+                 bound (`*1..4`), use TRAIL, ACYCLIC or SIMPLE, each of which is \
+                 finite by construction, or select one path per endpoint pair with \
+                 ANY or ANY SHORTEST. ALL SHORTEST is finite in the standard but not \
+                 here: its candidates are enumerated before the selector is applied, \
+                 so an unbounded walk never reaches it (#1648)"
             ),
             Self::CreateOnBoundRelationship(name) => write!(
                 f,
@@ -2878,16 +2878,22 @@ fn validate_function_argument_kinds(query: &Query) -> Result<(), ValidationError
 /// Refusing is the alternative to returning a capped subset and calling it the
 /// answer, which is the silent-wrong-answer class this engine treats as P0.
 ///
-/// **Refused under every selector, not only `ALL`.** `ANY SHORTEST WALK` is finite
-/// in the standard — a shortest path cannot repeat a node — but it is not finite
-/// *here*, because this implementation enumerates the candidates and then applies
-/// the selector, so the selector never gets a turn. Allowing it hung the query.
-/// Making it work needs shortest-first traversal, which is a different operator;
-/// refusing until then is the honest position, and the message says which limit is
+/// **`ANY` and `ANY SHORTEST` are answered (#1648).** The standard lets a selector
+/// bound an unbounded quantifier, and the single-path ones need no candidates: the
+/// operator searches shortest-first over `(node, min(depth, min_hops))` and keeps
+/// the first walk to reach each end node, which terminates on the state count
+/// rather than on a length (`VarLengthExpandOperator::expand_shortest_walks`).
+///
+/// **`ALL SHORTEST` is still refused.** It is finite in the standard, but it wants
+/// every minimum-length walk, and this implementation answers it by enumerating the
+/// candidates and then applying the selector, so on an unbounded walk the selector
+/// never gets a turn. Allowing it hung the query. The message says which limit is
 /// being hit.
 fn validate_unbounded_walk_is_refused(query: &Query) -> Result<(), ValidationError> {
     let mut refuse = |path: &crate::query::ast::PathPattern| {
-        if path.restrictor != crate::query::ast::PathRestrictor::Walk {
+        if path.restrictor != crate::query::ast::PathRestrictor::Walk
+            || path.selector.bounds_an_unbounded_search()
+        {
             return Ok(());
         }
         for seg in &path.segments {
