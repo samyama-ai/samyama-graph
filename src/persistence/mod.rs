@@ -55,6 +55,7 @@ pub mod health;
 pub mod storage;
 pub mod tenant;
 pub mod wal;
+pub mod writer;
 
 pub use storage::{PersistentStorage, StorageError, StorageResult};
 pub use tenant::{
@@ -62,12 +63,26 @@ pub use tenant::{
     AutoEmbedConfig, NLQConfig, AgentConfig, ToolConfig, LLMProvider,
 };
 pub use wal::{Wal, WalEntry, WalError, WalResult};
+pub use writer::{PersistedWriteError, PersistedWriter};
 
 use crate::graph::{Edge, Node, PropertyMap, GraphStore};
 use std::path::Path;
 use std::sync::Arc;
 // warn removed - was unused import causing compiler warning
 use tracing::{info, warn};
+
+/// Why [`PersistenceManager::commit_session_transaction_detailed`] refused a
+/// COMMIT (#2241).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitRefusal {
+    /// What the client of a COMMIT is told.
+    pub message: String,
+    /// Whether memory and disk still hold the same rows. True when the
+    /// transaction was rolled back and the disk repaired; false when the
+    /// rollback or the repair failed, which leaves part of the transaction in
+    /// one and not the other until a restart.
+    pub disk_matches_memory: bool,
+}
 
 /// Integrated persistence manager combining WAL, storage, and tenancy
 pub struct PersistenceManager {
@@ -332,17 +347,38 @@ impl PersistenceManager {
     /// reached the disk is overwritten with the rolled-back state. Returns the
     /// commit version, or why the commit was refused.
     pub fn commit_session_transaction(&self, tenant: &str, store: &mut GraphStore) -> Result<u64, String> {
+        self.commit_session_transaction_detailed(tenant, store)
+            .map_err(|refusal| refusal.message)
+    }
+
+    /// [`Self::commit_session_transaction`], saying also whether a refused
+    /// commit left memory and disk in agreement (#2241).
+    ///
+    /// A refusal is usually clean: the transaction is rolled back and the disk
+    /// repaired, so both hold the state from before it began and nothing needs
+    /// to stop accepting writes. It is not clean when the rollback or the
+    /// repair itself fails, and an in-process writer that has no client to
+    /// tell has to know that, to mark the process degraded.
+    pub fn commit_session_transaction_detailed(
+        &self,
+        tenant: &str,
+        store: &mut GraphStore,
+    ) -> Result<u64, CommitRefusal> {
         use crate::graph::event::Mutation;
+        let clean = |message: String| CommitRefusal { message, disk_matches_memory: true };
         if store.session_transaction_version().is_none() {
-            return store.commit_session_transaction().map_err(|e| e.to_string());
+            return store.commit_session_transaction().map_err(|e| clean(e.to_string()));
         }
         let mutations = store.take_write_log();
         let failure = match self.apply_mutations(tenant, store, &mutations) {
-            Ok(_) => return store.commit_session_transaction().map_err(|e| e.to_string()),
+            Ok(_) => return store.commit_session_transaction().map_err(|e| clean(e.to_string())),
             Err(e) => e,
         };
         if let Err(e) = store.rollback_session_transaction() {
-            return Err(format!("the transaction could not be persisted ({failure}) and its rollback failed: {e}"));
+            return Err(CommitRefusal {
+                message: format!("the transaction could not be persisted ({failure}) and its rollback failed: {e}"),
+                disk_matches_memory: false,
+            });
         }
         // Every entity the transaction or its rollback touched, as it now is.
         // One the rollback removed is a delete, since `apply_mutations` skips an
@@ -357,11 +393,14 @@ impl PersistenceManager {
             })
             .collect();
         match self.apply_mutations(tenant, store, &repair) {
-            Ok(_) => Err(format!("the transaction could not be persisted and was rolled back: {failure}")),
-            Err(e) => Err(format!(
-                "the transaction could not be persisted ({failure}) and was rolled back in memory; \
-                 restoring the disk also failed ({e}), so it may hold part of the transaction until restart"
-            )),
+            Ok(_) => Err(clean(format!("the transaction could not be persisted and was rolled back: {failure}"))),
+            Err(e) => Err(CommitRefusal {
+                message: format!(
+                    "the transaction could not be persisted ({failure}) and was rolled back in memory; \
+                     restoring the disk also failed ({e}), so it may hold part of the transaction until restart"
+                ),
+                disk_matches_memory: false,
+            }),
         }
     }
 
@@ -382,6 +421,22 @@ impl PersistenceManager {
     ///
     /// Returns the number of entities written.
     pub fn apply_mutations(
+        &self,
+        tenant: &str,
+        store: &GraphStore,
+        mutations: &[crate::graph::event::Mutation],
+    ) -> Result<usize, PersistenceError> {
+        // Counted here, the one path both auto-commit statements and
+        // transaction commits take, so `/metrics` cannot miss one (#2080).
+        // An empty log is a read or a no-op write, not a persist.
+        let outcome = self.apply_mutations_uncounted(tenant, store, mutations);
+        if !mutations.is_empty() {
+            health::record_persist(mutations.len(), outcome.is_ok());
+        }
+        outcome
+    }
+
+    fn apply_mutations_uncounted(
         &self,
         tenant: &str,
         store: &GraphStore,

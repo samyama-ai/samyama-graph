@@ -47,6 +47,32 @@ most prolific directors → genre dominance by audience size → director–acto
 pairs (the multi-hop graph-native question) → actors with widest director reach →
 cinema by decade → top TV series → writers per director.
 
+## Question catalog
+
+[`imdb-movies.sgqueries`](./imdb-movies.sgqueries) holds 54 questions (16 easy,
+26 medium, 12 hard; four unanswerable), built with `catalog-build --release` against
+the pinned snapshot (#1154). [`questions.json`](questions.json) is its source, and the
+NLQ accuracy benchmark
+([competitor-benchmarks#260](https://git.samyama.ai/Samyama.ai/samyama-graph-competitor-benchmarks/issues/260))
+reads it as its question set. Every entry is checked
+weekly against the published snapshot by
+[`kg-catalogs.yml`](../../.github/workflows/kg-catalogs.yml).
+
+```bash
+samyama queries list case_studies/imdb-movies/imdb-movies.sgqueries
+samyama queries run  case_studies/imdb-movies/imdb-movies.sgqueries --snapshot imdb.sgsnap \
+    --entry <id> [--param name=value]...
+samyama verify imdb.sgsnap --queries case_studies/imdb-movies/imdb-movies.sgqueries
+```
+
+Titles and names are not unique (`Titanic` is both the 1953 and the 1997 film, and
+two people are called `Shah Rukh Khan`), so the templates' samples are titles and
+names held by one node only. `Movie` includes TV movies (`title_type` `tvMovie`).
+`ACTED_IN` holds IMDB's principal cast only (about ten per title), so the co-star and
+director–actor counts cover billed leads, not full casts. `DIRECTED` edges point at
+movies only; no series has a director in this snapshot. Where a question asks for a
+top N, its threshold or N was chosen so that no tie straddles the cut.
+
 ## Data & license
 
 Source: [IMDB Non-Commercial Datasets](https://developer.imdb.com/non-commercial-datasets/)

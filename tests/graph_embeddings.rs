@@ -13,9 +13,14 @@
 //! itself something to check for (`algo.pca` and friends stream only;
 //! writing an embedding and never persisting it would silently drop the
 //! "stored as vector properties" half of ML-06).
+//!
+//! `write: false` is the one exception (#1736): it streams the rows, stores
+//! nothing, and so runs on the read path. The tests under "stream mode"
+//! below check all three halves of that.
 
 use samyama::graph::{GraphStore, Label, PropertyValue};
-use samyama::query::QueryEngine;
+use samyama::query::{QueryEngine, Value};
+use samyama::vector::DistanceMetric;
 
 /// Two disjoint 5-cliques, `A0..A4` and `B0..B4`, no edges between them.
 /// FastRP and node2vec both aggregate over graph structure, so a genuine
@@ -73,14 +78,9 @@ fn embedding_of(store: &GraphStore, name: &str) -> Vec<f64> {
         })
         .unwrap_or_else(|| panic!("node {name} not found"));
     match store.node_property(id, "embedding") {
-        Some(PropertyValue::Array(items)) => items
-            .iter()
-            .map(|v| match v {
-                PropertyValue::Float(f) => *f,
-                other => panic!("embedding entry was not a float: {other:?}"),
-            })
-            .collect(),
-        other => panic!("node {name} has no `embedding` array property, got {other:?}"),
+        // Stored as a `Vector` of f32 (#1736), not an `Array` of `Float`s.
+        Some(PropertyValue::Vector(items)) => items.iter().map(|f| *f as f64).collect(),
+        other => panic!("node {name} has no `embedding` vector property, got {other:?}"),
     }
 }
 
@@ -135,7 +135,7 @@ fn fastrp_write_property_is_configurable() {
         .unwrap();
     assert!(matches!(
         store.node_property(id, "fastrpVec"),
-        Some(PropertyValue::Array(_))
+        Some(PropertyValue::Vector(_))
     ));
     assert!(
         store.node_property(id, "embedding").is_none(),
@@ -349,4 +349,192 @@ fn both_names_are_case_and_namespace_insensitive() {
     ] {
         engine.execute_mut(q, &mut store, "default").unwrap_or_else(|e| panic!("{q} failed: {e}"));
     }
+}
+
+// ---------- stream mode (#1736) ----------
+
+/// `(name, embedding)` per row of a `YIELD node, embedding RETURN
+/// node.name AS name, embedding` query, in name order.
+fn rows_by_name(batch: &samyama::query::RecordBatch) -> Vec<(String, Vec<f64>)> {
+    let mut rows: Vec<(String, Vec<f64>)> = batch
+        .records
+        .iter()
+        .map(|r| {
+            let name = match r.get("name") {
+                Some(Value::Property(PropertyValue::String(s))) => s.clone(),
+                other => panic!("name column: {other:?}"),
+            };
+            let embedding = match r.get("embedding") {
+                Some(Value::List(items)) => items
+                    .iter()
+                    .map(|v| match v {
+                        Value::Property(PropertyValue::Float(f)) => *f,
+                        other => panic!("embedding entry: {other:?}"),
+                    })
+                    .collect(),
+                other => panic!("embedding column: {other:?}"),
+            };
+            (name, embedding)
+        })
+        .collect();
+    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows
+}
+
+#[test]
+fn write_false_streams_on_the_read_path_and_stores_nothing() {
+    for call in [
+        "CALL algo.fastRP('Node', {embeddingDimension: 6, seed: 4, write: false})",
+        "CALL algo.node2vec('Node', {embeddingDimension: 6, seed: 4, walksPerNode: 2, walkLength: 4, write: false})",
+    ] {
+        let (store, engine) = two_cliques();
+        let q = format!("{call} YIELD node, embedding RETURN node.name AS name, embedding");
+        assert!(!engine.statement_is_write(&q).unwrap(), "{call}: a stream must route as a read");
+        let batch = engine
+            .execute(&q, &store)
+            .unwrap_or_else(|e| panic!("{call} must run without write access: {e}"));
+        let rows = rows_by_name(&batch);
+        assert_eq!(rows.len(), 10, "{call}: one row per node");
+        assert!(rows.iter().all(|(_, e)| e.len() == 6), "{call}: requested dimension");
+        for node in store.get_nodes_by_label(&Label::new("Node")) {
+            assert!(
+                store.node_property(node.id, "embedding").is_none(),
+                "{call}: a stream must not store anything"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_stream_returns_exactly_what_a_write_stores() {
+    let (store, engine) = two_cliques();
+    let streamed = rows_by_name(
+        &engine
+            .execute(
+                "CALL algo.fastRP('Node', {embeddingDimension: 8, seed: 7, write: false}) \
+                 YIELD node, embedding RETURN node.name AS name, embedding",
+                &store,
+            )
+            .unwrap(),
+    );
+    let (mut store, engine) = two_cliques();
+    let written = rows_by_name(
+        &engine
+            .execute_mut(
+                "CALL algo.fastRP('Node', {embeddingDimension: 8, seed: 7}) \
+                 YIELD node, embedding RETURN node.name AS name, embedding",
+                &mut store,
+                "default",
+            )
+            .unwrap(),
+    );
+    assert_eq!(streamed, written, "same seed, same rows, written or not");
+    for (name, row) in &written {
+        assert_eq!(
+            &embedding_of(&store, name),
+            row,
+            "{name}: stored value differs from its row"
+        );
+    }
+}
+
+#[test]
+fn write_false_with_a_write_property_is_refused_on_both_paths() {
+    let q = "CALL algo.fastRP('Node', {write: false, writeProperty: 'v'}) YIELD node RETURN node";
+    let (mut store, engine) = two_cliques();
+    // `writeProperty` routes it as a write, where the contradiction is refused.
+    assert!(engine.statement_is_write(q).unwrap());
+    let err = engine
+        .execute_mut(q, &mut store, "default")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("write: false") && err.contains("writeProperty"),
+        "{err}"
+    );
+    let err = samyama::query::executor::QueryExecutor::new(&store)
+        .execute(&samyama::query::parser::parse_query(q).unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(err.to_lowercase().contains("write"), "{err}");
+}
+
+#[test]
+fn write_must_be_a_boolean() {
+    let (mut store, engine) = two_cliques();
+    let err = engine
+        .execute_mut(
+            "CALL algo.node2vec('Node', {write: 'no'}) YIELD node RETURN node",
+            &mut store,
+            "default",
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`write` must be a boolean"), "{err}");
+}
+
+#[test]
+fn write_true_is_the_default_spelled_out() {
+    let (mut store, engine) = two_cliques();
+    let q = "CALL algo.fastRP('Node', {embeddingDimension: 4, write: true}) YIELD node RETURN node";
+    assert!(engine.statement_is_write(q).unwrap());
+    engine.execute_mut(q, &mut store, "default").unwrap();
+    assert_eq!(embedding_of(&store, "A0").len(), 4);
+}
+
+// ---------- read-back and refresh (#1736) ----------
+
+#[test]
+fn a_stored_embedding_is_read_back_through_the_vector_index() {
+    let (mut store, engine) = two_cliques();
+    engine
+        .execute_mut(
+            "CALL algo.fastRP('Node', {embeddingDimension: 8, seed: 2}) YIELD node RETURN node",
+            &mut store,
+            "default",
+        )
+        .unwrap();
+    store
+        .create_vector_index("Node", "embedding", 8, DistanceMetric::Cosine)
+        .unwrap();
+    store.rebuild_vector_index();
+    let a0: Vec<f32> = embedding_of(&store, "A0")
+        .iter()
+        .map(|f| *f as f32)
+        .collect();
+    let hits = store.vector_search("Node", "embedding", &a0, 1).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(
+        store.node_property(hits[0].0, "name"),
+        Some(PropertyValue::String("A0".to_string())),
+        "the nearest vector to A0's own embedding is A0's"
+    );
+}
+
+#[test]
+fn running_again_refreshes_the_stored_embedding() {
+    let (mut store, engine) = two_cliques();
+    let run = |store: &mut GraphStore, seed: i64| {
+        engine
+            .execute_mut(
+                &format!(
+                    "CALL algo.fastRP('Node', {{embeddingDimension: 8, seed: {seed}}}) YIELD node RETURN node"
+                ),
+                store,
+                "default",
+            )
+            .unwrap();
+        embedding_of(store, "A0")
+    };
+    let first = run(&mut store, 1);
+    let second = run(&mut store, 2);
+    assert_ne!(
+        first, second,
+        "a second run with another seed must overwrite the first"
+    );
+    assert_eq!(
+        run(&mut store, 1),
+        first,
+        "and the first seed reproduces its vectors"
+    );
 }

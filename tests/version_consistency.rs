@@ -99,6 +99,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The OpenAPI document, relative to the repository root.
 const OPENAPI: &str = "openapi/openapi.yaml";
 
+/// The Rust SDK's README, whose install line names a release tag.
+const SDK_README: &str = "crates/samyama-sdk/README.md";
+
 /// The `[package] version` of a Cargo manifest — not a dependency's version.
 fn cargo_package_version(rel: &str) -> Option<String> {
     let text = read(rel);
@@ -276,6 +279,29 @@ fn the_readme_version_badge_is_the_version_of_record() {
     }
 }
 
+/// The install line in the Rust SDK's README, which names a release tag.
+///
+/// It read `tag = "v1.9.0"` while the crate was at 1.16.0 (#1734): a Rust user
+/// copying the one install instruction the README gives got an SDK seven minor
+/// releases old, whose embedded mode is not the one the README documents.
+/// Checked for equality: the line states exactly one version.
+#[test]
+fn the_rust_sdk_readme_installs_the_version_of_record() {
+    let text = read(SDK_README);
+    let marker = "github.com/samyama-ai/samyama-graph\", tag = \"v";
+    let tags: Vec<&str> = text
+        .match_indices(marker)
+        .map(|(i, _)| {
+            let rest = &text[i + marker.len()..];
+            &rest[..rest.find('"').unwrap_or(rest.len())]
+        })
+        .collect();
+    assert!(!tags.is_empty(), "{SDK_README} has no git install line with a tag -- the scan is vacuous");
+    for t in tags {
+        assert_eq!(t, VERSION, "{SDK_README} installs tag v{t}; the version of record is {VERSION}");
+    }
+}
+
 #[test]
 fn the_release_checklist_locations_all_exist() {
     // The failure mode this guards: a file is moved, the check above reads
@@ -295,6 +321,7 @@ fn the_release_checklist_locations_all_exist() {
         "src/lib.rs",
         "CLAUDE.md",
         "README.md",
+        SDK_README,
     ] {
         assert!(
             Path::new(&root().join(rel)).exists(),

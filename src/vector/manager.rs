@@ -550,6 +550,27 @@ impl VectorIndexManager {
         widen(&index, query, k, ef, &keep)
     }
 
+    /// The `k` nearest among the nodes `keep` passes, by one graph search
+    /// that tests `keep` during the walk rather than after it (#1999). See
+    /// [`VectorIndex::search_inline_where`]. The walk can reach a node more
+    /// than once, and `keep` can be a query's WHERE, so each node is asked
+    /// once and the answer remembered.
+    pub fn search_inline_ef(
+        &self,
+        label: &str,
+        property_key: &str,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        keep: impl Fn(NodeId) -> bool,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        let index_lock = self.get_index(label, property_key).ok_or_else(|| self.missing(label, property_key))?;
+        let index = index_lock.read().unwrap();
+        let asked = std::cell::RefCell::new(HashMap::new());
+        let keep = |id: NodeId| *asked.borrow_mut().entry(id).or_insert_with(|| keep(id));
+        index.search_inline_where(query, k, ef, &keep)
+    }
+
     /// [`search_all`](Self::search_all), keeping only the `(label, node)` pairs
     /// `keep` accepts (#1605).
     ///
@@ -1105,8 +1126,10 @@ fn widen(
             .unwrap_or_else(|| candidates.saturating_mul(2).max(64))
             .max(candidates);
         if k > 0 && len > 0 && width.saturating_mul(params.m).saturating_mul(2) >= len {
+            super::work::exact_fallback();
             return index.search_exact_where(query, k, &keep);
         }
+        super::work::graph_search();
         let mut seen = std::collections::HashSet::new();
         let kept: Vec<(NodeId, f32)> = index
             .search_ef(query, fetch, ef)?
@@ -1119,6 +1142,7 @@ fn widen(
         }
         fetch = (fetch * 2).min(len);
         if fetch > len / 4 {
+            super::work::exact_fallback();
             return index.search_exact_where(query, k, &keep);
         }
     }
