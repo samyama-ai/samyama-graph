@@ -194,3 +194,61 @@ fn analyze_is_case_insensitive_like_every_other_keyword() {
         );
     }
 }
+
+/// Runs `ANALYZE :Label` (or any other form) and returns its one row.
+fn analyze_form(store: &GraphStore, q: &str) -> samyama::query::executor::Record {
+    let parsed = parse_query(q).unwrap_or_else(|e| panic!("{q} must parse: {e}"));
+    let batch = QueryExecutor::new(store)
+        .execute(&parsed)
+        .unwrap_or_else(|e| panic!("{q} must run: {e}"));
+    assert_eq!(batch.records.len(), 1, "{q} returns exactly one row");
+    assert_eq!(
+        batch.columns,
+        vec!["label", "nodes", "properties", "cache_was_stale"],
+        "{q}: the label form reports that label's part of the statistics"
+    );
+    batch.records[0].clone()
+}
+
+#[test]
+fn analyze_label_reports_that_labels_part_of_the_statistics() {
+    // Three `:Person` with one property between them (`name`), two
+    // `:Company` with the same one. The numbers are checked against the
+    // fixture, as above, so a row describing the whole graph -- 5 nodes --
+    // would fail.
+    let store = seed();
+    let row = analyze_form(&store, "ANALYZE :Person");
+    assert_eq!(
+        row.get("label"),
+        Some(&Value::Property(PropertyValue::String("Person".into())))
+    );
+    assert_eq!(int_of(row.get("nodes").unwrap()), 3, "3 Person, not 5 nodes");
+    assert_eq!(int_of(row.get("properties").unwrap()), 1, "Person.name");
+
+    let row = analyze_form(&store, "analyze :Company");
+    assert_eq!(int_of(row.get("nodes").unwrap()), 2);
+}
+
+#[test]
+fn analyze_label_recomputes_the_same_cache_as_analyze() {
+    // One cache for the whole graph: the label form refreshes it exactly as
+    // the bare form does, so the bare form after it finds a cached set.
+    let store = seed();
+    let row = analyze_form(&store, "ANALYZE :Person");
+    assert!(!bool_of(row.get("cache_was_stale").unwrap()));
+    let after = analyze(&store);
+    assert!(
+        bool_of(&after["cache_was_stale"]),
+        "ANALYZE :Person left statistics cached, so ANALYZE must report replacing them"
+    );
+}
+
+#[test]
+fn analyze_of_a_label_no_node_carries_reports_zero() {
+    // Not an error: the planner estimates from the same zero, and that is
+    // what a reader asking about the label wants to see.
+    let store = seed();
+    let row = analyze_form(&store, "ANALYZE :Nobody");
+    assert_eq!(int_of(row.get("nodes").unwrap()), 0);
+    assert_eq!(int_of(row.get("properties").unwrap()), 0);
+}

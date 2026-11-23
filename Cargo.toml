@@ -417,3 +417,13 @@ harness = false
 [[bench]]
 name = "filtered_ann_benchmark"
 harness = false
+
+# Graph + vector hybrid (GraphRAG-shaped) queries (#1987). Its shared code is
+# in benches/graph_vector_hybrid and is tested by tests/graph_vector_hybrid_harness.rs.
+[[bench]]
+name = "graph_vector_hybrid_benchmark"
+harness = false
+
+[[bench]]
+name = "hybrid_retrieval_benchmark"
+harness = false
