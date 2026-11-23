@@ -231,8 +231,12 @@ unwind_stmt = { unwind_clause+ ~ ((optional_match_clause | match_clause)+ ~ wher
 load_csv_stmt = { load_csv_clause ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
 // A statement that begins with LOAD PARQUET. Same tail as `load_csv_stmt`.
 load_parquet_stmt = { load_parquet_clause ~ ((optional_match_clause | match_clause)+ ~ where_clause?)* ~ (with_clause ~ unwind_clause? ~ ((optional_match_clause | match_clause)+ ~ where_clause?)*)* ~ create_clause? ~ merge_inline? ~ delete_clause? ~ foreach_clause? ~ set_clause* ~ remove_clause* ~ return_clause? ~ order_by_clause? ~ skip_clause? ~ limit_clause? }
-match_clause = { ^"MATCH" ~ pattern ~ using_hint* }
-optional_match_clause = { ^"OPTIONAL" ~ ^"MATCH" ~ pattern ~ using_hint* }
+match_clause = { ^"MATCH" ~ pattern ~ as_of_clause? ~ using_hint* }
+optional_match_clause = { ^"OPTIONAL" ~ ^"MATCH" ~ pattern ~ as_of_clause? ~ using_hint* }
+// `MATCH (n:N) AS OF <time>` (NDS-03, #1663): keep what the pattern binds only
+// if its valid-time period holds `<time>`. Lowered in the parser to a WHERE
+// over `valid_from` / `valid_to`; see `as_of_predicate`.
+as_of_clause = { ^"AS" ~ ^"OF" ~ expression }
 // Planner hints (LANG-13, #1675), Neo4j's spelling, after the pattern and
 // before its WHERE: `MATCH (n:N) USING INDEX n:N(x) WHERE n.x = 1`.
 using_hint = { ^"USING" ~ (using_index_hint | using_scan_hint | using_join_hint) }
