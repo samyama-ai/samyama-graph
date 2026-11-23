@@ -56,6 +56,7 @@ fn every_probe_is_fired_from_the_engine() {
         ("wal_fsync_done", "src/persistence/wal.rs"),
         ("snapshot_io", "src/snapshot/mod.rs"),
         ("vector_search", "src/vector/index.rs"),
+        ("operator_steps", "src/query/executor/mod.rs"),
     ];
     assert_eq!(callers.len(), PROBES.len(), "a probe was added without a caller here");
     for (f, file) in callers {

@@ -235,6 +235,8 @@ pub struct QueryExecutor<'a> {
     /// Record the executed plan's structural hash on the result. See
     /// `with_plan_hash`.
     plan_hash: bool,
+    /// Time each step for `operator__batch` (#2219). See `with_step_trace`.
+    step_trace: bool,
     /// Counts, and optionally caps, the rows every operator produces. See
     /// `with_work_meter`.
     work_meter: Option<std::sync::Arc<budget::WorkMeter>>,
@@ -250,6 +252,7 @@ impl<'a> QueryExecutor<'a> {
             deadline: None,
             row_budget: 0,
             plan_hash: false,
+            step_trace: false,
             work_meter: None,
         }
     }
@@ -263,6 +266,7 @@ impl<'a> QueryExecutor<'a> {
             deadline: None,
             row_budget: 0,
             plan_hash: false,
+            step_trace: false,
             work_meter: None,
         }
     }
@@ -301,6 +305,15 @@ impl<'a> QueryExecutor<'a> {
     /// provenance -- the HTTP server -- asks for it.
     pub fn with_plan_hash(mut self, on: bool) -> Self {
         self.plan_hash = on;
+        self
+    }
+
+    /// Time each step of the plan and report it as `operator__batch` when the
+    /// query ends (#2219). On only when `usdt::query_start` says a tracer is
+    /// attached: the per-step clock is PROFILE's, and every query paying for
+    /// it would be the cost Naresh ruled out.
+    pub fn with_step_trace(mut self, on: bool) -> Self {
+        self.step_trace = on;
         self
     }
 
@@ -621,8 +634,12 @@ impl<'a> QueryExecutor<'a> {
         }
 
         // Execute the plan, handing rows over as they are pulled.
-        let columns = self.execute_plan_into(plan, chunk_rows, sink)?;
-        Ok((columns, plan_hash))
+        let steps = trace_steps(self.step_trace, &mut plan, plan_hash);
+        let columns = self.execute_plan_into(plan, chunk_rows, sink);
+        if let Some((hash, steps)) = steps {
+            crate::usdt::operator_steps(hash, &steps);
+        }
+        Ok((columns?, plan_hash))
     }
 
     /// Generate EXPLAIN output from an execution plan, optionally with graph statistics
@@ -769,6 +786,22 @@ impl<'a> QueryExecutor<'a> {
 /// Rows pulled per `next_batch` when the caller collects the whole result.
 const COLLECT_BATCH_ROWS: usize = 1024;
 
+/// Wrap `plan`'s steps for `operator__batch` when `on`, returning the plan
+/// hash to report them under and the steps' counters. The hash is the one
+/// already taken when the caller records it, else taken here: the probe needs
+/// it whether or not the response carries it.
+fn trace_steps(
+    on: bool,
+    plan: &mut ExecutionPlan,
+    plan_hash: Option<u64>,
+) -> Option<(u64, Vec<profile::ProfileNode>)> {
+    if !on {
+        return None;
+    }
+    let hash = plan_hash.unwrap_or_else(|| plan.root.describe().structural_hash());
+    Some((hash, profile::instrument(&mut plan.root)))
+}
+
 /// Query executor for write queries (CREATE, DELETE, SET, etc.)
 /// Takes mutable reference to GraphStore to allow modifications
 pub struct MutQueryExecutor<'a> {
@@ -779,6 +812,8 @@ pub struct MutQueryExecutor<'a> {
     row_budget: u64,
     /// See `QueryExecutor::with_plan_hash`.
     plan_hash: bool,
+    /// Time each step for `operator__batch` (#2219). See `with_step_trace`.
+    step_trace: bool,
     /// See `QueryExecutor::with_deadline`. Writes had none, so a runaway
     /// `MATCH … SET` ran unbounded (#1593).
     deadline: Option<std::time::Instant>,
@@ -794,6 +829,7 @@ impl<'a> MutQueryExecutor<'a> {
             params: HashMap::new(),
             row_budget: 0,
             plan_hash: false,
+            step_trace: false,
             deadline: None,
         }
     }
@@ -822,6 +858,15 @@ impl<'a> MutQueryExecutor<'a> {
     /// provenance -- the HTTP server -- asks for it.
     pub fn with_plan_hash(mut self, on: bool) -> Self {
         self.plan_hash = on;
+        self
+    }
+
+    /// Time each step of the plan and report it as `operator__batch` when the
+    /// query ends (#2219). On only when `usdt::query_start` says a tracer is
+    /// attached: the per-step clock is PROFILE's, and every query paying for
+    /// it would be the cost Naresh ruled out.
+    pub fn with_step_trace(mut self, on: bool) -> Self {
+        self.step_trace = on;
         self
     }
 
@@ -895,7 +940,12 @@ impl<'a> MutQueryExecutor<'a> {
             || query.create_fulltext_index_clause.is_some()
             || query.create_index_clause.is_some()
             || query.create_hierarchy_index_clause.is_some();
-        let mut batch = self.execute_plan_mut(plan, index_build)?;
+        let steps = trace_steps(self.step_trace, &mut plan, plan_hash);
+        let batch = self.execute_plan_mut(plan, index_build);
+        if let Some((hash, steps)) = steps {
+            crate::usdt::operator_steps(hash, &steps);
+        }
+        let mut batch = batch?;
         batch.plan_hash = plan_hash;
         // Scoped to **data writes**, not to "any query without a RETURN".
         // Two neighbours produce rows with no RETURN and must keep doing so:

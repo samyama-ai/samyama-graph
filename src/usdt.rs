@@ -35,6 +35,7 @@ pub const PROBES: &[(&str, &str)] = &[
     ("wal__fsync_done", "elapsed_ns"),
     ("snapshot__io", "op, bytes, elapsed_ns"),
     ("vector__hnsw_search", "k, ef, dist_evals, elapsed_ns"),
+    ("operator__batch", "plan_hash, op_ptr, op_len, rows_out, elapsed_ns"),
 ];
 
 /// Which way the store's lock is being taken, as the lock probes report it.
@@ -45,9 +46,36 @@ pub enum LockMode {
 }
 
 /// A statement is about to be parsed and run.
+///
+/// Returns whether a tracer is attached here. The executor times each step of
+/// the plan for [`operator_steps`] only then: a query nobody traces pays a
+/// load and a branch, not PROFILE's per-operator clock (Naresh, #2219). So
+/// attach `query__start` with `operator__batch`, as `lock__wait_start` with
+/// `lock__acquired`.
 #[inline(always)]
-pub fn query_start(query: &str, is_write: bool) {
-    probe::probe!(samyama, query__start, query.as_ptr(), query.len(), is_write as isize);
+pub fn query_start(query: &str, is_write: bool) -> bool {
+    let traced = probe::probe_lazy!(samyama, query__start, query.as_ptr(), query.len(), is_write as isize);
+    traced
+}
+
+/// One `operator__batch` per step of the plan that just ran, at its end.
+///
+/// `plan_hash` is TRUST-06's hash of the plan (named so, not `query_hash`,
+/// which the logs use for the query text). `op` is the step's name as EXPLAIN
+/// prints it, `rows_out` the rows it handed up, `elapsed_ns` the time inside
+/// it **including the steps below it**, as PROFILE reports it.
+pub fn operator_steps(plan_hash: u64, steps: &[crate::query::executor::profile::ProfileNode]) {
+    for step in steps {
+        probe::probe_lazy!(
+            samyama,
+            operator__batch,
+            plan_hash as isize,
+            step.name.as_ptr(),
+            step.name.len(),
+            step.rows().min(isize::MAX as u64) as isize,
+            step.inclusive().as_nanos().min(isize::MAX as u128)
+        );
+    }
 }
 
 /// A statement finished, or failed. `elapsed` is what the slow-query log and

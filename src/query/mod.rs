@@ -523,7 +523,7 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        crate::usdt::query_start(query_str, false);
+        let traced = crate::usdt::query_start(query_str, false);
         let parse_started = std::time::Instant::now();
         let mut query = self.parse_to_run(query_str)?;
         // Only a non-Cypher dialect rewrites the AST, so only that pays for a
@@ -562,6 +562,7 @@ impl QueryEngine {
             executor
                 .with_row_budget(self.row_budget)
                 .with_plan_hash(self.plan_hash)
+                .with_step_trace(traced)
                 .with_params(params.clone())
                 .execute(&query)
         });
@@ -613,7 +614,7 @@ impl QueryEngine {
         sink: &mut dyn FnMut(&[String], Vec<executor::Record>) -> Result<(), String>,
         time_limit: Option<std::time::Duration>,
     ) -> Result<StreamedResult, Box<dyn std::error::Error>> {
-        crate::usdt::query_start(query_str, false);
+        let traced = crate::usdt::query_start(query_str, false);
         let query = self.parse_to_run(query_str)?;
 
         let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
@@ -629,6 +630,7 @@ impl QueryEngine {
         let executor = executor
             .with_row_budget(self.row_budget)
             .with_plan_hash(self.plan_hash)
+            .with_step_trace(traced)
             .with_params(params.clone());
 
         let started = std::time::Instant::now();
@@ -871,7 +873,7 @@ impl QueryEngine {
         params: &BoundParams,
         time_limit: Option<std::time::Duration>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
-        crate::usdt::query_start(query_str, true);
+        let traced = crate::usdt::query_start(query_str, true);
         let query = self.parse_to_run(query_str)?;
         let deadline = self.deadline(time_limit);
 
@@ -889,6 +891,7 @@ impl QueryEngine {
             executor
                 .with_row_budget(self.row_budget)
                 .with_plan_hash(self.plan_hash)
+                .with_step_trace(traced)
                 .execute(&query)
         }));
         // Logged before the `?`, so a query that ran for two minutes and then
