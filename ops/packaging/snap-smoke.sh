@@ -32,7 +32,8 @@ revision() { snap list samyama | awk 'NR == 2 { print $3 }'; }
 since=$(date '+%Y-%m-%d %H:%M:%S')
 
 sudo snap install --dangerous "$snap"
-snap info --verbose samyama | grep -q '^confinement: *strict' || fail "not strict confinement"
+# Under `notes:`, indented, for an installed snap: `  confinement: strict`.
+snap info --verbose samyama | grep -Eq '^[[:space:]]*confinement:[[:space:]]*strict$' || fail "not strict confinement"
 ok "installed strict, revision $(revision)"
 wait_up
 snap services samyama | grep -q 'samyama.daemon .*enabled .*active' || fail "service not enabled and active"
