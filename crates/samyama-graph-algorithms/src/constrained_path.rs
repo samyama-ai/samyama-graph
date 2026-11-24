@@ -310,6 +310,18 @@ mod tests {
     }
 
     #[test]
+    fn a_partial_path_beaten_before_it_is_taken_is_not_counted() {
+        // s=0, y=1, x=2, t=3. s reaches x directly (cost 1, resource 5) and
+        // through y (cost 0 + 1, resource 1 + 1): the second beats the first,
+        // which is discarded while still on the queue and skipped when it
+        // comes off. Expanded: s, y, x through y, t -- four, not five.
+        let g = graph(4, &[(0, 2, 1.0, 5.0), (0, 1, 0.0, 1.0), (1, 2, 1.0, 1.0), (2, 3, 1.0, 1.0)]);
+        let found = search(&g, 0, 3, 100.0);
+        assert_eq!(found.found.map(|p| (p.path, p.cost, p.resource)), Some((vec![10, 11, 12, 13], 2.0, 3.0)));
+        assert_eq!(found.expanded, 4, "a discarded partial path was counted");
+    }
+
+    #[test]
     fn a_search_that_finds_nothing_still_reports_its_work() {
         let g = three_routes();
         // Every relationship needs more than 0.5: only the source is expanded.
