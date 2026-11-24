@@ -12,7 +12,7 @@ use std::collections::HashMap;
 // Re-export algorithms
 pub use samyama_graph_algorithms::{
     page_rank, page_rank_with, PageRankConfig,
-    constrained_shortest_path, ConstrainedPath, ConstrainedPathError,
+    constrained_shortest_path, constrained_shortest_path_search, ConstrainedPath, ConstrainedPathError, ConstrainedSearch,
     Progress, NoProgress, Stopped,
     weakly_connected_components, WccResult,
     strongly_connected_components, SccResult,
