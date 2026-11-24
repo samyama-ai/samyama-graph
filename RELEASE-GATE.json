@@ -6,9 +6,11 @@
   ],
   "envelope_status": "fail",
   "envelope_verdict": "fail",
-  "measured_at": "2026-11-16T06:41:36Z",
-  "run_id": "2026-11-16T06:41:36Z-68a4853",
+  "measured_at": "2026-11-24T03:06:06Z",
+  "run_id": "2026-11-24T03:06:06Z-7f45135",
   "host": "aws-r6a.4xlarge-spot",
-  "engine_commit": "68a4853",
+  "engine_commit": "7f451355ea0f1f9874ff57f2c94e3a25eed23e01",
+  "edition": "opensource",
+  "baseline_edition": "opensource",
   "note": "Compares against a stored baseline on the same host; refuses to compare across hosts."
 }
