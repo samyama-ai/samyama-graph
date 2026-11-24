@@ -112,18 +112,49 @@ def test_every_remote_method_is_bounded(black_hole):
         assert time.monotonic() - started < 5.0
 
 
-def test_a_timeout_is_retried_the_configured_number_of_times(black_hole):
+def test_a_timed_out_read_is_retried_the_configured_number_of_times(black_hole):
     # Counted at the server, one connection per attempt. Timing alone would
-    # pass for a client that never retried and simply waited longer.
+    # pass for a client that never retried and simply waited longer. Only a
+    # read is repeated after a timeout (#2175).
     client = samyama.SamyamaClient.connect(
         black_hole.url,
         timeout_seconds=0.15,
         max_retries=2,
         retry_base_delay_ms=10,
     )
-    with pytest.raises(Exception):
-        client.query("RETURN 1")
+    with pytest.raises(samyama.RequestTimeoutError):
+        client.query_readonly("RETURN 1")
     assert black_hole.connections == 3, "expected one attempt plus two retries"
+
+
+def test_a_timed_out_write_is_sent_once(black_hole):
+    # The server may have applied a write whose answer never came; sending it
+    # again is how one CREATE became three nodes with the defaults (#2175).
+    client = samyama.SamyamaClient.connect(
+        black_hole.url,
+        timeout_seconds=0.15,
+        max_retries=2,
+        retry_base_delay_ms=10,
+    )
+    with pytest.raises(samyama.RequestTimeoutError):
+        client.query("CREATE (:Order {id: 1})")
+    assert black_hole.connections == 1, "a timed-out write was sent again"
+
+
+def test_a_timeout_is_a_runtime_error_and_a_refusal_is_not_a_timeout(black_hole):
+    # Existing `except RuntimeError` handlers keep working, and a refused
+    # connection -- which never reached the server -- is not reported as a
+    # timeout.
+    assert issubclass(samyama.RequestTimeoutError, RuntimeError)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        closed_port = s.getsockname()[1]
+    refused = samyama.SamyamaClient.connect(
+        f"http://127.0.0.1:{closed_port}", max_retries=0
+    )
+    with pytest.raises(RuntimeError) as info:
+        refused.query("RETURN 1")
+    assert not isinstance(info.value, samyama.RequestTimeoutError)
 
 
 @pytest.mark.parametrize("bad", [0.0, -1.0, float("inf"), float("nan")])
