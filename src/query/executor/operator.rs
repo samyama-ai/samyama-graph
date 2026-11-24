@@ -21822,9 +21822,14 @@ impl AlgorithmOperator {
     /// The cheapest path from `source` to `target` whose `resourceProperty`
     /// adds up to at most `maxResource`. Cost is `costProperty`, or one per
     /// relationship (hops) without it. Exact: see
-    /// `samyama_graph_algorithms::constrained_path`. One row, `path` (node
-    /// ids), `cost` and `resource`; no row when no path is within the limit,
-    /// as `weightedPath` gives none when there is no path.
+    /// `samyama_graph_algorithms::constrained_path`.
+    ///
+    /// Always one row: `path` (node ids), `cost` and `resource`, and the
+    /// result envelope every solve carries (OPT-09, #2265) -- `objective`
+    /// (the cost), `feasible`, `gap` (0: the search is exact),
+    /// `iterations` (partial paths expanded) and `total_time_ms`. When no
+    /// path is within the limit the row says `feasible: false`, with the
+    /// path, its totals, `objective` and `gap` null.
     fn execute_constrained_shortest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         let call = "algo.or.constrainedShortestPath";
         Self::reject_unknown_config_keys(
@@ -21891,7 +21896,8 @@ impl AlgorithmOperator {
         }
         let resource_per_edge = resources.weights.as_deref().unwrap_or(&[]);
 
-        let found = crate::algo::constrained_shortest_path(
+        let started = std::time::Instant::now();
+        let searched = crate::algo::constrained_shortest_path_search(
             &costs,
             resource_per_edge,
             source,
@@ -21913,18 +21919,49 @@ impl AlgorithmOperator {
             other => ExecutionError::bad_argument(format!("{call}: {other}")),
         })?;
 
-        if let Some(found) = found {
-            let mut record = Record::new();
-            record.bind(
-                "path".to_string(),
-                Value::Property(PropertyValue::Array(
-                    found.path.iter().map(|&n| PropertyValue::Integer(n as i64)).collect(),
-                )),
-            );
-            record.bind("cost".to_string(), Value::Property(PropertyValue::Float(found.cost)));
-            record.bind("resource".to_string(), Value::Property(PropertyValue::Float(found.resource)));
-            self.results.push(record);
+        let total_time_ms = duration_ms(started.elapsed());
+
+        // Always one row, with the result envelope (OPT-09, #2265): a search
+        // that finds nothing within the limit says so with `feasible: false`
+        // rather than an empty result, which cannot say why it is empty.
+        let mut record = Record::new();
+        let float = |v: f64| Value::Property(PropertyValue::Float(v));
+        let null = || Value::Property(PropertyValue::Null);
+        match &searched.found {
+            Some(found) => {
+                record.bind(
+                    "path".to_string(),
+                    Value::Property(PropertyValue::Array(
+                        found.path.iter().map(|&n| PropertyValue::Integer(n as i64)).collect(),
+                    )),
+                );
+                record.bind("cost".to_string(), float(found.cost));
+                record.bind("resource".to_string(), float(found.resource));
+                // Exact: the path is the cheapest within the limit, proven by
+                // the search, so its gap to the optimum is 0.
+                Self::bind_result_envelope(
+                    &mut record,
+                    float(found.cost),
+                    Value::Property(PropertyValue::Boolean(true)),
+                    float(0.0),
+                    total_time_ms,
+                );
+            }
+            None => {
+                for column in ["path", "cost", "resource"] {
+                    record.bind(column.to_string(), null());
+                }
+                Self::bind_result_envelope(
+                    &mut record,
+                    null(),
+                    Value::Property(PropertyValue::Boolean(false)),
+                    null(),
+                    total_time_ms,
+                );
+            }
         }
+        record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(searched.expanded as i64)));
+        self.results.push(record);
         Ok(())
     }
 
@@ -22333,6 +22370,10 @@ impl AlgorithmOperator {
                 None => (Value::Null, Value::Null),
             };
             Self::bind_result_envelope(&mut record, objective, feasible, Value::Null, total_time_ms);
+            // Iterations run and the cap, as the single-objective row has them
+            // (OPT-09, #2265): `history` holds one entry per iteration here too.
+            record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(res.history.len() as i64)));
+            record.bind("max_iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
             self.results.push(record);
 
         } else {
