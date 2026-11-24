@@ -3174,8 +3174,9 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint",
     "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
     "tostringornull", "toupper", "touppercase", "trim", "type", "valuetype",
-    "vector.distance", "vector.similarity.cosine", "vector.similarity.euclidean",
-    "vector.similarity.maxsim", "vector.similarity.sparsedot", "vector_distance",
+    "vector.distance", "vector.muvera.encode", "vector.similarity.cosine",
+    "vector.similarity.euclidean", "vector.similarity.maxsim", "vector.similarity.sparsedot",
+    "vector_distance",
 ];
 
 /// Is `name` a function this engine implements?
@@ -3369,6 +3370,7 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("vector.similarity.euclidean", 2),
     ("vector.similarity.maxsim", 2),
     ("vector.similarity.sparsedot", 2),
+    ("vector.muvera.encode", 2),
     ("vector.distance", 3),
     ("vector_distance", 3),
 ];
@@ -4963,6 +4965,69 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let who = "vector.similarity.sparseDot";
             let (a, b) = (sparse_vector_arg(&args[0], who)?, sparse_vector_arg(&args[1], who)?);
             Ok(Value::Property(PropertyValue::Float(sparse_dot(&a, &b))))
+        }
+        // A MUVERA fixed-dimensional encoding of a multi-vector (#1978): one
+        // vector whose inner product with another side's encoding estimates
+        // MaxSim, so a multi-vector can go in an ordinary vector index for
+        // candidate generation. Rerank with `vector.similarity.maxSim`.
+        "vector.muvera.encode" => {
+            let who = "vector.muvera.encode";
+            let tokens = multi_vector_arg(&args[0], who)?;
+            use crate::vector::muvera::{encode, Params, Role};
+            let role = match &args[1] {
+                Value::Property(PropertyValue::String(r)) => match r.to_ascii_uppercase().as_str() {
+                    "QUERY" => Role::Query,
+                    "DOCUMENT" => Role::Document,
+                    other => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "`{who}()`: unknown role '{other}'; expected QUERY or DOCUMENT"
+                        )))
+                    }
+                },
+                _ => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{who}()` takes the role as a string, QUERY or DOCUMENT"
+                    )))
+                }
+            };
+            let mut params = Params::default();
+            match args.get(2) {
+                None => {}
+                Some(Value::Property(PropertyValue::Map(options))) => {
+                    for (key, value) in options {
+                        let n = match value {
+                            PropertyValue::Integer(i) if *i >= 0 => *i as u64,
+                            _ => {
+                                return Err(ExecutionError::bad_argument(format!(
+                                    "`{who}()`: option `{key}` must be a non-negative integer"
+                                )))
+                            }
+                        };
+                        let small = || usize::try_from(n).unwrap_or(usize::MAX);
+                        match key.as_str() {
+                            "bits" => params.bits = small(),
+                            "projection" => params.projection = small(),
+                            "repetitions" => params.repetitions = small(),
+                            "seed" => params.seed = n,
+                            other => {
+                                return Err(ExecutionError::bad_argument(format!(
+                                    "`{who}()`: unknown option `{other}`; expected bits, \
+                                     projection, repetitions or seed"
+                                )))
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "`{who}()` takes its options as a map, such as \
+                         {{bits: 4, projection: 8, repetitions: 8, seed: 0}}"
+                    )))
+                }
+            }
+            let encoded = encode(&tokens, role, &params)
+                .map_err(|e| ExecutionError::bad_argument(format!("`{who}()`: {e}")))?;
+            Ok(Value::Property(PropertyValue::Vector(encoded)))
         }
         // A distance, lower is better, by the metric named in the third
         // argument -- Neo4j's `vector_distance`, under both spellings.
@@ -10771,6 +10836,7 @@ impl VarLengthExpandOperator {
         // rather than failing (#671).
         if matches!(source_val, Value::Null) || matches!(source_val.as_property(), Some(PropertyValue::Null)) {
             self.pending.clear();
+            self.pending_ends.clear();
             return Ok(());
         }
         let source_id = source_val.node_id().ok_or_else(|| {
@@ -10785,6 +10851,16 @@ impl VarLengthExpandOperator {
         // reach it again, so a cycle is only found by enumerating trails, which
         // repeat nodes and not relationships.
         let closes_on_source = self.bound_end == Some(source_id);
+
+        // `ANY` / `ANY SHORTEST` over an unbounded WALK (#1648). Every route below
+        // either enumerates walks, which never ends on a cycle, or reaches each node
+        // once, which loses the source as an end node. See `expand_shortest_walks`.
+        if self.restrictor == crate::query::ast::PathRestrictor::Walk
+            && self.selector.bounds_an_unbounded_search()
+            && self.max_hops == usize::MAX
+        {
+            return self.expand_shortest_walks(record, source_id, store);
+        }
 
         // Edges an earlier segment of this clause already walked. This segment
         // may not retake them (#710). Empty for the first segment of a clause
@@ -10943,6 +11019,80 @@ impl VarLengthExpandOperator {
         Ok(())
     }
 
+    /// One shortest walk per end node, for `ANY` and `ANY SHORTEST` over an
+    /// unbounded WALK (#1648).
+    ///
+    /// The standard allows the query because the answer is finite: one walk per
+    /// endpoint pair. The search has to be finite too, and neither existing route
+    /// is. Enumerating walks never ends on a graph with a cycle. The first-reach
+    /// BFS ends, but it marks the source visited at depth zero, so the `(v, v)`
+    /// pair a cycle produces is lost: on `a -> b -> c -> a`,
+    /// `ANY SHORTEST (a)-[*1..]->(y)` must answer `a` (three hops) as well as `b`
+    /// and `c`.
+    ///
+    /// So the search is breadth-first over **states** `(node, k)`, where
+    /// `k = min(depth, min_hops)` says whether the walk is long enough yet. Each
+    /// state is visited once, which is what bounds it: at most
+    /// `|N| * (min_hops + 1)` states, whatever the length bound. A walk reaches
+    /// `(n, min_hops)` exactly when it ends at `n` with at least `min_hops` edges,
+    /// and breadth-first reaches it first by the shortest such walk. That one walk
+    /// is a conforming answer to `ANY SHORTEST`, and so to `ANY`.
+    ///
+    /// The walk may repeat nodes and edges, as WALK allows: the shortest walk of
+    /// at least five edges from `a` to `c` on that triangle goes round once. Edges
+    /// an earlier segment walked are not banned, as in `expand_trails`, whose
+    /// WALK branch reuses edges too.
+    fn expand_shortest_walks(
+        &mut self,
+        record: &Record,
+        source_id: NodeId,
+        store: &GraphStore,
+    ) -> ExecutionResult<()> {
+        type State = (NodeId, usize);
+        if self.min_hops > self.max_hops {
+            return Ok(());
+        }
+        self.ensure_type_ids(store);
+        let type_ids: Option<Vec<u16>> = self.type_ids.clone();
+        let type_filter = type_ids.as_deref();
+        let min = self.min_hops;
+
+        let start: State = (source_id, 0);
+        let mut parent: std::collections::HashMap<State, (State, crate::graph::EdgeId)> =
+            std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<State> = std::collections::HashSet::new();
+        seen.insert(start);
+        // The zero-length walk. With `min_hops == 0` every state has `k == 0`, so
+        // `start` is the source's only state and it is never emitted twice.
+        if min == 0 && self.emit_ok(source_id, store) {
+            self.buffer_walk(record, source_id, vec![source_id], Vec::new(), store);
+        }
+
+        let mut frontier = vec![start];
+        let mut depth = 0usize;
+        while !frontier.is_empty() && depth < self.max_hops {
+            depth += 1;
+            let mut next: Vec<State> = Vec::new();
+            for &(cur, k) in &frontier {
+                let reached = (k + 1).min(min);
+                self.for_each_neighbor(cur, type_filter, store, |nb, eid| {
+                    if seen.insert((nb, reached)) {
+                        parent.insert((nb, reached), ((cur, k), eid));
+                        next.push((nb, reached));
+                    }
+                });
+            }
+            for &(nb, k) in &next {
+                if k == min && self.emit_ok(nb, store) {
+                    let (nodes, edges) = walk_to(&parent, start, (nb, k));
+                    self.buffer_walk(record, nb, nodes, edges, store);
+                }
+            }
+            frontier = next;
+        }
+        Ok(())
+    }
+
     /// Whether `node` qualifies as an emitted endpoint (target-label filter).
     fn emit_ok(&self, node: NodeId, store: &GraphStore) -> bool {
         // A target the row already binds: only that node ends a match (#1237).
@@ -11092,6 +11242,30 @@ impl VarLengthExpandOperator {
     }
 }
 
+/// The walk `start` → `end` recorded by `expand_shortest_walks`, as nodes and edges
+/// in the order walked. Keyed on states, so a node the walk passes twice is two
+/// different entries.
+fn walk_to(
+    parent: &std::collections::HashMap<(NodeId, usize), ((NodeId, usize), crate::graph::EdgeId)>,
+    start: (NodeId, usize),
+    end: (NodeId, usize),
+) -> (Vec<NodeId>, Vec<crate::graph::EdgeId>) {
+    let mut nodes = vec![end.0];
+    let mut edges = Vec::new();
+    let mut cur = end;
+    while cur != start {
+        let Some(&(prev, eid)) = parent.get(&cur) else {
+            break;
+        };
+        edges.push(eid);
+        nodes.push(prev.0);
+        cur = prev;
+    }
+    nodes.reverse();
+    edges.reverse();
+    (nodes, edges)
+}
+
 /// Reconstruct the BFS path source→target from a parent map.
 fn reconstruct_path(
     parent: &std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)>,
@@ -11132,6 +11306,15 @@ impl PhysicalOperator for VarLengthExpandOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         loop {
             if let Some(rec) = self.pending.pop_front() {
+                // In step with `pending`, always. `apply_selector` reads the ends of
+                // the rows the *current* input record produced as `skip(first_new)`,
+                // where `first_new` is `pending.len()`. An end left behind for a row
+                // already returned shifted that window onto the previous record's
+                // ends, so from the second input row on a selector partitioned on
+                // stale endpoints: `ANY SHORTEST (a)-[:E*1..3]->(b)` over a
+                // three-node cycle answered 6 rows where every one of the 3 sources
+                // reaches all 3 (#1648).
+                self.pending_ends.pop_front();
                 return Ok(Some(rec));
             }
             match self.input.next(store)? {
@@ -11144,6 +11327,7 @@ impl PhysicalOperator for VarLengthExpandOperator {
     fn reset(&mut self) {
         self.input.reset();
         self.pending.clear();
+        self.pending_ends.clear();
     }
 
     fn describe(&self) -> OperatorDescription {
