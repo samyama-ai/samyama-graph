@@ -28,6 +28,16 @@ pub struct ConstrainedPath {
     pub resource: f64,
 }
 
+/// What a search found, and the work it took (OPT-09, #2265).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstrainedSearch {
+    /// The cheapest path within the limit, or `None` when no path is.
+    pub found: Option<ConstrainedPath>,
+    /// Partial paths taken off the queue and extended: the search's
+    /// iterations. Counted the same way whether or not a path was found.
+    pub expanded: usize,
+}
+
 /// Why the search could not answer. "No path within the limit" is not one of
 /// these: that is `Ok(None)`.
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +142,19 @@ pub fn constrained_shortest_path(
     max_resource: f64,
     interrupted: &dyn Fn() -> bool,
 ) -> Result<Option<ConstrainedPath>, ConstrainedPathError> {
+    constrained_shortest_path_search(view, resources, source, target, max_resource, interrupted).map(|s| s.found)
+}
+
+/// [`constrained_shortest_path`], also reporting how many partial paths the
+/// search expanded -- the number a caller reports as its iterations.
+pub fn constrained_shortest_path_search(
+    view: &GraphView,
+    resources: &[f64],
+    source: NodeId,
+    target: NodeId,
+    max_resource: f64,
+    interrupted: &dyn Fn() -> bool,
+) -> Result<ConstrainedSearch, ConstrainedPathError> {
     if invalid(max_resource) {
         return Err(ConstrainedPathError::BadLimit(max_resource));
     }
@@ -165,10 +188,12 @@ pub fn constrained_shortest_path(
     let mut queue = BinaryHeap::from([Queued { cost: 0.0, resource: 0.0, label: 0 }]);
 
     let mut until_check = CHECK_EVERY;
+    let mut expanded = 0;
     while let Some(Queued { label: id, .. }) = queue.pop() {
         if !alive[id] {
             continue;
         }
+        expanded += 1;
         let (u, cost, resource) = (labels[id].node, labels[id].cost, labels[id].resource);
         if u == to {
             let mut path = Vec::new();
@@ -178,7 +203,7 @@ pub fn constrained_shortest_path(
                 at = labels[l].parent;
             }
             path.reverse();
-            return Ok(Some(ConstrainedPath { path, cost, resource }));
+            return Ok(ConstrainedSearch { found: Some(ConstrainedPath { path, cost, resource }), expanded });
         }
         until_check -= 1;
         if until_check == 0 {
@@ -218,7 +243,7 @@ pub fn constrained_shortest_path(
             queue.push(Queued { cost: c, resource: r, label: new });
         }
     }
-    Ok(None)
+    Ok(ConstrainedSearch { found: None, expanded })
 }
 
 #[cfg(test)]
@@ -265,6 +290,35 @@ mod tests {
             (0, 2, 5.0, 1.0), (2, 3, 5.0, 1.0),
             (0, 3, 20.0, 1.0),
         ])
+    }
+
+    fn search(g: &(GraphView, Vec<f64>), s: usize, t: usize, max: f64) -> ConstrainedSearch {
+        constrained_shortest_path_search(&g.0, &g.1, 10 + s as u64, 10 + t as u64, max, &never).unwrap()
+    }
+
+    #[test]
+    fn the_search_reports_its_expansions_and_finds_what_the_plain_call_finds() {
+        let g = three_routes();
+        for max in [100.0, 20.0, 19.0, 2.0, 1.0, 0.5] {
+            let searched = search(&g, 0, 3, max);
+            assert_eq!(searched.found, solve(&g, 0, 3, max), "limit {max}");
+            assert!(searched.expanded >= 1, "limit {max}: the source itself is expanded");
+        }
+        // With no real limit: s, then a (cost 1), then t through a (cost 2),
+        // which ends the search -- b (cost 5) is never taken off the queue.
+        assert_eq!(search(&g, 0, 3, 100.0).expanded, 3);
+    }
+
+    #[test]
+    fn a_search_that_finds_nothing_still_reports_its_work() {
+        let g = three_routes();
+        // Every relationship needs more than 0.5: only the source is expanded.
+        let nothing = search(&g, 0, 3, 0.5);
+        assert_eq!((nothing.found, nothing.expanded), (None, 1));
+        // The empty path: the source is the target, expanded once.
+        let here = search(&g, 2, 2, 0.0);
+        assert_eq!(here.expanded, 1);
+        assert_eq!(here.found.map(|p| p.path), Some(vec![12]));
     }
 
     #[test]
