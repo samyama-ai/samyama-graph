@@ -12,6 +12,7 @@
 pub mod codec;
 pub mod content_hash;
 pub mod encryption;
+pub mod eval_gen;
 pub mod format;
 pub mod keys;
 pub mod persist;

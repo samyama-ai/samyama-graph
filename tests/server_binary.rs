@@ -1658,3 +1658,41 @@ fn repeated_sigkills_always_recover_a_prefix_of_the_acknowledged_writes() {
         sorted[sorted.len() - 1]
     );
 }
+
+/// ML-14 (#1772): `eval-gen` writes an evaluation set `verify` accepts, and
+/// refuses bad usage with 64.
+#[test]
+fn eval_gen_writes_a_set_that_verify_accepts() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = samyama::GraphStore::new();
+    let mut people = Vec::new();
+    for i in 0..30i64 {
+        let n = store.create_node("Person");
+        let node = store.get_node_mut(n).unwrap();
+        node.set_property("name", format!("p{i:02}"));
+        node.set_property("age", 20 + i);
+        people.push(n);
+    }
+    for i in 0..30usize {
+        store.create_edge(people[i], people[(i * 7 + 1) % 30], "KNOWS").unwrap();
+    }
+    let snap = dir.path().join("people.sgsnap");
+    samyama::snapshot::export_tenant(&store, std::fs::File::create(&snap).unwrap()).unwrap();
+    let out = dir.path().join("eval.sgqueries");
+
+    run(&["eval-gen", s(&snap), "--out", s(&out), "--count", "40", "--seed", "9"], &[])
+        .assert_code(0)
+        .out_has("wrote")
+        .out_has("unanswerable")
+        .out_has("KG-08: meets");
+    let catalog: serde_json::Value = serde_json::from_slice(&std::fs::read(&out).unwrap()).unwrap();
+    assert_eq!(catalog["format"], "samyama.queries/1");
+    assert_eq!(catalog["generated_by"].as_str().unwrap().rsplit(' ').next(), Some("seed=9"));
+    assert!(catalog["entries"].as_array().unwrap().iter().all(|e| e["answer"].is_object()));
+
+    run(&["verify", s(&snap), "--queries", s(&out)], &[]).assert_code(0);
+
+    run(&["eval-gen", s(&snap)], &[]).assert_code(64);
+    run(&["eval-gen", s(&snap), "--out", s(&out), "--count", "many"], &[]).assert_code(64);
+    run(&["eval-gen", s(&dir.path().join("missing.sgsnap")), "--out", s(&out)], &[]).assert_code(66);
+}
