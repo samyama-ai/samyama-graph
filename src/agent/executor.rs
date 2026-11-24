@@ -1,5 +1,5 @@
 //! Plan executor — runs a `ToolPlan` against registered `Tool`s, writing
-//! one `(:Question)-[:USED_TOOL]->(:Tool)` edge per call with timing and
+//! one `(:AgentQuestion)-[:USED_TOOL]->(:AgentTool)` edge per call with timing and
 //! cost telemetry. The same Question node is reused across runs sharing
 //! the same prompt (qid = sha256(prompt) prefix).
 //!
@@ -8,6 +8,7 @@
 //! written straight into the `GraphStore`, which never reached disk on its own
 //! and could be saved later by an unrelated write, under that write's tenant.
 
+use super::memory_labels::{AGENT_QUESTION, AGENT_TOOL};
 use crate::agent::planner::{PlanRunResult, ToolCall, ToolCallRecord, ToolPlan};
 use crate::agent::{AgentError, AgentResult, Tool};
 use crate::graph::{GraphStore, Label, NodeId, PropertyMap, PropertyValue};
@@ -169,19 +170,21 @@ fn write_telemetry(
     records: &[ToolCallRecord],
     now_ms: i64,
 ) -> Result<(), String> {
-    // Find-or-create Question node by qid.
-    let q_node = match find_node_by_property(store, "Question", "qid", qid) {
+    // Find-or-create the question's node by qid. `AgentQuestion`, not
+    // `Question`: a domain graph has questions of its own, and telemetry is
+    // agent memory, which export and publishing must tell apart (#2242).
+    let q_node = match find_node_by_property(store, AGENT_QUESTION, "qid", qid) {
         Some(nid) => nid,
-        None => create_node(store, tenant, "Question", &[("qid", qid), ("text", prompt)])?,
+        None => create_node(store, tenant, AGENT_QUESTION, &[("qid", qid), ("text", prompt)])?,
     };
 
-    // Find-or-create one Tool node per distinct tool referenced.
+    // Find-or-create one tool node per distinct tool referenced.
     let mut tool_nodes: HashMap<String, NodeId> = HashMap::new();
     for rec in records {
         if tool_nodes.contains_key(&rec.tool) { continue; }
-        let nid = match find_node_by_property(store, "Tool", "tid", &rec.tool) {
+        let nid = match find_node_by_property(store, AGENT_TOOL, "tid", &rec.tool) {
             Some(nid) => nid,
-            None => create_node(store, tenant, "Tool", &[("tid", rec.tool.as_str())])?,
+            None => create_node(store, tenant, AGENT_TOOL, &[("tid", rec.tool.as_str())])?,
         };
         tool_nodes.insert(rec.tool.clone(), nid);
     }
@@ -372,9 +375,9 @@ mod tests {
 
         // Telemetry: one Question, three Tool nodes, one USED_TOOL edge per call.
         let g = store.read().await;
-        let q = find_node_by_property(&g, "Question", "qid", &run.question_id).expect("question node");
+        let q = find_node_by_property(&g, "AgentQuestion", "qid", &run.question_id).expect("question node");
         assert_eq!(g.node_property(q, "text"), Some(PropertyValue::String("what?".into())));
-        assert_eq!(g.get_nodes_by_label(&Label::new("Tool")).len(), 3);
+        assert_eq!(g.get_nodes_by_label(&Label::new("AgentTool")).len(), 3);
         let mut edges = g.get_outgoing_edges(q);
         edges.sort_by_key(|e| match e.properties.get("slot") {
             Some(PropertyValue::Integer(i)) => *i,
@@ -397,9 +400,9 @@ mod tests {
         exec.execute("same", &plan).await.unwrap();
         exec.execute("same", &plan).await.unwrap();
         let g = store.read().await;
-        assert_eq!(g.get_nodes_by_label(&Label::new("Question")).len(), 1);
-        assert_eq!(g.get_nodes_by_label(&Label::new("Tool")).len(), 1);
-        let q = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("same")).unwrap();
+        assert_eq!(g.get_nodes_by_label(&Label::new("AgentQuestion")).len(), 1);
+        assert_eq!(g.get_nodes_by_label(&Label::new("AgentTool")).len(), 1);
+        let q = find_node_by_property(&g, "AgentQuestion", "qid", &PlanExecutor::question_id("same")).unwrap();
         assert_eq!(g.get_outgoing_edges(q).len(), 4);
     }
 
@@ -410,9 +413,9 @@ mod tests {
         assert!(run.records.is_empty());
         assert_eq!(run.total_token_cost, 0);
         let g = store.read().await;
-        assert_eq!(g.get_nodes_by_label(&Label::new("Question")).len(), 1);
-        assert!(g.get_nodes_by_label(&Label::new("Tool")).is_empty());
-        assert!(find_node_by_property(&g, "Question", "qid", "no-such-qid").is_none());
+        assert_eq!(g.get_nodes_by_label(&Label::new("AgentQuestion")).len(), 1);
+        assert!(g.get_nodes_by_label(&Label::new("AgentTool")).is_empty());
+        assert!(find_node_by_property(&g, "AgentQuestion", "qid", "no-such-qid").is_none());
     }
 
     #[tokio::test]
@@ -426,9 +429,9 @@ mod tests {
         exec.execute("second", &ToolPlan::default()).await.unwrap();
         exec.execute("second", &ToolPlan::default()).await.unwrap();
         let g = store.read().await;
-        assert_eq!(g.get_nodes_by_label(&Label::new("Question")).len(), 2);
-        let q1 = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("first"));
-        let q2 = find_node_by_property(&g, "Question", "qid", &PlanExecutor::question_id("second"));
+        assert_eq!(g.get_nodes_by_label(&Label::new("AgentQuestion")).len(), 2);
+        let q1 = find_node_by_property(&g, "AgentQuestion", "qid", &PlanExecutor::question_id("first"));
+        let q2 = find_node_by_property(&g, "AgentQuestion", "qid", &PlanExecutor::question_id("second"));
         assert!(q1.is_some() && q2.is_some() && q1 != q2);
     }
 }

@@ -1,6 +1,6 @@
 //! Agent memory reaches disk under the tenant that wrote it (#2241).
 //!
-//! `PlanExecutor` used to write its `(:Question)-[:USED_TOOL]->(:Tool)`
+//! `PlanExecutor` used to write its `(:AgentQuestion)-[:USED_TOOL]->(:AgentTool)`
 //! telemetry straight into the `GraphStore`. Nothing persisted it, so it was
 //! either lost on restart or saved by the next unrelated write, under that
 //! write's tenant. It now goes through `PersistedWriter`, which does what the
@@ -137,7 +137,7 @@ async fn plan_executor_telemetry_survives_a_restart_under_its_own_tenant() {
     );
 
     let (nodes, edges) = restart(dir.path(), pm, TENANT);
-    let questions = labelled(&nodes, "Question");
+    let questions = labelled(&nodes, "AgentQuestion");
     assert_eq!(questions.len(), 1, "{nodes:?}");
     assert_eq!(
         questions[0].properties.get("qid"),
@@ -147,7 +147,7 @@ async fn plan_executor_telemetry_survives_a_restart_under_its_own_tenant() {
         questions[0].properties.get("text"),
         Some(&PropertyValue::String("what is echoed?".into()))
     );
-    let tools = labelled(&nodes, "Tool");
+    let tools = labelled(&nodes, "AgentTool");
     assert_eq!(tools.len(), 1, "{nodes:?}");
     assert_eq!(
         tools[0].properties.get("tid"),

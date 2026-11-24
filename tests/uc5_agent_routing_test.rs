@@ -78,7 +78,7 @@ impl MultiObjectiveProblem for RoutingProblem {
         let id_list = active.iter().map(|t| format!("\"{t}\""))
             .collect::<Vec<_>>().join(", ");
         let q = format!(
-            "MATCH (:Question {{qid: \"{QUESTION_ID}\"}})-[r:USED_TOOL]->(t:Tool) \
+            "MATCH (:AgentQuestion {{qid: \"{QUESTION_ID}\"}})-[r:USED_TOOL]->(t:AgentTool) \
              WHERE t.tid IN [{id_list}] \
              RETURN t.tid AS tid, avg(r.latency_ms) AS lat, \
                     avg(r.token_cost) AS tok, avg(r.hit_rate) AS acc"
@@ -123,13 +123,13 @@ async fn uc5_pareto_front_is_diverse_and_dup_free() {
     let client = Arc::new(EmbeddedClient::new());
     {
         let mut store = client.store_write().await;
-        let q_node = store.create_node("Question");
+        let q_node = store.create_node("AgentQuestion");
         if let Some(node) = store.get_node_mut(q_node) {
             node.set_property("qid", QUESTION_ID);
         }
         let mut tool_id = HashMap::<&str, samyama::graph::NodeId>::new();
         for t in TOOLS {
-            let nid = store.create_node("Tool");
+            let nid = store.create_node("AgentTool");
             if let Some(node) = store.get_node_mut(nid) {
                 node.set_property("tid", *t);
             }

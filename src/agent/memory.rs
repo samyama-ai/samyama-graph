@@ -3,11 +3,11 @@
 use crate::graph::{EdgeType, GraphStore, Label, NodeId, PropertyValue};
 use crate::persistence::PersistedWriter;
 
-/// `AgentDecision` is agent memory, so it belongs in the single memory label
-/// list (#2242) once that exists -- export exclusion and the publish gate read
-/// that list, and a decision's `rationale` is free text a tenant would not want
-/// in a published snapshot. Until then this label is not excluded from either.
-const DECISION_LABEL: &str = "AgentDecision";
+/// `AgentDecision` is agent memory: it is in the single memory label list
+/// (`memory_labels`, #2242), so export leaves it out by default and the publish
+/// gate refuses it -- a decision's `rationale` is free text a tenant would not
+/// want in a published snapshot.
+const DECISION_LABEL: &str = super::memory_labels::AGENT_DECISION;
 const CAUSED_BY: &str = "CAUSED_BY";
 const EVIDENCED_BY: &str = "EVIDENCED_BY";
 

@@ -76,11 +76,22 @@ pub struct Report {
     pub values_scanned: usize,
     pub nodes_scanned: usize,
     pub edges_scanned: usize,
+    /// Agent-memory nodes found, by memory label (#2242). Any at all refuses
+    /// publication: memory can hold user conversations and agent decisions,
+    /// and unlike an identifier pattern it is never a false positive -- the
+    /// label says what it is -- so no waiver accepts it.
+    pub agent_memory: BTreeMap<String, usize>,
 }
 
 impl Report {
+    /// No identifier pattern and no agent memory.
     pub fn is_clean(&self) -> bool {
-        self.findings.is_empty()
+        self.findings.is_empty() && self.agent_memory.is_empty()
+    }
+
+    /// Agent-memory nodes in the snapshot, all labels together.
+    pub fn agent_memory_nodes(&self) -> usize {
+        self.agent_memory.values().sum()
     }
 }
 
@@ -436,6 +447,14 @@ impl Scanner {
         self.report.nodes_scanned += 1;
     }
 
+    /// Note a node's labels; a node with a memory label is counted under the
+    /// first such label it has.
+    pub fn note_labels<'a>(&mut self, labels: impl IntoIterator<Item = &'a str>) {
+        if let Some(label) = labels.into_iter().find(|l| crate::agent::memory_labels::is_memory_label(l)) {
+            *self.report.agent_memory.entry(label.to_string()).or_default() += 1;
+        }
+    }
+
     pub fn note_edge(&mut self) {
         self.report.edges_scanned += 1;
     }
@@ -487,6 +506,9 @@ pub fn scan_snapshot<R: std::io::BufRead>(reader: R) -> Result<Report, String> {
         let where_ = match kind {
             "n" => {
                 scanner.note_node();
+                if let Some(labels) = v.get("labels").and_then(|l| l.as_array()) {
+                    scanner.note_labels(labels.iter().filter_map(|l| l.as_str()));
+                }
                 v.get("labels")
                     .and_then(|l| l.as_array())
                     .and_then(|a| a.first())

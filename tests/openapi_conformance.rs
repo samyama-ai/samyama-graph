@@ -226,7 +226,12 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
             json("no fields", "/api/vector-search", r#"{}"#),
             json("broken JSON", "/api/vector-search", BROKEN),
         ],
-        ("POST", "/api/snapshot/export") => vec![bare("export", "/api/snapshot/export")],
+        ("POST", "/api/snapshot/export") => vec![
+            bare("export", "/api/snapshot/export"),
+            // #2242: a full backup, and a value that is not a boolean.
+            bare("with agent memory", "/api/snapshot/export?include_agent_memory=true"),
+            bare("a flag that is not a boolean", "/api/snapshot/export?include_agent_memory=yes"),
+        ],
         ("POST", "/api/snapshot/import") => vec![raw(
             "not multipart",
             "/api/snapshot/import",

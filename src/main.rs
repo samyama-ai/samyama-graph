@@ -588,8 +588,20 @@ fn cmd_pii_scan(argv: &[String]) -> i32 {
                         f.samples.join(", ")
                     );
                 }
+                // Agent memory refuses publication whatever the waivers say
+                // (#2242): the label is what it is, so there is nothing to
+                // accept as a false positive.
+                for (label, n) in &report.agent_memory {
+                    println!(
+                        "  REFUSED   agent memory  {label:<34} {n} node(s) -- export without \
+                         include_agent_memory before publishing"
+                    );
+                }
+                if report.agent_memory_nodes() > 0 {
+                    worst = worst.max(1);
+                }
                 if report.is_clean() {
-                    println!("  clean -- no identifier patterns found");
+                    println!("  clean -- no identifier patterns and no agent memory found");
                 }
                 if !t.unwaived.is_empty() {
                     worst = worst.max(1);

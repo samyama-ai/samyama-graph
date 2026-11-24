@@ -3526,17 +3526,49 @@ pub async fn import_json_handler(
 
 // ==================== Snapshot Handlers ====================
 
+/// Query parameters of `POST /api/snapshot/export`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotExportParams {
+    /// Write agent memory too, for a full backup (#2242). Off by default:
+    /// memory can hold personal data and is left out of an ordinary export.
+    #[serde(default)]
+    pub include_agent_memory: bool,
+}
+
 /// POST /api/snapshot/export — export a .sgsnap snapshot
-pub async fn export_snapshot_handler(State(state): State<AppState>) -> impl IntoResponse {
+///
+/// Agent memory is left out unless `?include_agent_memory=true` (#2242); the
+/// loss header and the file's own `dropped` list say how much was left out.
+pub async fn export_snapshot_handler(
+    State(state): State<AppState>,
+    params: Result<Query<SnapshotExportParams>, axum::extract::rejection::QueryRejection>,
+) -> impl IntoResponse {
+    // A value that is not a boolean is refused by name, as JSON, rather than
+    // read as "no" and handed back an export that silently lacks the memory.
+    let params = match params {
+        Ok(Query(p)) => p,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid export parameters: {}", e.body_text()) })),
+            )
+                .into_response()
+        }
+    };
     let store_guard = state.store.read().await;
+    let opts = crate::snapshot::ExportOptions {
+        include_agent_memory: params.include_agent_memory,
+        ..Default::default()
+    };
 
     let mut buf = Vec::new();
     // Encrypted when a key is configured (REL-09). The filename below says so
     // too, because a `.sgsnap` an operator cannot open without a key should not
     // be indistinguishable from one they can.
     let exported = match &state.snapshot_key {
-        None => crate::snapshot::export_tenant(&store_guard, &mut buf),
-        Some(k) => crate::snapshot::export_tenant_encrypted(&store_guard, &mut buf, k),
+        None => crate::snapshot::export_tenant_with(&store_guard, &mut buf, &opts),
+        Some(k) => crate::snapshot::export_tenant_encrypted_with(&store_guard, &mut buf, k, &opts),
     };
     match exported {
         Ok(stats) => {

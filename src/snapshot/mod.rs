@@ -108,6 +108,30 @@ impl Default for WriteOptions {
     }
 }
 
+/// How an export is written.
+///
+/// **Agent memory is left out unless asked for** (#2242). Memory -- the
+/// labels in [`crate::agent::memory_labels::MEMORY_LABELS`] -- shares the tenant
+/// with the domain data and can hold user conversations and agent decisions,
+/// which is personal data in a file that is easy to hand on. A default export
+/// is the knowledge graph alone: memory nodes are not written, and neither is
+/// any relationship that touches one, so a data node linked to memory exports
+/// cleanly without the link. What was left out is counted in the header's
+/// `dropped` list. A full backup sets `include_agent_memory`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExportOptions {
+    /// gzip level, 0-9. See [`DEFAULT_SNAPSHOT_COMPRESSION`].
+    pub compression_level: u32,
+    /// Write agent memory as well: for a full backup that must lose nothing.
+    pub include_agent_memory: bool,
+}
+
+impl Default for ExportOptions {
+    fn default() -> Self {
+        Self { compression_level: DEFAULT_SNAPSHOT_COMPRESSION, include_agent_memory: false }
+    }
+}
+
 /// Write `store` to `path` as a `.sgsnap`, from any `GraphStore`, with no
 /// server involved (#1907).
 ///
@@ -156,7 +180,13 @@ pub fn write_file_if(
 
     let written = (|| -> Result<ExportStats, Box<dyn std::error::Error>> {
         let mut out = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-        let stats = export_tenant_with_compression(store, &mut out, opts.compression_level)?;
+        let stats = export_tenant_with(
+            store,
+            &mut out,
+            // A file written here is a KG artifact (`convert`, loaders):
+            // agent memory stays out of it, as in any default export.
+            &ExportOptions { compression_level: opts.compression_level, ..Default::default() },
+        )?;
         let file = out.into_inner().map_err(|e| e.into_error())?;
         file.sync_all()?;
         Ok(stats)
@@ -251,8 +281,35 @@ pub fn export_tenant_with_compression(
     writer: impl Write,
     compression_level: u32,
 ) -> Result<ExportStats, Box<dyn std::error::Error>> {
-    let nodes = store.all_nodes();
-    let full_edges = store.all_edges(); // Full Edge objects (may be empty for stub-loaded)
+    export_tenant_with(store, writer, &ExportOptions { compression_level, ..Default::default() })
+}
+
+/// Export with explicit [`ExportOptions`]: the one implementation every other
+/// export entry point calls.
+pub fn export_tenant_with(
+    store: &GraphStore,
+    writer: impl Write,
+    opts: &ExportOptions,
+) -> Result<ExportStats, Box<dyn std::error::Error>> {
+    let compression_level = opts.compression_level;
+    // Agent memory, unless asked for (#2242): these nodes are not written, and
+    // neither is any relationship with one of them at either end.
+    let memory: HashSet<NodeId> = if opts.include_agent_memory {
+        HashSet::new()
+    } else {
+        crate::agent::memory_labels::memory_node_ids(store)
+    };
+    let is_memory = |id: NodeId| memory.contains(&id);
+    let all_nodes = store.all_nodes();
+    let nodes: Vec<&crate::graph::Node> = all_nodes.iter().copied().filter(|n| !is_memory(n.id)).collect();
+    let all_full_edges = store.all_edges(); // Full Edge objects (may be empty for stub-loaded)
+    // Collect full edge IDs to avoid double-counting -- over every full edge,
+    // kept or not, so a memory edge is never mistaken for a stub below.
+    let full_edge_ids = EdgeIdSet::from_ids(all_full_edges.iter().map(|e| e.id.as_u64()));
+    let (full_edges, memory_full_edges): (Vec<_>, Vec<_>) = all_full_edges
+        .into_iter()
+        .partition(|e| !is_memory(e.source) && !is_memory(e.target));
+    let mut memory_edge_count = memory_full_edges.len() as u64;
 
     // Collect unique labels
     let mut label_set: HashSet<String> = HashSet::new();
@@ -266,32 +323,28 @@ pub fn export_tenant_with_compression(
     let mut edge_type_set: HashSet<String> = HashSet::new();
     let mut adjacency_edge_count: u64 = 0;
 
-    // Collect full edge IDs to avoid double-counting
-    let full_edge_ids = EdgeIdSet::from_ids(full_edges.iter().map(|e| e.id.as_u64()));
-
-    // Count adjacency-only (stub) edges
-    for node in &nodes {
+    // Count adjacency-only edges, over every node: one out of a memory node is
+    // left out and counted as such, as is one into a memory node. (A stub made
+    // by `create_edge_stub` keeps its endpoints, so `all_edges` returns it and
+    // it is handled above; this covers adjacency with no endpoint record.)
+    for node in &all_nodes {
         let idx = node.id.as_u64() as usize;
-        // Frozen outgoing neighbors
         let frozen = store.frozen_outgoing_neighbors(idx);
-        for &(_nid, eid) in &frozen {
-            if !full_edge_ids.contains(eid.as_u64()) {
-                // A frozen entry whose type misses is a relationship deleted
-                // after compaction, kept only behind its tombstone. It is not
-                // in the graph, so it is not counted or written (#1096).
-                let Some(et) = store.get_edge_type(eid) else { continue };
-                adjacency_edge_count += 1;
-                edge_type_set.insert(et.as_str().to_string());
+        let buffered = store.get_outgoing_neighbor_slice(node.id);
+        for &(tgt, eid) in frozen.iter().chain(buffered.iter()) {
+            if full_edge_ids.contains(eid.as_u64()) {
+                continue;
             }
-        }
-        // Write buffer outgoing
-        let buf = store.get_outgoing_neighbor_slice(node.id);
-        for &(_nid, eid) in buf {
-            if !full_edge_ids.contains(eid.as_u64()) {
-                let Some(et) = store.get_edge_type(eid) else { continue };
-                adjacency_edge_count += 1;
-                edge_type_set.insert(et.as_str().to_string());
+            // A frozen entry whose type misses is a relationship deleted after
+            // compaction, kept only behind its tombstone. It is not in the
+            // graph, so it is not counted or written (#1096).
+            let Some(et) = store.get_edge_type(eid) else { continue };
+            if is_memory(node.id) || is_memory(tgt) {
+                memory_edge_count += 1;
+                continue;
             }
+            adjacency_edge_count += 1;
+            edge_type_set.insert(et.as_str().to_string());
         }
     }
 
@@ -329,6 +382,25 @@ pub fn export_tenant_with_compression(
     // what it is now: said in the loss report rather than claimed silently.
     let sources = store.snapshot_sources().to_vec();
     let mut dropped = dropped;
+    if !memory.is_empty() {
+        dropped.push(crate::snapshot::format::Dropped {
+            what: AGENT_MEMORY_NODES.to_string(),
+            count: memory.len() as u64,
+            detail: "Agent memory (decisions, agent questions and tools, extraction telemetry) \
+                     is left out of an export unless it is asked for, because it can hold \
+                     personal data. Export with include_agent_memory for a full backup."
+                .to_string(),
+        });
+    }
+    if memory_edge_count > 0 {
+        dropped.push(crate::snapshot::format::Dropped {
+            what: AGENT_MEMORY_EDGES.to_string(),
+            count: memory_edge_count,
+            detail: "Relationships with agent memory at either end are left out with it; the \
+                     data nodes they joined are exported without them."
+                .to_string(),
+        });
+    }
     if !sources.is_empty() && !store.snapshot_sources_are_current() {
         dropped.push(crate::snapshot::format::Dropped {
             what: "sources_may_be_stale".to_string(),
@@ -452,7 +524,8 @@ pub fn export_tenant_with_compression(
         let src_id = node.id.as_u64();
         let idx = src_id as usize;
         let one = |tgt_nid: NodeId, eid: crate::graph::EdgeId, out: &mut Vec<u8>| -> serde_json::Result<()> {
-            if full_edge_ids.contains(eid.as_u64()) {
+            // Written as full edges, or into agent memory that is not written.
+            if full_edge_ids.contains(eid.as_u64()) || is_memory(tgt_nid) {
                 return Ok(());
             }
             // Same rule as the count above: no type means deleted. Writing it
@@ -496,6 +569,11 @@ pub fn export_tenant_with_compression(
         dropped,
     })
 }
+
+/// `dropped` row naming the agent-memory nodes an export left out (#2242).
+pub const AGENT_MEMORY_NODES: &str = "agent_memory_nodes";
+/// `dropped` row naming the relationships left out with them.
+pub const AGENT_MEMORY_EDGES: &str = "agent_memory_edges";
 
 /// Counts the bytes that pass through it to `inner`: the size of the file an
 /// export produced. `ExportStats::bytes_written` was a literal 0 from the first
@@ -580,8 +658,18 @@ pub fn export_tenant_encrypted(
     writer: impl Write,
     key: &[u8; encryption::KEY_BYTES],
 ) -> Result<ExportStats, Box<dyn std::error::Error>> {
+    export_tenant_encrypted_with(store, writer, key, &ExportOptions::default())
+}
+
+/// [`export_tenant_encrypted`] with explicit [`ExportOptions`].
+pub fn export_tenant_encrypted_with(
+    store: &GraphStore,
+    writer: impl Write,
+    key: &[u8; encryption::KEY_BYTES],
+    opts: &ExportOptions,
+) -> Result<ExportStats, Box<dyn std::error::Error>> {
     let mut enc = encryption::EncryptingWriter::new(writer, key)?;
-    let stats = export_tenant(store, &mut enc)?;
+    let stats = export_tenant_with(store, &mut enc, opts)?;
     // `finish` and not `Drop`: the terminator is what tells a reader the file
     // is whole, and a `Drop` that failed to write it on a full disk could not
     // say so. A snapshot without its terminator does not import.

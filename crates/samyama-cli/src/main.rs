@@ -11,6 +11,7 @@ use samyama_sdk::{RemoteClient, SamyamaClient};
 mod doctor;
 mod load;
 mod snapshot_keys;
+mod export;
 
 #[derive(Parser)]
 #[command(name = "samyama", version, about = "Samyama Graph Database CLI")]
@@ -137,7 +138,7 @@ enum Commands {
         #[arg(long, default_value = load::DEFAULT_SOURCE, env = "SAMYAMA_KG_SOURCE")]
         source: String,
     },
-    /// Inspect snapshots without importing them into a graph store
+    /// Inspect snapshot files, or export the server's graph as one
     Snapshot {
         #[command(subcommand)]
         command: SnapshotCommands,
@@ -146,6 +147,19 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum SnapshotCommands {
+    /// Save the server's graph as a .sgsnap file
+    ///
+    /// Agent memory (decisions, agent questions and tools, extraction
+    /// telemetry) is left out unless `--include-agent-memory` is given: it can
+    /// hold personal data. What was left out is reported.
+    Export {
+        /// The file to write; replaced only once the export is complete
+        output: std::path::PathBuf,
+
+        /// Include agent memory, for a full backup that loses nothing
+        #[arg(long)]
+        include_agent_memory: bool,
+    },
     /// Analyze dedup keys across snapshots before a federation load
     Keys {
         /// Snapshot files, processed in this order when predicting merges
@@ -230,6 +244,14 @@ async fn main() {
             load::run_pull(&kg, output.as_deref(), &cli.url, &source, json).await
         }
         Commands::Snapshot { command } => match command {
+            SnapshotCommands::Export { output, include_agent_memory } => export::run_export(
+                &cli.url,
+                &output,
+                include_agent_memory,
+                matches!(&cli.format, OutputFormat::Json),
+            )
+            .await
+            .map_err(|e| e.into()),
             SnapshotCommands::Keys { files, label, json } => {
                 run_snapshot_keys(
                     &files,

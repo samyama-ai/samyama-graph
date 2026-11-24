@@ -1125,7 +1125,22 @@ paths:
     post:
       operationId: exportSnapshot
       summary: Export a tenant as a portable .sgsnap snapshot
+      description: >
+        Agent memory (the labels the engine lists as memory: AgentDecision,
+        AgentQuestion, AgentTool and the extraction telemetry) is left out unless
+        `include_agent_memory` is true, along with every relationship that
+        touches it; the snapshot's `dropped` list counts what was left out.
+      parameters:
+        - name: include_agent_memory
+          in: query
+          required: false
+          description: Write agent memory too, for a full backup.
+          schema:
+            type: boolean
+            default: false
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The snapshot bytes
           content:

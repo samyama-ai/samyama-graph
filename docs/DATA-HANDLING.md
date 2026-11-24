@@ -151,6 +151,35 @@ scan — which is what the scan is for. Four of the eighteen entries are marked
 (a twelve-digit run that satisfies Verhoeff, a drug code shaped like a PAN),
 pinned at one occurrence so a second still fails.
 
+### Agent memory (#2242)
+
+Agent memory -- the labels listed once in `src/agent/memory_labels.rs`:
+`AgentDecision`, `AgentQuestion`, `AgentTool`, and the extraction telemetry
+`ExtractionAttempt`, `ExtractionSource`, `VerifiedExtractionDemo` -- shares the
+tenant with the domain data and can hold user conversations and agent
+decisions. Three rules keep it out of what leaves the machine:
+
+- **A default export leaves it out.** `POST /api/snapshot/export` and
+  `samyama-cli snapshot export` write no memory node and no relationship that
+  touches one; a data node linked to memory exports without the link. The
+  snapshot's `dropped` list counts both (`agent_memory_nodes`,
+  `agent_memory_edges`), and the HTTP response repeats it in
+  `x-samyama-export-dropped`.
+- **A full backup asks for it.** `?include_agent_memory=true`, or
+  `--include-agent-memory`, writes memory too, so restoring that backup loses
+  nothing.
+- **Publishing refuses it.** `samyama pii-scan` reports any memory node as
+  `REFUSED` and exits non-zero, even for a snapshot exported with
+  `include_agent_memory`. No waiver accepts it: the label says what the node
+  is, so there is no false positive to waive.
+
+Restoring a knowledge-graph snapshot does not touch the memory already in the
+graph: import merges into the tenant rather than replacing it.
+
+The plan executor's telemetry used to be labelled `Question` and `Tool`, which
+are ordinary domain labels too. It is now `AgentQuestion` and `AgentTool`, so a
+domain graph's own `Question` and `Tool` nodes are never mistaken for memory.
+
 ### Question catalogs (`.sgqueries`, #1159)
 
 A question catalog is text somebody wrote, and if it was derived from traffic

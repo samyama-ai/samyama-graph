@@ -5,6 +5,7 @@
 pub mod enrich;
 pub mod executor;
 pub mod memory;
+pub mod memory_labels;
 pub mod planner;
 pub mod signature;
 pub mod tools;
@@ -66,7 +67,7 @@ pub struct AgentRuntime {
     /// Optional writer for telemetry from plan execution, and the tenant
     /// the telemetry belongs to. When set, `execute_plan` /
     /// `plan_and_execute` record each tool call as a
-    /// `(:Question)-[:USED_TOOL]->(:Tool)` edge.
+    /// `(:AgentQuestion)-[:USED_TOOL]->(:AgentTool)` edge.
     telemetry: Option<(PersistedWriter, String)>,
 }
 

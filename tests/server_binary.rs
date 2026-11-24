@@ -483,6 +483,42 @@ fn pii_scan_names_what_it_found() {
         .out_has("1 waiver(s) matched nothing");
 }
 
+/// #2242: a snapshot carrying agent memory is refused at publish, and no
+/// waiver accepts it; the same graph exported by default passes.
+#[test]
+fn pii_scan_refuses_agent_memory_whatever_the_waivers() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = samyama::GraphStore::new();
+    store.create_node("Drug");
+    store.create_node("AgentDecision");
+    let full = dir.path().join("full.sgsnap");
+    samyama::snapshot::export_tenant_with(
+        &store,
+        std::fs::File::create(&full).unwrap(),
+        &samyama::snapshot::ExportOptions { include_agent_memory: true, ..Default::default() },
+    )
+    .unwrap();
+    run(&["pii-scan", s(&full)], &[])
+        .assert_code(1)
+        .out_has("REFUSED")
+        .out_has("AgentDecision");
+
+    let waivers = dir.path().join("w.json");
+    std::fs::write(
+        &waivers,
+        r##"[{"kind":"agent memory","location":"AgentDecision","max_distinct":1,
+             "why":"trying to waive it","decided_in":"#test"}]"##,
+    )
+    .unwrap();
+    run(&["pii-scan", "--waivers", s(&waivers), s(&full)], &[])
+        .assert_code(1)
+        .out_has("REFUSED");
+
+    let kg = dir.path().join("kg.sgsnap");
+    samyama::snapshot::export_tenant(&store, std::fs::File::create(&kg).unwrap()).unwrap();
+    run(&["pii-scan", s(&kg)], &[]).assert_code(0).out_has("clean");
+}
+
 #[test]
 fn catalog_build_verify_and_gate_work_end_to_end() {
     let dir = tempfile::tempdir().unwrap();

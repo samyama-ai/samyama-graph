@@ -2,7 +2,7 @@
 //!
 //! Wiring UC5 into the agent runtime: register a real CypherTool, run a
 //! ToolPlan with sequential and parallel calls, verify that
-//! (:Question)-[:USED_TOOL]->(:Tool) telemetry edges land in the store
+//! (:AgentQuestion)-[:USED_TOOL]->(:AgentTool) telemetry edges land in the store
 //! with latency_ms, token_cost, hit_rate, slot, ts_ms.
 
 use samyama::agent::tools::CypherTool;
@@ -76,8 +76,8 @@ async fn executes_sequential_plan_and_writes_telemetry() {
     // Telemetry edges are in the graph: 1 Question, 1 Tool, 2 USED_TOOL edges
     // sharing the same Question (same prompt).
     let g = store.read().await;
-    let questions = g.get_nodes_by_label(&Label::new("Question"));
-    let tools = g.get_nodes_by_label(&Label::new("Tool"));
+    let questions = g.get_nodes_by_label(&Label::new("AgentQuestion"));
+    let tools = g.get_nodes_by_label(&Label::new("AgentTool"));
     assert_eq!(questions.len(), 1, "expected 1 Question node");
     assert_eq!(tools.len(), 1, "expected 1 Tool node (cypher)");
 
@@ -143,7 +143,7 @@ async fn same_prompt_reuses_question_node() {
     rt.execute_plan("different", &plan).await.unwrap();
 
     let g = store.read().await;
-    let questions = g.get_nodes_by_label(&Label::new("Question"));
+    let questions = g.get_nodes_by_label(&Label::new("AgentQuestion"));
     assert_eq!(
         questions.len(),
         2,
