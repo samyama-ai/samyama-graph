@@ -939,6 +939,7 @@ pub fn unknown_procedure_message(name: &str) -> String {
     let known = KNOWN_DB_PROCEDURES
         .iter()
         .chain(super::feature_ops::FeatureProcedure::NAMES)
+        .chain(super::memory_ops::MemoryProcedure::NAMES)
         .copied();
     match crate::query::suggest::closest(name, known) {
         Some(known) => format!("Unknown procedure: `{name}`. Did you mean `{known}`?"),
@@ -4106,6 +4107,20 @@ impl QueryPlanner {
                 .map(|item| (item.name.clone(), item.alias.clone()))
                 .collect();
             return Ok(Box::new(super::feature_ops::FeatureOperator::new(
+                procedure,
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
+        }
+
+        // Agent memory: remember, recall and decision traces (#2099).
+        if let Some(procedure) = super::memory_ops::MemoryProcedure::from_name(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::memory_ops::MemoryOperator::new(
                 procedure,
                 call_clause.arguments.clone(),
                 &yields,

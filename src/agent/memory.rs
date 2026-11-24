@@ -68,12 +68,14 @@ pub async fn record_decision(
         .map_err(|error| error.to_string())
 }
 
-/// The writes of [`record_decision`], run inside its transaction.
+/// The writes of [`record_decision`], run inside its transaction -- for a
+/// caller that already holds the store inside one, such as
+/// `CALL agent.memory.record_decision` within a Cypher statement.
 ///
 /// Inputs are checked before the first node is created, so a missing evidence
 /// node or a parent in another trace is refused without writing anything; the
 /// transaction is what undoes a failure after that point.
-fn record_decision_in(
+pub fn record_decision_in(
     store: &mut GraphStore,
     tenant: &str,
     input: DecisionInput<'_>,
@@ -160,6 +162,12 @@ fn record_decision_in(
         evidence_node_ids: evidence_node_ids.to_vec(),
         outcome: outcome.to_owned(),
     })
+}
+
+/// The trace a recorded decision belongs to, or `None` when `node_id` is not
+/// a decision.
+pub fn decision_trace_id(store: &GraphStore, node_id: NodeId) -> Option<String> {
+    read_step(store, node_id).map(|step| step.trace_id)
 }
 
 /// Read all decisions for a trace in insertion order, including their graph links.
