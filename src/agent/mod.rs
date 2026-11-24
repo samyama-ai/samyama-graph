@@ -7,6 +7,7 @@ pub mod executor;
 pub mod memory;
 pub mod planner;
 pub mod signature;
+pub mod smriti;
 pub mod tools;
 
 use crate::graph::GraphStore;
@@ -394,6 +395,7 @@ mod tests {
             ("mod.rs", include_str!("mod.rs")),
             ("planner.rs", include_str!("planner.rs")),
             ("signature.rs", include_str!("signature.rs")),
+            ("smriti.rs", include_str!("smriti.rs")),
             ("tools.rs", include_str!("tools.rs")),
         ];
         let lock_calls = [".write()", "write_owned(", "blocking_write(", "try_write("];

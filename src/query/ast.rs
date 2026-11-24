@@ -1520,12 +1520,26 @@ impl Query {
         }) || self.calls_a_writing_vector_procedure()
             || self.calls_a_writing_feature_procedure()
             || self.calls_a_writing_retention_procedure()
+            || self.calls_a_writing_memory_procedure()
     }
 
     /// `db.retention.set` / `db.retention.drop` (#2217), which change what
     /// later sweeps delete.
     fn calls_a_writing_retention_procedure(&self) -> bool {
         use crate::query::executor::retention_ops::call_writes;
+        self.call_clause
+            .as_ref()
+            .is_some_and(|c| call_writes(&c.procedure_name))
+            || self.clauses.iter().any(|c| match c {
+                Clause::Call(call) => call_writes(&call.procedure_name),
+                _ => false,
+            })
+    }
+
+    /// `agent.memory.remember` / `agent.memory.record_decision` (#2099),
+    /// which write agent memory.
+    fn calls_a_writing_memory_procedure(&self) -> bool {
+        use crate::query::executor::memory_ops::call_writes;
         self.call_clause
             .as_ref()
             .is_some_and(|c| call_writes(&c.procedure_name))
