@@ -25,7 +25,7 @@ Not on crates.io yet. Depend on it by git:
 
 ```toml
 [dependencies]
-samyama-sdk = { git = "https://github.com/samyama-ai/samyama-graph", tag = "v1.16.0" }
+samyama-sdk = { git = "https://github.com/samyama-ai/samyama-graph", tag = "v1.17.0" }
 tokio = { version = "1", features = ["full"] }
 ```
 
