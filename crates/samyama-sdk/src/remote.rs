@@ -405,8 +405,9 @@ impl RemoteClient {
     ///
     /// [`ConnectionConfig::timeout`] bounds the whole download, as it does a
     /// buffered query; a large export needs a client built with a longer one.
-    /// The request reads only, so a connection or timeout failure is retried
-    /// under the same policy as a query.
+    /// The request reads only -- the server runs it through the read path and
+    /// refuses a write -- so it is [`Replay::Safe`]: a connection failure or a
+    /// timeout is retried, as for a `read_only` query (#2175).
     pub async fn export(
         &self,
         graph: &str,
@@ -420,7 +421,7 @@ impl RemoteClient {
             "format": format.as_str(),
         });
         let response = self
-            .send_with_retry(|| self.http_client.post(&url).json(&body))
+            .send_with_retry(Replay::Safe, || self.http_client.post(&url).json(&body))
             .await?;
         let status = response.status();
         if status.is_success() {
