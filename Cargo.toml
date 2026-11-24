@@ -352,6 +352,10 @@ name = "persist_row_cost"
 harness = false
 
 [[bench]]
+name = "rocksdb_write_stalls"
+harness = false
+
+[[bench]]
 name = "result_cache_gain"
 harness = false
 
