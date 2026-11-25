@@ -27,6 +27,9 @@ const DOCUMENTED_EGRESS: &[(&str, &str)] = &[
     // rather than excused: a stub that holds a client is one edit away from
     // being an egress path, and the statement says it makes no request.
     ("src/agent/tools.rs", "web search: a stub that makes no request"),
+    // `samyama healthcheck` asks the URL it is given (the local server by
+    // default) for its status; it sends only the credential it was handed.
+    ("src/healthcheck.rs", "healthcheck: GET <url>/api/status, the local server by default"),
 ];
 
 fn repo_root() -> PathBuf {
