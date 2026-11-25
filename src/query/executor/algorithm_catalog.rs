@@ -28,6 +28,8 @@ pub enum AlgorithmCategory {
     GraphMetric,
     Temporal,
     Embedding,
+    /// Draws part of the graph, as a GNN trainer's minibatches (ML-02).
+    Sampling,
     Optimization,
     /// Prepares a training dataset: leakage-safe splits and their check (ML-05).
     Dataset,
@@ -104,6 +106,13 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     read("algo.dagLongestPath", &["algo.longestPath"], Path, &["node", "position"]),
     read("algo.transitiveClosure", &[], Path, &["source", "target"]),
     read("algo.randomWalk", &[], Path, &["node", "step"]),
+    read(
+        "algo.sample.neighbors",
+        &["algo.sample.neighbours", "algo.sampleNeighbors", "algo.sampleNeighbours",
+          "algo.neighbourSampling", "algo.neighborSampling"],
+        Sampling,
+        &["batch", "hop", "node", "neighbour"],
+    ),
     read("algo.maxFlow", &[], Path, &["max_flow"]),
     // A summary row (`total_weight`, `components`), then one row per tree
     // edge (`source`, `target`, `weight`).
@@ -505,6 +514,18 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         LABEL,
         EDGE_TYPE,
     ]),
+    // Neighbour sampling (ML-02, #1717). `seeds` is one node id or a list.
+    // `batchSize` has no fixed default: left out, every seed is one batch.
+    ("algo.sample.neighbors", &[
+        pos("seeds", T::List, true),
+        Param { name: "fanout", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None, bound: None },
+        key("direction", T::String, D::String("out")),
+        opt("weightProperty", T::String),
+        opt("batchSize", T::Integer),
+        key("seed", T::Integer, D::Integer(42)),
+        LABEL,
+        EDGE_TYPE,
+    ]),
 ];
 
 /// What each algorithm computes, one sentence, by catalogue name (#2013).
@@ -586,6 +607,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
     ("algo.split", "Assigns each node to train, validation or test so that related nodes (a component, a community, a source, or a time window) land in the same split."),
     ("algo.splitLeakage", "The pairs of related nodes that a split put in different splits, each with the reason they count as a leak."),
+    ("algo.sample.neighbors", "Samples up to fanout neighbours per node at each hop out from the seed nodes, in minibatches, as a GNN trainer draws them; seeded, so the same seed returns the same rows."),
 ];
 
 impl AlgorithmEntry {
