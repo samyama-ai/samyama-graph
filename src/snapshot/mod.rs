@@ -396,23 +396,14 @@ pub fn export_tenant_with_compression(
     // Nodes, then full edges, then adjacency-only edges, each serialized in
     // parallel batches and written in order (#314). See `write_in_parallel`.
     write_in_parallel(&mut gz, &nodes, |node, out| {
-        let mut props = HashMap::new();
-
-        // 1. Node HashMap properties (from full create_node)
-        for (key, value) in &node.properties {
-            props.insert(key.clone(), property_to_json(value));
-        }
-
-        // 2. ColumnStore properties (from set_column_property / create_node_stub path)
-        let col_keys = store.node_columns.get_property_keys(node.id.as_u64() as usize);
-        for key in col_keys {
-            if !props.contains_key(&key) { // Don't override HashMap props
-                let val = store.node_columns.get_property(node.id.as_u64() as usize, &key);
-                if !val.is_null() {
-                    props.insert(key, property_to_json(&val));
-                }
-            }
-        }
+        // Every property wherever it is held, the column winning a clash as on
+        // every read (#2000). This let the row win, so a value a store write had
+        // replaced in the column was exported in place of the current one.
+        let props: HashMap<String, serde_json::Value> = store
+            .node_properties_full(node.id)
+            .iter()
+            .map(|(key, value)| (key.clone(), property_to_json(value)))
+            .collect();
 
         let snap_node = SnapshotNode {
             t: "n".to_string(),
@@ -872,8 +863,13 @@ fn dedup_properties<'a>(rule: &'a str, labels: &[String]) -> Vec<&'a str> {
     }
 }
 
-/// The dedup keys a store node already carries, as `(key, normalized value)` in the order
-/// the index has always inserted them: per key, the row property and then the column.
+/// The dedup keys a store node already carries, as `(key, normalized value)`.
+///
+/// One value per property, read through `node_property` (#2000). This read the
+/// row and then the column and registered both, so a row value a store write
+/// had since replaced in the column still deduplicated incoming nodes onto this
+/// one. Every entry names the same node, so the order they are inserted in is
+/// immaterial.
 fn existing_dedup_entries(
     store: &GraphStore,
     id: NodeId,
@@ -885,16 +881,11 @@ fn existing_dedup_entries(
     let labels: Vec<String> = node.labels.iter().map(|l| l.as_str().to_string()).collect();
     for &key in dedup_keys {
         for property in dedup_properties(key, &labels) {
-            match node.get_property(property) {
-                Some(PropertyValue::String(s)) => out.push((key.to_string(), normalize_dedup(s))),
-                Some(PropertyValue::Integer(i)) => out.push((key.to_string(), i.to_string())),
-                _ => {}
-            }
-            match store.node_columns.get_property(id.as_u64() as usize, property) {
-                PropertyValue::String(s) if !s.is_empty() => {
+            match store.node_property(id, property) {
+                Some(PropertyValue::String(s)) if !s.is_empty() => {
                     out.push((key.to_string(), normalize_dedup(&s)))
                 }
-                PropertyValue::Integer(i) => out.push((key.to_string(), i.to_string())),
+                Some(PropertyValue::Integer(i)) => out.push((key.to_string(), i.to_string())),
                 _ => {}
             }
         }
@@ -1346,21 +1337,15 @@ fn import_tenant_inner(
                             }
                         }
                         _ => {
-                            // Complex types: into the column as well as the row.
-                            // Same reason as the insert path above — the column
-                            // can hold them now, and leaving them row-only makes
-                            // them invisible to a column read (#545).
+                            // Complex types: into the column, as the scalars are.
+                            // They also went into the row, a second copy of the
+                            // value nothing read first (#2000).
                             if matches!(
                                 store.node_columns.get_property(eid.as_u64() as usize, key),
                                 PropertyValue::Null
                             ) {
-                                store.set_column_property(eid, key, pv.clone());
+                                store.set_column_property(eid, key, pv);
                                 merged.push(MergeUndo::Property(eid, key.clone()));
-                            }
-                            if let Some(node) = store.get_node_mut(eid) {
-                                if node.get_property(key).is_none() {
-                                    node.set_property(key.clone(), pv);
-                                }
                             }
                         }
                     }
@@ -1443,21 +1428,13 @@ fn import_tenant_inner(
                 // column and falls back to the row. That fallback is exactly the
                 // copy #545 proposes to delete, so this had to be true before
                 // that becomes safe.
+                //
+                // The non-scalars were written to the row as well, for MVCC and
+                // the persistence encoder. Both read the merged view now
+                // (`node_materialized`, `get_node_at_version`), so the row copy
+                // was a second one nothing needed (#2000).
                 for (key, json_val) in &snap_node.props {
-                    let pv = json_to_property(json_val);
-                    store.set_column_property(new_id, &key, pv.clone());
-                    // The row copy is still written for the non-scalars, as
-                    // before: MVCC and the persistence encoder read it, and
-                    // narrowing that is #545's decision, not this fix's.
-                    if !matches!(
-                        pv,
-                        PropertyValue::String(_) | PropertyValue::Integer(_)
-                            | PropertyValue::Float(_) | PropertyValue::Boolean(_)
-                    ) {
-                        if let Some(node) = store.get_node_mut(new_id) {
-                            node.set_property(key.clone(), pv);
-                        }
-                    }
+                    store.set_column_property(new_id, key, json_to_property(json_val));
                 }
                 // Register in dedup index
                 for &key in dedup_keys {
@@ -1484,19 +1461,19 @@ fn import_tenant_inner(
                     snap_node.labels.iter().map(|l| Label::new(l.as_str())),
                 );
                 created_nodes.push(new_id);
-                if let Some(node) = store.get_node_mut(new_id) {
-                    for (key, json_val) in &snap_node.props {
-                        node.set_property(key.clone(), json_to_property(json_val));
-                    }
+                // Into the column, as the v2 path does: the row is no copy any
+                // store write keeps (#2000).
+                for (key, json_val) in &snap_node.props {
+                    store.set_column_property(new_id, key, json_to_property(json_val));
                 }
                 // Register in dedup index
                 for &key in dedup_keys {
                     for property in dedup_properties(key, &snap_labels) {
-                        let Some(pv) = store.get_node(new_id).and_then(|n| n.get_property(property)) else {
+                        let Some(pv) = store.node_property(new_id, property) else {
                             continue;
                         };
                         let val_str = match pv {
-                            PropertyValue::String(s) => normalize_dedup(s),
+                            PropertyValue::String(s) => normalize_dedup(&s),
                             PropertyValue::Integer(i) => i.to_string(),
                             _ => continue,
                         };

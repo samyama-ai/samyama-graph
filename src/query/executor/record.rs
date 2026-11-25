@@ -538,14 +538,7 @@ impl Value {
                 }
             }
             Value::NodeRef(id) => {
-                let prop = store.node_columns.get_property(id.as_u64() as usize, property);
-                if !prop.is_null() {
-                    prop
-                } else if let Some(node) = store.get_node(*id) {
-                    node.get_property(property).cloned().unwrap_or(PropertyValue::Null)
-                } else {
-                    PropertyValue::Null
-                }
+                store.node_property(*id, property).unwrap_or(PropertyValue::Null)
             }
             Value::Edge(id, edge) => {
                 let prop = store.edge_columns.get_property(id.as_u64() as usize, property);

@@ -199,38 +199,21 @@ impl StructureRegistry {
 /// Read a numeric property (`f64`) for `node_id` from either the columnar store (`node_columns`)
 /// or the in-memory property map.
 pub fn node_f64(store: &GraphStore, node_id: NodeId, prop: &str) -> Option<f64> {
-    let col_val = store.node_columns.get_property(node_id.as_u64() as usize, prop);
-    match col_val {
-        PropertyValue::Float(f) if f.is_finite() => return Some(f),
-        PropertyValue::Integer(i) => return Some(i as f64),
-        _ => {}
+    // Through `node_property`, the store's one reader of a property (#2000).
+    match store.node_property(node_id, prop)? {
+        PropertyValue::Float(f) if f.is_finite() => Some(f),
+        PropertyValue::Integer(i) => Some(i as f64),
+        _ => None,
     }
-    store
-        .get_node(node_id)
-        .and_then(|n| n.get_property(prop))
-        .and_then(|v| match v {
-            PropertyValue::Float(f) if f.is_finite() => Some(*f),
-            PropertyValue::Integer(i) => Some(*i as f64),
-            _ => None,
-        })
 }
 
 /// Read a string or integer grouping property as a `String`.
 pub fn node_group_string(store: &GraphStore, node_id: NodeId, prop: &str) -> Option<String> {
-    let col_val = store.node_columns.get_property(node_id.as_u64() as usize, prop);
-    match col_val {
-        PropertyValue::String(s) if !s.is_empty() => return Some(s),
-        PropertyValue::Integer(i) => return Some(i.to_string()),
-        _ => {}
+    match store.node_property(node_id, prop)? {
+        PropertyValue::String(s) if !s.is_empty() => Some(s),
+        PropertyValue::Integer(i) => Some(i.to_string()),
+        _ => None,
     }
-    store
-        .get_node(node_id)
-        .and_then(|n| n.get_property(prop))
-        .and_then(|v| match v {
-            PropertyValue::String(s) if !s.is_empty() => Some(s.clone()),
-            PropertyValue::Integer(i) => Some(i.to_string()),
-            _ => None,
-        })
 }
 
 /// Auto-detect structural conventions across labels and built `OEH` hierarchy indexes (`#2035`).
