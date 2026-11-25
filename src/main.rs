@@ -2573,6 +2573,37 @@ async fn start_server() {
         });
     }
 
+    // Retention sweeps (#2217). `--retention-interval-secs` or
+    // `SAMYAMA_RETENTION_INTERVAL_SECS`; every 5 s unless set, and 0 turns
+    // the sweeper off. A sweep with no `db.retention.set` rule is one read
+    // lock and nothing else.
+    let retention_every: u64 = {
+        let args: Vec<String> = std::env::args().collect();
+        let raw = args
+            .iter()
+            .position(|a| a == "--retention-interval-secs")
+            .map(|i| args.get(i + 1).cloned().unwrap_or_default())
+            .or_else(|| std::env::var("SAMYAMA_RETENTION_INTERVAL_SECS").ok());
+        match raw {
+            None => 5,
+            Some(v) => match v.parse::<u64>() {
+                Ok(n) => n,
+                Err(_) => {
+                    eprintln!("FATAL: --retention-interval-secs expects a whole number of seconds, got {v:?}");
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
+    if retention_every > 0 {
+        samyama::graph::retention::spawn_sweeper(
+            Arc::clone(&store),
+            persistence.clone(),
+            "default".to_string(),
+            std::time::Duration::from_secs(retention_every),
+        );
+    }
+
     // Start HTTP server for Visualizer API (port from --http-port, default 8080)
     let http_store = Arc::clone(&store);
     let http_tenants = Arc::clone(&shared_tenants);

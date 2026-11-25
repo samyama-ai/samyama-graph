@@ -9,6 +9,14 @@
 //! | `feature.get(name)` | `node, value, asOf` | no |
 //! | `feature.list()` | `name, pattern, aggregate, timeProperty, entities, asOf, stale` | no |
 //! | `feature.drop(name)` | `name` | the registry |
+//! | `feature.lookup(entity, names)` | `node, features, values` | no |
+//!
+//! Serving by entity key (ML-13, #1768): `feature.lookup` is the call a
+//! client makes for one entity's feature vector, and the scalar functions
+//! `feature.value(name, n)` and `feature.vector(names, n)` (in
+//! `operator::eval_function`) do the same per row inside a query. All three
+//! read the latest materialization; none computes anything. An entity is a
+//! node or its integer id.
 //!
 //! The three that change the registry take the write path, as `CREATE GRAPH
 //! PROJECTION` does: they keep or free memory for later queries, which a
@@ -19,7 +27,7 @@ use std::collections::HashMap;
 use crate::graph::feature::{
     Aggregate, Direction, FeatureDefinition, FeatureError, FeatureInfo, TimeOn,
 };
-use crate::graph::{GraphStore, PropertyValue};
+use crate::graph::{GraphStore, NodeId, PropertyValue};
 use crate::query::ast::Expression;
 use crate::query::executor::operator::{eval_expression, OperatorDescription, PhysicalOperator};
 use crate::query::executor::{ExecutionError, ExecutionResult, Record, Value};
@@ -32,6 +40,7 @@ pub enum FeatureProcedure {
     Get,
     List,
     Drop,
+    Lookup,
 }
 
 /// The keys `feature.define` reads.
@@ -58,6 +67,7 @@ impl FeatureProcedure {
             "feature.get" => Some(Self::Get),
             "feature.list" => Some(Self::List),
             "feature.drop" => Some(Self::Drop),
+            "feature.lookup" => Some(Self::Lookup),
             _ => None,
         }
     }
@@ -69,6 +79,7 @@ impl FeatureProcedure {
         "feature.get",
         "feature.list",
         "feature.drop",
+        "feature.lookup",
     ];
 
     pub fn name(self) -> &'static str {
@@ -78,6 +89,7 @@ impl FeatureProcedure {
             Self::Get => "feature.get",
             Self::List => "feature.list",
             Self::Drop => "feature.drop",
+            Self::Lookup => "feature.lookup",
         }
     }
 
@@ -101,6 +113,7 @@ impl FeatureProcedure {
                 "stale",
             ],
             Self::Drop => &["name"],
+            Self::Lookup => &["node", "features", "values"],
         }
     }
 }
@@ -108,6 +121,51 @@ impl FeatureProcedure {
 /// Does this `CALL` change the feature registry? `Query::is_write()` asks.
 pub fn call_writes(name: &str) -> bool {
     FeatureProcedure::from_name(name).is_some_and(FeatureProcedure::writes)
+}
+
+/// The node an entity argument names: a node, or its integer id.
+pub fn entity_id(v: &Value) -> Option<NodeId> {
+    match v {
+        Value::Node(id, _) | Value::NodeRef(id) => Some(*id),
+        Value::Property(PropertyValue::Integer(i)) if *i >= 0 => Some(NodeId::new(*i as u64)),
+        _ => None,
+    }
+}
+
+/// Feature names: one string, or a non-empty list of strings.
+pub fn feature_names(v: &Value, who: &str) -> ExecutionResult<Vec<String>> {
+    let bad = || {
+        ExecutionError::bad_argument(format!(
+            "{who}: the feature names must be a string or a non-empty list of strings, got {v:?}"
+        ))
+    };
+    let one = |p: &PropertyValue| match p {
+        PropertyValue::String(s) if !s.trim().is_empty() => Some(s.clone()),
+        _ => None,
+    };
+    let names: Option<Vec<String>> = match v {
+        Value::Property(PropertyValue::String(_)) => v.as_property().and_then(one).map(|s| vec![s]),
+        Value::Property(PropertyValue::Array(items)) => items.iter().map(one).collect(),
+        Value::List(items) => items
+            .iter()
+            .map(|i| i.as_property().and_then(one))
+            .collect(),
+        _ => None,
+    };
+    match names {
+        Some(n) if !n.is_empty() => Ok(n),
+        _ => Err(bad()),
+    }
+}
+
+/// Values as a Cypher list cell; a missing value is null.
+pub fn value_list(values: Vec<Option<PropertyValue>>) -> Value {
+    Value::List(
+        values
+            .into_iter()
+            .map(|v| Value::Property(v.unwrap_or(PropertyValue::Null)))
+            .collect(),
+    )
 }
 
 /// One `feature.*` call as a physical operator.
@@ -380,18 +438,14 @@ impl FeatureOperator {
             }
             FeatureProcedure::Get => {
                 let (names, _) = self.arguments(store, 1, &[])?;
-                let Some(m) = registry.values(&names[0]).map_err(refused)? else {
-                    return Err(ExecutionError::bad_argument(format!(
-                        "{call}: feature `{}` has not been materialized; CALL \
-                         feature.materialize('{}') first",
-                        names[0], names[0]
-                    )));
-                };
+                let (m, forgotten) = registry.values(&names[0]).map_err(refused)?;
                 let as_of = opt(m.as_of.clone());
                 m.values
                     .iter()
                     // A node deleted since the materialization has no row:
-                    // there is nothing to bind `node` to.
+                    // there is nothing to bind `node` to. `forgotten` also
+                    // covers a new node that has taken a deleted one's id.
+                    .filter(|(id, _)| !forgotten.contains(id))
                     .filter_map(|(id, value)| {
                         let node = store.get_node(*id)?;
                         Some(self.row(&[
@@ -414,6 +468,36 @@ impl FeatureOperator {
                 let (names, _) = self.arguments(store, 1, &[])?;
                 registry.drop_feature(&names[0]).map_err(refused)?;
                 vec![self.row(&[("name", string(names[0].clone()))])]
+            }
+            FeatureProcedure::Lookup => {
+                if self.args.len() != 2 {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "{call} takes (entity, names): a node id and a feature name or \
+                         list of names; got {} argument(s)",
+                        self.args.len()
+                    )));
+                }
+                let empty = Record::new();
+                let entity = eval_expression(&self.args[0], &empty, store)?;
+                let Some(id) = entity_id(&entity) else {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "{call}: the entity must be a node or its integer id, got {entity:?}"
+                    )));
+                };
+                let names = feature_names(&eval_expression(&self.args[1], &empty, store)?, call)?;
+                let values = registry.lookup(&names, id).map_err(refused)?;
+                // No such node: no row, as a MATCH on its id would give.
+                let Some(node) = store.get_node(id) else {
+                    return Ok(Vec::new());
+                };
+                vec![self.row(&[
+                    ("node", Value::Node(id, Box::new(node.clone()))),
+                    (
+                        "features",
+                        Value::List(names.into_iter().map(string).collect()),
+                    ),
+                    ("values", value_list(values)),
+                ])]
             }
         })
     }
