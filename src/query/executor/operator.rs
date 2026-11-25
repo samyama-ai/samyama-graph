@@ -913,7 +913,8 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         // query text -- an error that names no token can only be pointed at by
         // guessing (LANG-12).
         _ => return Err(ExecutionError::TypeError(format!(
-            "`{}` needs a value on the left, and got a node, relationship or path",
+            "`{}` needs a value on the left, and got a node, relationship or path. Use \
+             one of its properties instead, e.g. `x.name`.",
             op.symbol()
         ))),
     };
@@ -921,7 +922,8 @@ fn eval_binary_op(op: &BinaryOp, left: Value, right: Value) -> ExecutionResult<V
         Value::Property(p) => p,
         Value::Null => PropertyValue::Null,
         _ => return Err(ExecutionError::TypeError(format!(
-            "`{}` needs a value on the right, and got a node, relationship or path",
+            "`{}` needs a value on the right, and got a node, relationship or path. Use \
+             one of its properties instead, e.g. `x.name`.",
             op.symbol()
         ))),
     };
@@ -1318,17 +1320,9 @@ fn eval_index(collection: Value, index: Value, store: &GraphStore) -> ExecutionR
         // another, and reporting one for the other sends the reader to the
         // wrong operand.
         (Value::Property(p), _) if p.as_list_items().is_some() => {
-            Err(ExecutionError::TypeError(format!(
-                "a list index must be an integer, not {}. Convert it with \
-                 toInteger(), e.g. `list[toInteger(i)]`.",
-                type_name_of(&index)
-            )))
+            Err(list_index_error(&index))
         }
-        (Value::List(_), _) => Err(ExecutionError::TypeError(format!(
-            "a list index must be an integer, not {}. Convert it with \
-             toInteger(), e.g. `list[toInteger(i)]`.",
-            type_name_of(&index)
-        ))),
+        (Value::List(_), _) => Err(list_index_error(&index)),
         (Value::Property(PropertyValue::Map(_)) | Value::Map(_), _) => {
             Err(ExecutionError::TypeError(format!(
                 "a map key must be a string, not {}",
@@ -1343,8 +1337,12 @@ fn eval_index(collection: Value, index: Value, store: &GraphStore) -> ExecutionR
         (Value::Property(p), Value::Property(PropertyValue::String(component))) => {
             match crate::query::executor::record::temporal_property(p, component) {
                 Some(v) => Ok(Value::Property(v)),
+                // Names the field, so the span points at `.first` in
+                // `n.name.first` rather than nowhere (DX-06).
                 None => Err(ExecutionError::TypeError(format!(
-                    "cannot index {}: it is not a list or a map",
+                    "cannot index {} with `{component}`: it is not a node, relationship, map \
+                     or temporal value, so it has no fields. Use the value itself instead, \
+                     without `.{component}`.",
                     type_name_of(&collection)
                 ))),
             }
@@ -1354,6 +1352,23 @@ fn eval_index(collection: Value, index: Value, store: &GraphStore) -> ExecutionR
             type_name_of(&collection)
         ))),
     }
+}
+
+/// The refusal for a list indexed by something other than an integer. A string
+/// index is quoted the way a query writes it: when it was a literal, the
+/// error's span finds it and points there; when it came from a variable, the
+/// value is still shown and no span is attached, since that text is not in the
+/// query (DX-06).
+fn list_index_error(index: &Value) -> ExecutionError {
+    let shown = match index {
+        Value::Property(PropertyValue::String(s)) if !s.contains('\'') => format!(" (`'{s}'`)"),
+        _ => String::new(),
+    };
+    ExecutionError::TypeError(format!(
+        "a list index must be an integer, not {}{shown}. Use toInteger() to convert \
+         it, e.g. `list[toInteger(i)]`.",
+        type_name_of(index)
+    ))
 }
 
 /// A value's type, for an error message that names the operand rather than
@@ -1379,7 +1394,7 @@ fn operand_error(
 /// (DX-06).
 fn by_zero_error(what: &str, op: &str) -> ExecutionError {
     ExecutionError::RuntimeError(format!(
-        "{what} by zero: `{op}` with a divisor of 0. Guard it, e.g. \
+        "{what} by zero: `{op}` with a divisor of 0. Use a guard instead, e.g. \
          `CASE WHEN d = 0 THEN null ELSE n {op} d END`."
     ))
 }
@@ -1393,7 +1408,7 @@ pub(crate) fn unresolved_parameter(name: &str) -> ExecutionError {
     ExecutionError::RuntimeError(format!(
         "Unresolved parameter: `${name}`. Supply it with the request: as key \
          `{name}` in the `params` object over HTTP, or as `{name} <value>` after the \
-         query in GRAPH.QUERY over RESP."
+         query in GRAPH.QUERY over RESP. Or replace `${name}` with a literal value."
     ))
 }
 
@@ -3361,7 +3376,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
     if let Some(min) = min_arity(name) {
         if args.len() < min {
             return Err(ExecutionError::bad_argument(format!(
-                "`{name}()` takes at least {min} argument{}; got {}. Call it as `{name}({})`.",
+                "`{name}()` takes at least {min} argument{}; got {}. Use it as `{name}({})`.",
                 if min == 1 { "" } else { "s" },
                 args.len(),
                 ARGUMENT_PLACEHOLDERS[..min.min(ARGUMENT_PLACEHOLDERS.len())].join(", ")
@@ -16810,7 +16825,7 @@ impl PhysicalOperator for DropIndexOperator {
         // that only cleared memory came back on the next restart (#1477).
         if !store.drop_property_index(&self.label, &self.property) {
             return Err(ExecutionError::RuntimeError(format!(
-                "Index on `:{}({})` does not exist. SHOW INDEXES lists the ones that do.",
+                "Index on `:{}({})` does not exist. Use SHOW INDEXES to see the ones that do.",
                 self.label.as_str(),
                 self.property
             )));

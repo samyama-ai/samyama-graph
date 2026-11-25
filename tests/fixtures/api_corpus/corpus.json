@@ -4034,7 +4034,7 @@
       "query": "RETURN 1 / 0 AS x"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.RuntimeError] Runtime error: Division by zero: `/` with a divisor of 0. Guard it, e.g. `CASE WHEN d = 0 THEN null ELSE n / d END`.\n --> 1:10\n  |\n1 | RETURN 1 / 0 AS x\n  |          ^"
+      "error": "[Samyama.ClientError.Statement.RuntimeError] Runtime error: Division by zero: `/` with a divisor of 0. Use a guard instead, e.g. `CASE WHEN d = 0 THEN null ELSE n / d END`.\n --> 1:10\n  |\n1 | RETURN 1 / 0 AS x\n  |          ^"
     },
     "status": 400
   },
@@ -4078,7 +4078,7 @@
       "query": "RETURN 1 % 0 AS x"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.RuntimeError] Runtime error: Modulo by zero: `%` with a divisor of 0. Guard it, e.g. `CASE WHEN d = 0 THEN null ELSE n % d END`.\n --> 1:10\n  |\n1 | RETURN 1 % 0 AS x\n  |          ^"
+      "error": "[Samyama.ClientError.Statement.RuntimeError] Runtime error: Modulo by zero: `%` with a divisor of 0. Use a guard instead, e.g. `CASE WHEN d = 0 THEN null ELSE n % d END`.\n --> 1:10\n  |\n1 | RETURN 1 % 0 AS x\n  |          ^"
     },
     "status": 400
   },
@@ -6264,7 +6264,7 @@
       "query": "RETURN toUpper()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `toUpper()` takes at least 1 argument; got 0. Call it as `toUpper(a)`.\n --> 1:8\n  |\n1 | RETURN toUpper()\n  |        ^^^^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `toUpper()` takes at least 1 argument; got 0. Use it as `toUpper(a)`.\n --> 1:8\n  |\n1 | RETURN toUpper()\n  |        ^^^^^^^^^"
     },
     "status": 400
   },
@@ -6312,7 +6312,7 @@
       "query": "MERGE 1"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:7\n  |\n1 | MERGE 1\n  |       ^---\n  |\n  = expected named_path"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error: expected named_path at line 1, column 7.\n --> 1:7\n  |\n1 | MERGE 1\n  |       ^---\n  |\n  = expected named_path"
     },
     "status": 400
   },
@@ -6336,7 +6336,7 @@
       "query": "RETURN 'abc"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:8\n  |\n1 | RETURN 'abc\n  |        ^---\n  |\n  = expected distinct or return_item"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error: expected distinct or return_item at line 1, column 8.\n --> 1:8\n  |\n1 | RETURN 'abc\n  |        ^---\n  |\n  = expected distinct or return_item"
     },
     "status": 400
   },
@@ -6348,7 +6348,7 @@
       "query": "RETURN [1, 2"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:13\n  |\n1 | RETURN [1, 2\n  |             ^---\n  |\n  = expected label_check, index_op, member_op, pow_op, mul_div_mod_op, add_sub_op, comparison_op, in_op, and_op, or_op, or xor_op"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error: unexpected input at line 1, column 13; what could come there is listed below.\n --> 1:13\n  |\n1 | RETURN [1, 2\n  |             ^---\n  |\n  = expected label_check, index_op, member_op, pow_op, mul_div_mod_op, add_sub_op, comparison_op, in_op, and_op, or_op, or xor_op"
     },
     "status": 400
   },
@@ -6360,7 +6360,7 @@
       "query": "CREATE CONSTRAINT ON (p:Nope) ASSERT p.x IS UNIQUE; CREATE CONSTRAINT ON (p:Nope) ASSERT p.x IS UNIQUE"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:53\n  |\n1 | CREATE CONSTRAINT ON (p:Nope) ASSERT p.x IS UNIQUE; CREATE CONSTRAINT ON (p:Nope) ASSERT p.x IS UNIQUE\n  |                                                     ^---\n  |\n  = expected EOI"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error: expected EOI at line 1, column 53.\n --> 1:53\n  |\n1 | CREATE CONSTRAINT ON (p:Nope) ASSERT p.x IS UNIQUE; CREATE CONSTRAINT ON (p:Nope) ASSERT p.x IS UNIQUE\n  |                                                     ^---\n  |\n  = expected EOI"
     },
     "status": 400
   },
@@ -7332,7 +7332,7 @@
       "query": "RETURN toUpper()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `toUpper()` takes at least 1 argument; got 0. Call it as `toUpper(a)`.\n --> 1:8\n  |\n1 | RETURN toUpper()\n  |        ^^^^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `toUpper()` takes at least 1 argument; got 0. Use it as `toUpper(a)`.\n --> 1:8\n  |\n1 | RETURN toUpper()\n  |        ^^^^^^^^^"
     },
     "status": 400
   },
@@ -7344,7 +7344,7 @@
       "query": "RETURN abs()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `abs()` takes at least 1 argument; got 0. Call it as `abs(a)`.\n --> 1:8\n  |\n1 | RETURN abs()\n  |        ^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `abs()` takes at least 1 argument; got 0. Use it as `abs(a)`.\n --> 1:8\n  |\n1 | RETURN abs()\n  |        ^^^^^"
     },
     "status": 400
   },
@@ -7356,7 +7356,7 @@
       "query": "RETURN size()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `size()` takes at least 1 argument; got 0. Call it as `size(a)`.\n --> 1:8\n  |\n1 | RETURN size()\n  |        ^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `size()` takes at least 1 argument; got 0. Use it as `size(a)`.\n --> 1:8\n  |\n1 | RETURN size()\n  |        ^^^^^^"
     },
     "status": 400
   },
@@ -7368,7 +7368,7 @@
       "query": "RETURN atan2(1)"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `atan2()` takes at least 2 arguments; got 1. Call it as `atan2(a, b)`."
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `atan2()` takes at least 2 arguments; got 1. Use it as `atan2(a, b)`."
     },
     "status": 400
   },
@@ -7380,7 +7380,7 @@
       "query": "MATCH (p:Person) RETURN hasLabels(p)"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `hasLabels()` takes at least 2 arguments; got 1. Call it as `hasLabels(a, b)`."
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `hasLabels()` takes at least 2 arguments; got 1. Use it as `hasLabels(a, b)`."
     },
     "status": 400
   },
@@ -7392,7 +7392,7 @@
       "query": "RETURN toString()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `toString()` takes at least 1 argument; got 0. Call it as `toString(a)`.\n --> 1:8\n  |\n1 | RETURN toString()\n  |        ^^^^^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `toString()` takes at least 1 argument; got 0. Use it as `toString(a)`.\n --> 1:8\n  |\n1 | RETURN toString()\n  |        ^^^^^^^^^^"
     },
     "status": 400
   },
@@ -7404,7 +7404,7 @@
       "query": "RETURN id()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `id()` takes at least 1 argument; got 0. Call it as `id(a)`.\n --> 1:8\n  |\n1 | RETURN id()\n  |        ^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `id()` takes at least 1 argument; got 0. Use it as `id(a)`.\n --> 1:8\n  |\n1 | RETURN id()\n  |        ^^^^"
     },
     "status": 400
   },
@@ -7416,7 +7416,7 @@
       "query": "RETURN keys()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `keys()` takes at least 1 argument; got 0. Call it as `keys(a)`.\n --> 1:8\n  |\n1 | RETURN keys()\n  |        ^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `keys()` takes at least 1 argument; got 0. Use it as `keys(a)`.\n --> 1:8\n  |\n1 | RETURN keys()\n  |        ^^^^^^"
     },
     "status": 400
   },
@@ -7428,7 +7428,7 @@
       "query": "RETURN type()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `type()` takes at least 1 argument; got 0. Call it as `type(a)`.\n --> 1:8\n  |\n1 | RETURN type()\n  |        ^^^^^^"
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `type()` takes at least 1 argument; got 0. Use it as `type(a)`.\n --> 1:8\n  |\n1 | RETURN type()\n  |        ^^^^^^"
     },
     "status": 400
   },
@@ -7440,7 +7440,7 @@
       "query": "RETURN left('abc')"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `left()` takes at least 2 arguments; got 1. Call it as `left(a, b)`."
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `left()` takes at least 2 arguments; got 1. Use it as `left(a, b)`."
     },
     "status": 400
   },
@@ -7452,7 +7452,7 @@
       "query": "RETURN right('abc')"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.ArgumentError] `right()` takes at least 2 arguments; got 1. Call it as `right(a, b)`."
+      "error": "[Samyama.ClientError.Statement.ArgumentError] `right()` takes at least 2 arguments; got 1. Use it as `right(a, b)`."
     },
     "status": 400
   },
@@ -7536,7 +7536,7 @@
       "query": "RETURN 'abc"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:8\n  |\n1 | RETURN 'abc\n  |        ^---\n  |\n  = expected distinct or return_item"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error: expected distinct or return_item at line 1, column 8.\n --> 1:8\n  |\n1 | RETURN 'abc\n  |        ^---\n  |\n  = expected distinct or return_item"
     },
     "status": 400
   },
@@ -7548,7 +7548,7 @@
       "query": "RETURN [1, 2"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:13\n  |\n1 | RETURN [1, 2\n  |             ^---\n  |\n  = expected label_check, index_op, member_op, pow_op, mul_div_mod_op, add_sub_op, comparison_op, in_op, and_op, or_op, or xor_op"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error: unexpected input at line 1, column 13; what could come there is listed below.\n --> 1:13\n  |\n1 | RETURN [1, 2\n  |             ^---\n  |\n  = expected label_check, index_op, member_op, pow_op, mul_div_mod_op, add_sub_op, comparison_op, in_op, and_op, or_op, or xor_op"
     },
     "status": 400
   },
@@ -7560,7 +7560,7 @@
       "query": "MATCH ("
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:8\n  |\n1 | MATCH (\n  |        ^---\n  |\n  = expected labels, properties, or variable"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error: unexpected input at line 1, column 8; what could come there is listed below.\n --> 1:8\n  |\n1 | MATCH (\n  |        ^---\n  |\n  = expected labels, properties, or variable"
     },
     "status": 400
   },
@@ -7584,7 +7584,7 @@
       "query": "CALL db.nope()"
     },
     "response": {
-      "error": "[Samyama.ClientError.Procedure.NotFound] Unknown procedure: `db.nope`. The schema procedures are db.checkIntegrity, db.hybrid.search, db.index.fulltext.queryNodes, db.index.point.nearest, db.index.vector.queryNodes, db.labels, db.propertyKeys, db.relationshipTypes, db.retention.drop, db.retention.list, db.retention.set, db.schema.forLLM, db.schema.visualization; graph algorithms are called as `algo.<name>()`.\n --> 1:6\n  |\n1 | CALL db.nope()\n  |      ^^^^^^^"
+      "error": "[Samyama.ClientError.Procedure.NotFound] Unknown procedure: `db.nope`. Use one of the schema procedures instead: db.checkIntegrity, db.hybrid.search, db.index.fulltext.queryNodes, db.index.point.nearest, db.index.vector.queryNodes, db.labels, db.propertyKeys, db.relationshipTypes, db.retention.drop, db.retention.list, db.retention.set, db.schema.forLLM, db.schema.visualization; graph algorithms are called as `algo.<name>()`.\n --> 1:6\n  |\n1 | CALL db.nope()\n  |      ^^^^^^^"
     },
     "status": 400
   },
@@ -7655,7 +7655,7 @@
       "query": ""
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:1\n  |\n1 | \n  | ^---\n  |\n  = expected query"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error: expected query at line 1, column 1.\n --> 1:1\n  |\n1 | \n  | ^---\n  |\n  = expected query"
     },
     "status": 400
   },

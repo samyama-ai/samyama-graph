@@ -339,7 +339,7 @@ impl std::fmt::Display for ValidationError {
             Self::DuplicateColumn(name) => write!(
                 f,
                 "Multiple result columns with the same name are not supported: `{name}`. \
-                 Give each its own name with AS, e.g. `AS {name}_2`."
+                 Use a different name for each with AS, e.g. `AS {name}_2`."
             ),
             Self::UnionColumnMismatch { left, right } => write!(
                 f,
