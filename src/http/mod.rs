@@ -1,6 +1,7 @@
 //! HTTP module for Web UI and REST API
 
 pub mod server;
+pub mod cdc;
 pub mod handler;
 pub mod optimize;
 pub mod tenants;

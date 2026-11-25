@@ -927,6 +927,135 @@ paths:
                 token: 3f9c2a7be41d0c58-42
                 changed: false
 
+  /api/cdc/events:
+    get:
+      operationId: getChangeEvents
+      summary: What changed, after an offset (change data capture)
+      description: |
+        The committed change events of one tenant, oldest first (#2025):
+        `node_created`, `node_deleted`, `edge_created`, `edge_deleted`,
+        `label_added`, `label_removed`, `property_set`, `property_removed`,
+        and `graph_dropped`. Each has a per-tenant `offset` that only grows,
+        survives restarts and never restarts; keep the `next` of the last
+        page and send it back as `after`. Events of one committed write share
+        a `tx` number and the last one carries `commit: true`. A rolled-back
+        transaction or a failed statement emits nothing.
+
+        Events are written in the same storage batch as the rows they
+        describe, so the feed and the data agree after a crash. The newest
+        `--cdc-retention` events per tenant are kept; asking for an offset
+        older than that is answered 410 with the oldest offset still held.
+        The feed is off unless the server was started with `--cdc-retention`
+        (or `SAMYAMA_CDC_RETENTION`), and needs a data directory; otherwise
+        404. Compare `GET /api/changes`, which says only whether anything
+        changed.
+      parameters:
+        - name: after
+          in: query
+          required: false
+          description: Return events with offsets above this. 0, the default, is the beginning.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: limit
+          in: query
+          required: false
+          description: Most events to return; capped at 1000.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - name: graph
+          in: query
+          required: false
+          description: The tenant. A credential bound to a tenant may read only that one.
+          schema:
+            type: string
+            default: default
+        - name: wait
+          in: query
+          required: false
+          description: |
+            Seconds to hold the request open when there is no event yet,
+            answering as soon as one is committed (a long poll). At most 30.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 30
+            default: 0
+      responses:
+        '200':
+          description: A page of events
+          headers:
+            Cache-Control:
+              description: Always `no-store`.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChangeEventsResponse'
+              example:
+                graph: default
+                events:
+                  - offset: 41
+                    tx: 17
+                    tenant: default
+                    ts: 1764060000000
+                    op: property_set
+                    entity: node
+                    id: 3
+                    key: age
+                    old: 36
+                    value: 37
+                    commit: true
+                next: 41
+                oldest: 1
+                latest: 41
+                more: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: The credential is bound to another tenant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Change data capture is off, or the server has no data directory
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '410':
+          description: |
+            Events after `after` have been trimmed. The reader has missed
+            changes: rebuild from the graph and resume from `latest`.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error, after, oldest, latest]
+                properties:
+                  error:
+                    type: string
+                  after:
+                    type: integer
+                  oldest:
+                    type: integer
+                    description: The oldest offset still held.
+                  latest:
+                    type: integer
+                    description: The newest offset written.
+        '500':
+          description: The feed could not be read from storage
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/tenants:
     get:
       operationId: listTenants
@@ -1963,6 +2092,77 @@ components:
           additionalProperties: true
           description: Edge properties
 
+    ChangeEventsResponse:
+      type: object
+      required: [graph, events, next, oldest, latest, more]
+      properties:
+        graph:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChangeEvent'
+        next:
+          type: integer
+          description: The offset of the last event returned, or `after` when none was. Send it as `after` next time.
+        oldest:
+          type: integer
+          description: The oldest offset still held.
+        latest:
+          type: integer
+          description: The newest offset written; 0 when none ever was.
+        more:
+          type: boolean
+          description: Whether events after `next` are already waiting.
+    ChangeEvent:
+      type: object
+      required: [offset, tx, tenant, ts, op]
+      properties:
+        offset:
+          type: integer
+        tx:
+          type: integer
+          description: The committed write this event belongs to.
+        tenant:
+          type: string
+        ts:
+          type: integer
+          description: Commit time, milliseconds since the Unix epoch.
+        op:
+          type: string
+          enum: [node_created, node_deleted, edge_created, edge_deleted, label_added, label_removed, property_set, property_removed, graph_dropped]
+        commit:
+          type: boolean
+          description: Present and true on the last event of a committed write.
+        id:
+          type: integer
+          description: The node or edge id.
+        entity:
+          type: string
+          enum: [node, edge]
+          description: On property events, which kind of entity.
+        labels:
+          type: array
+          items:
+            type: string
+        type:
+          type: string
+          description: An edge's relationship type.
+        source:
+          type: integer
+        target:
+          type: integer
+        properties:
+          type: object
+          description: The whole entity on create, and what was deleted on delete.
+        label:
+          type: string
+        key:
+          type: string
+        value:
+          description: The property's new value.
+        old:
+          description: The property's previous value; null when it was absent.
     ChangesResponse:
       type: object
       required: [token, changed]

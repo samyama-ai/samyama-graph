@@ -175,6 +175,7 @@ fn required_role_is_admin_for_management_and_write_for_imports() {
     assert_eq!(required_role(&Method::GET, "/api/status"), Role::Read);
     // A view polls this as it polls status: a reader's route (#1771).
     assert_eq!(required_role(&Method::GET, "/api/changes"), Role::Read);
+    assert_eq!(required_role(&Method::GET, "/api/cdc/events"), Role::Read);
 }
 
 #[test]

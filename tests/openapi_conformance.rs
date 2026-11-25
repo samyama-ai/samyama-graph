@@ -200,6 +200,11 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
             bare("no token", "/api/changes"),
             bare("a token that does not parse", "/api/changes?since=nope"),
         ],
+        ("GET", "/api/cdc/events") => vec![
+            bare("no data directory", "/api/cdc/events"),
+            bare("an offset that does not parse", "/api/cdc/events?after=x"),
+            bare("a zero limit", "/api/cdc/events?limit=0"),
+        ],
         ("GET", "/metrics") => vec![bare("metrics", "/metrics")],
         ("GET", "/api/status") => vec![bare("status", "/api/status")],
         ("GET", "/api/tenants") => vec![bare("list", "/api/tenants")],

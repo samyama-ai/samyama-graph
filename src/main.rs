@@ -2308,9 +2308,37 @@ async fn start_server() {
     // format mismatch looked exactly like an empty database (#1657). Starting
     // without the data is a choice an operator makes with `--ephemeral`, not
     // one the server makes for them.
+    // The change feed (#2025): `--cdc-retention <events>` or
+    // `SAMYAMA_CDC_RETENTION`, the events kept per tenant. Off (0) unless
+    // set: it costs a decode of each touched row and a second write per
+    // changed entity, which a deployment that never reads it should not pay.
+    let cdc_retention: u64 = {
+        let args: Vec<String> = std::env::args().collect();
+        let raw = args
+            .iter()
+            .position(|a| a == "--cdc-retention")
+            .map(|i| args.get(i + 1).cloned().unwrap_or_default())
+            .or_else(|| std::env::var("SAMYAMA_CDC_RETENTION").ok());
+        match raw {
+            None => 0,
+            Some(v) => match v.replace('_', "").parse::<u64>() {
+                Ok(n) => n,
+                Err(_) => {
+                    eprintln!("FATAL: --cdc-retention expects a number of events, got {v:?}");
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
     let persistence = if let Some(path) = &config.data_path {
         match samyama::PersistenceManager::new(path) {
-            Ok(pm) => Some(Arc::new(pm)),
+            Ok(pm) => {
+                if cdc_retention > 0 {
+                    pm.set_cdc_retention(cdc_retention);
+                    println!("Change data capture on, keeping {cdc_retention} events per tenant");
+                }
+                Some(Arc::new(pm))
+            }
             Err(e) => refuse_to_start(&format!(
                 "cannot open the data directory {}: {e}",
                 path
