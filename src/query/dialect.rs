@@ -47,9 +47,10 @@ pub fn apply(query: &mut Query, dialect: Dialect) -> Result<(), crate::query::va
     // Validate *again*, because this pass can make a statement ill-formed that was
     // well-formed when the parser checked it.
     //
-    // The parser refuses an unbounded quantifier under WALK (#1141): on a graph with a
-    // cycle the candidate set is infinite, and this engine enumerates candidates before
-    // a selector gets a turn. `MATCH (x)-[:E*]->(y)` passes that check under openCypher
+    // The parser refuses an unbounded quantifier under WALK unless a single-path
+    // selector bounds it (#1141, #1648): on a graph with a cycle the candidate set is
+    // infinite, and `ALL` / `ALL SHORTEST` are answered by enumerating candidates
+    // before the selector gets a turn. `MATCH (x)-[:E*]->(y)` passes that check under openCypher
     // because its restrictor is TRAIL, which is bounded by the edge count -- and then
     // this pass turns it into WALK. Without re-validating, the rewrite smuggles a query
     // past the one check that exists to stop it, and the server hangs rather than
