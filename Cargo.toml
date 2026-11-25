@@ -293,6 +293,10 @@ name = "memory_footprint"
 harness = false
 
 [[bench]]
+name = "query_memory"
+harness = false
+
+[[bench]]
 name = "prop_scaling"
 harness = false
 
@@ -323,6 +327,12 @@ harness = false
 # arithmetic is in benches/vector_cost_common, tested by tests/vector_cost_profile.rs.
 [[bench]]
 name = "vector_cost_profile"
+harness = false
+
+# Recall stability under insert, delete and update (#1986). Its shared code
+# is in benches/churn_common and is tested by tests/vector_churn_harness.rs.
+[[bench]]
+name = "vector_churn_benchmark"
 harness = false
 
 [[bench]]

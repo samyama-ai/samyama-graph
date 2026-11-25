@@ -647,6 +647,19 @@ jobs:
         # to do about the existing 769 stays open (#487).
         run: ./scripts/check_lint_ratchet.sh 796
 
+      - name: SEC-SEMGREP — Samyama's own static rules, findings may not grow
+        id: sec_semgrep
+        if: matrix.os == 'ubuntu-24.04'
+        continue-on-error: true
+        # #2209 (REL-12). Rules in .semgrep.yml, ceilings in
+        # scripts/semgrep_ceilings.json. The script first proves each rule
+        # still fires on scripts/semgrep-fixture/, and fails on any Semgrep
+        # error, so a rule that silently matches nothing cannot pass.
+        # Pinned: a rule engine upgrade can change what matches.
+        run: |
+          python3 -m pip install --quiet --user semgrep==1.182.1
+          python3 scripts/check_semgrep.py
+
       - name: CH-ALGO-PARITY — the algorithms still agree with NetworkX
         id: ch_algo_parity
         # Runs even if an earlier gate failed, and the run-all-gates step
@@ -705,6 +718,7 @@ jobs:
           CH_TCK_OUTCOME: ${{ steps.ch_tck.outcome }}
           CH_DETERM_THREADS_OUTCOME: ${{ steps.ch_determ_threads.outcome }}
           LINT_RATCHET_OUTCOME: ${{ steps.lint_ratchet.outcome }}
+          SEC_SEMGREP_OUTCOME: ${{ steps.sec_semgrep.outcome }}
           CH_ALGO_PARITY_OUTCOME: ${{ steps.ch_algo_parity.outcome }}
           CH_API_STABILITY_OUTCOME: ${{ steps.ch_api_stability.outcome }}
           IS_X86: ${{ matrix.os == 'ubuntu-24.04' }}
@@ -736,8 +750,9 @@ jobs:
             check ch_doc_exec "CH-DOC-EXEC"
             check ch_api "CH-API"
             check lint_ratchet "LINT-RATCHET"
+            check sec_semgrep "SEC-SEMGREP"
           else
-            for pair in ch_doc_exec:CH-DOC-EXEC ch_api:CH-API lint_ratchet:LINT-RATCHET; do
+            for pair in ch_doc_exec:CH-DOC-EXEC ch_api:CH-API lint_ratchet:LINT-RATCHET sec_semgrep:SEC-SEMGREP; do
               id=${pair%%:*}
               nm=${pair#*:}
               outcome=$(outcome_of "$id")

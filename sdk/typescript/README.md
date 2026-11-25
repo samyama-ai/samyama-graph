@@ -27,10 +27,16 @@ import { SamyamaClient } from "samyama-sdk";
 const client = new SamyamaClient({
   url: "http://localhost:8080",  // default
   timeoutMs: 30000,              // whole-request deadline, default 30000
-  maxRetries: 2,                 // retries on timeout/connection failure
+  maxRetries: 2,                 // connection failures; timeouts only for reads
   retryBaseDelayMs: 100,         // doubled each attempt
 });
 ```
+
+A request that never reached the server (connection refused, host not found)
+is retried for any call. A timeout is retried only for reads (`queryReadonly`,
+`nlq`, `status`, `schema`): a write that times out rejects with a
+`TimeoutError` without being sent again, because the server may already have
+applied it.
 
 Or the factory, when the URL is all you need:
 

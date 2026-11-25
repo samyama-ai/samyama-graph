@@ -187,6 +187,15 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
             bare("a negative limit", "/api/slowlog?limit=-1"),
         ],
         ("DELETE", "/api/slowlog") => vec![bare("reset", "/api/slowlog")],
+        ("POST", "/api/sparql") => vec![
+            json("a SELECT", "/api/sparql", r#"{"query": "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"}"#),
+            json("an ASK", "/api/sparql", r#"{"query": "ASK { ?s ?p ?o }"}"#),
+            raw("a SPARQL body", "/api/sparql", "application/sparql-query", "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"),
+            json("a syntax error", "/api/sparql", r#"{"query": "SELEKT ?s"}"#),
+            json("a CONSTRUCT", "/api/sparql", r#"{"query": "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"}"#),
+            json("another graph", "/api/sparql", r#"{"query": "ASK { ?s ?p ?o }", "graph": "other"}"#),
+            json("broken JSON", "/api/sparql", BROKEN),
+        ],
         ("GET", "/api/changes") => vec![
             bare("no token", "/api/changes"),
             bare("a token that does not parse", "/api/changes?since=nope"),

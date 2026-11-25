@@ -53,7 +53,7 @@
 //! graph projections, definitions and values live in memory only: a restart
 //! forgets them and a snapshot does not carry them.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -206,12 +206,29 @@ pub struct Materialization {
     pub at_change: u64,
 }
 
+impl Materialization {
+    /// `node`'s value: a binary search, since `values` is in node id order.
+    /// `None` when the node is not one of the entities.
+    pub fn value_of(&self, node: NodeId) -> Option<&PropertyValue> {
+        self.values
+            .binary_search_by_key(&node.as_u64(), |(id, _)| id.as_u64())
+            .ok()
+            .map(|i| &self.values[i].1)
+    }
+}
+
 /// One feature: its definition, and its latest materialization if any.
 #[derive(Debug, Clone)]
 pub struct Feature {
     pub name: String,
     pub definition: FeatureDefinition,
     pub materialized: Option<Arc<Materialization>>,
+    /// Entities of the materialization deleted since it was computed.
+    ///
+    /// The store reuses a deleted node's id, so without this the next node
+    /// to take the id would be answered with the deleted one's value. Cleared
+    /// by the next materialization, which no longer contains them.
+    pub forgotten: HashSet<NodeId>,
 }
 
 /// What `feature.list` reports for one feature.
@@ -232,6 +249,8 @@ pub struct FeatureInfo {
 pub enum FeatureError {
     /// A name that no feature has.
     NotFound(String),
+    /// A feature defined and never materialized.
+    NotMaterialized(String),
     EmptyName,
     /// `asOf` on a feature defined without `timeProperty`.
     AsOfWithoutTime(String),
@@ -245,6 +264,11 @@ impl fmt::Display for FeatureError {
             FeatureError::NotFound(name) => write!(
                 f,
                 "there is no feature named `{name}`; CALL feature.list() lists them"
+            ),
+            FeatureError::NotMaterialized(name) => write!(
+                f,
+                "feature `{name}` has not been materialized; CALL \
+                 feature.materialize('{name}') first"
             ),
             FeatureError::EmptyName => f.write_str("a feature needs a non-empty name"),
             FeatureError::AsOfWithoutTime(name) => write!(
@@ -314,6 +338,7 @@ impl FeatureRegistry {
                     name,
                     definition,
                     materialized: None,
+                    forgotten: HashSet::new(),
                 },
             )
             .is_some();
@@ -347,6 +372,7 @@ impl FeatureRegistry {
                 // the old definition, so they are not stored under the new one.
                 Some(feature) if feature.definition == definition => {
                     feature.materialized = Some(Arc::clone(&materialization));
+                    feature.forgotten.clear();
                 }
                 Some(_) => {
                     return Err(FeatureError::BadValue(format!(
@@ -361,12 +387,76 @@ impl FeatureRegistry {
         Ok(materialization)
     }
 
-    /// The latest materialization of `name`, or `None` if it has none yet.
-    pub fn values(&self, name: &str) -> Result<Option<Arc<Materialization>>, FeatureError> {
-        self.read()
+    /// The latest materialization of `name`, and the entities deleted since.
+    pub fn values(
+        &self,
+        name: &str,
+    ) -> Result<(Arc<Materialization>, HashSet<NodeId>), FeatureError> {
+        let entries = self.read();
+        let feature = entries
             .get(name)
-            .map(|f| f.materialized.clone())
-            .ok_or_else(|| FeatureError::NotFound(name.to_string()))
+            .ok_or_else(|| FeatureError::NotFound(name.to_string()))?;
+        let m = feature
+            .materialized
+            .clone()
+            .ok_or_else(|| FeatureError::NotMaterialized(name.to_string()))?;
+        Ok((m, feature.forgotten.clone()))
+    }
+
+    /// Each named feature's latest value for `node`, in the order named: the
+    /// feature vector of one entity, read under one lock.
+    ///
+    /// `None` for a feature `node` is not an entity of, or was deleted from
+    /// since it was materialized. An unknown or unmaterialized name is an
+    /// error rather than a null: a typo would otherwise read as "no value".
+    pub fn lookup(
+        &self,
+        names: &[String],
+        node: NodeId,
+    ) -> Result<Vec<Option<PropertyValue>>, FeatureError> {
+        let entries = self.read();
+        names
+            .iter()
+            .map(|name| {
+                let feature = entries
+                    .get(name)
+                    .ok_or_else(|| FeatureError::NotFound(name.clone()))?;
+                let m = feature
+                    .materialized
+                    .as_ref()
+                    .ok_or_else(|| FeatureError::NotMaterialized(name.clone()))?;
+                if feature.forgotten.contains(&node) {
+                    return Ok(None);
+                }
+                Ok(m.value_of(node).cloned())
+            })
+            .collect()
+    }
+
+    /// `node` was deleted: no materialization answers for it again, so the
+    /// node that next takes its id is not given its values.
+    ///
+    /// Called by `GraphStore::delete_node`. Cheap when there are no features,
+    /// which is the common case: one read lock and no write.
+    pub fn forget_node(&self, node: NodeId) {
+        let holds_it = self.read().values().any(|f| {
+            f.materialized
+                .as_ref()
+                .is_some_and(|m| m.value_of(node).is_some())
+        });
+        if !holds_it {
+            return;
+        }
+        for feature in self.write().values_mut() {
+            if feature
+                .materialized
+                .as_ref()
+                .is_some_and(|m| m.value_of(node).is_some())
+            {
+                feature.forgotten.insert(node);
+            }
+        }
+        self.bump();
     }
 
     pub fn definition(&self, name: &str) -> Result<FeatureDefinition, FeatureError> {
