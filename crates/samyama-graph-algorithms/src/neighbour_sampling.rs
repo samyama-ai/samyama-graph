@@ -87,10 +87,11 @@ pub enum SampleError {
 }
 
 /// SplitMix64: small, fast, and fixed here so its output never changes.
-struct SplitMix64(u64);
+/// Shared with `subgraph_sampling`, so every sampler draws from one generator.
+pub(crate) struct SplitMix64(pub(crate) u64);
 
 impl SplitMix64 {
-    fn next_u64(&mut self) -> u64 {
+    pub(crate) fn next_u64(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -99,7 +100,7 @@ impl SplitMix64 {
     }
 
     /// Uniform in `0..n`, for `n >= 1`, without modulo bias.
-    fn below(&mut self, n: usize) -> usize {
+    pub(crate) fn below(&mut self, n: usize) -> usize {
         let n = n as u64;
         let zone = u64::MAX - u64::MAX % n;
         loop {
@@ -111,14 +112,14 @@ impl SplitMix64 {
     }
 
     /// Uniform in `(0, 1]`: never 0, so its logarithm is finite.
-    fn unit_open_below(&mut self) -> f64 {
+    pub(crate) fn unit_open_below(&mut self) -> f64 {
         ((self.next_u64() >> 11) + 1) as f64 / (1u64 << 53) as f64
     }
 }
 
 /// Node `u`'s neighbours as `(index, weight)`, by index ascending, parallel
 /// relationships merged. The weight is 1 per relationship when unweighted.
-fn candidates(view: &GraphView, u: usize, direction: Direction) -> Vec<(usize, f64)> {
+pub(crate) fn candidates(view: &GraphView, u: usize, direction: Direction) -> Vec<(usize, f64)> {
     let mut out: Vec<(usize, f64)> = Vec::new();
     let weight_at = |pos: usize| view.weights.as_ref().map_or(1.0, |w| w[pos]);
     if matches!(direction, Direction::Out | Direction::Both) {
