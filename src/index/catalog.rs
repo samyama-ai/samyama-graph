@@ -84,6 +84,19 @@ pub enum IndexDefinition {
         max_age_ms: Option<u64>,
         max_records: Option<u64>,
     },
+    /// A named subgraph: a persisted, virtual view over this tenant's graph
+    /// (#337). Not an index -- it holds no data -- but a declaration that must
+    /// survive a restart and travel in a snapshot exactly as one does.
+    ///
+    /// `predicates` pairs a label with the source text of a Cypher boolean
+    /// expression over `n`, compiled again when the catalog is restored.
+    /// Last, for the reasons `VectorParams` is.
+    Subgraph {
+        name: String,
+        labels: Vec<String>,
+        edge_types: Vec<String>,
+        predicates: Vec<(String, String)>,
+    },
 }
 
 /// Every index declaration a tenant has, as one record.

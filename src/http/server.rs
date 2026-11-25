@@ -216,6 +216,11 @@ pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::a
     if *method == Method::PUT && path == "/api/structure" {
         return Role::Write;
     }
+    // Defining or dropping a named subgraph changes the tenant graph's
+    // catalog (#337).
+    if (*method == Method::POST || *method == Method::DELETE) && path.starts_with("/api/subgraphs") {
+        return Role::Write;
+    }
     Role::Read
 }
 
@@ -1080,6 +1085,16 @@ impl HttpServer {
             .route("/metrics", get(metrics_handler))
             .route("/api/slowlog", get(slowlog_handler).delete(slowlog_reset_handler))
             .route("/api/schema", get(schema_handler))
+            .route(
+                "/api/subgraphs",
+                get(super::subgraphs::list_subgraphs_handler)
+                    .post(super::subgraphs::create_subgraph_handler),
+            )
+            .route(
+                "/api/subgraphs/:name",
+                get(super::subgraphs::get_subgraph_handler)
+                    .delete(super::subgraphs::delete_subgraph_handler),
+            )
             .route("/api/algorithms/catalog", get(algorithm_catalog_handler))
             .route("/api/sample", post(sample_handler))
             .route(
