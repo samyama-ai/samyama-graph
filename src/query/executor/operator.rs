@@ -75,6 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
+use samyama_optimization::budget::{Budget, Budgeted, StopReason};
 use samyama_optimization::constraints::{Constrained, ConstraintHandling};
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, CMAESSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
@@ -22491,6 +22492,49 @@ impl AlgorithmOperator {
         record.bind("total_time_ms".to_string(), Value::Property(PropertyValue::Float(total_time_ms)));
     }
 
+    /// `or.solve`'s time and evaluation limits (OPT-11, #1798): `timeBudgetMs`
+    /// and `maxEvaluations`, each a whole number of at least 1 when present.
+    /// 0 is refused rather than read as "no limit" or "stop at once", as
+    /// `/optimize/solve` refuses it: either reading would be a guess.
+    fn or_solve_run_budget(
+        config_map: &HashMap<String, PropertyValue>,
+    ) -> ExecutionResult<Budget> {
+        let limit = |a: &str, b: &str| -> ExecutionResult<Option<u64>> {
+            match config_map.get(a).map(|v| (a, v)).or_else(|| config_map.get(b).map(|v| (b, v))) {
+                None => Ok(None),
+                Some((_, PropertyValue::Integer(n))) if *n >= 1 => Ok(Some(*n as u64)),
+                Some((key, other)) => Err(ExecutionError::bad_argument(format!(
+                    "or.solve: `{key}` must be a whole number of at least 1, got {other:?}; \
+                     leave it out for no limit"
+                ))),
+            }
+        };
+        Ok(Budget {
+            time: limit("timeBudgetMs", "time_budget_ms")?.map(std::time::Duration::from_millis),
+            evaluations: limit("maxEvaluations", "max_evaluations")?,
+        })
+    }
+
+    /// What a solve used of its budget: `evaluations` made and `stopped_by`,
+    /// `iterations` when it ran every iteration, else the limit that ended it
+    /// (`time_budget` or `evaluation_budget`) -- the names `/optimize/solve`
+    /// reports.
+    fn bind_run_budget_use<P>(record: &mut Record, problem: &Budgeted<P>) {
+        record.bind(
+            "evaluations".to_string(),
+            Value::Property(PropertyValue::Integer(problem.evaluations() as i64)),
+        );
+        let stopped_by = match problem.stop_reason() {
+            StopReason::Iterations => "iterations",
+            StopReason::TimeBudget => "time_budget",
+            StopReason::EvaluationBudget => "evaluation_budget",
+        };
+        record.bind(
+            "stopped_by".to_string(),
+            Value::Property(PropertyValue::String(stopped_by.to_string())),
+        );
+    }
+
     fn execute_or_solve(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
         if self.args.is_empty() {
              return Err(ExecutionError::bad_argument("algo.or.solve requires a config map".to_string()));
@@ -22509,10 +22553,10 @@ impl AlgorithmOperator {
         Self::reject_unknown_config_keys(&self.args, "or.solve", &[
             "algorithm", "bestKnown", "best_known", "budget", "constraintHandling",
             "constraint_handling", "costProperties", "costProperty",
-            "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
-            "max_iterations",
+            "cost_properties", "cost_property", "label", "lowerBound", "max", "maxEvaluations",
+            "maxIterations", "max_evaluations", "max_iterations",
             "minTotal", "min", "min_total", "populationSize", "population_size",
-            "property", "seed", "upperBound",
+            "property", "seed", "timeBudgetMs", "time_budget_ms", "upperBound",
         ])?;
         let algorithm = config_map.get("algorithm").and_then(|v| v.as_string()).unwrap_or("Jaya");
         if !Self::is_known_solver(algorithm) {
@@ -22622,6 +22666,11 @@ impl AlgorithmOperator {
                 )))
             }
         };
+        // A time or evaluation limit on the solve (OPT-11, #1798), the two
+        // `/optimize/solve` takes. `budget` above is the cost constraint, so
+        // these have their own names. Either stops the solver between
+        // iterations with the best answer so far; `stopped_by` says which.
+        let run_budget = Self::or_solve_run_budget(config_map)?;
         macro_rules! solve_with_seed {
             ($solver:expr, $problem:expr) => {
                 match seed {
@@ -22686,6 +22735,8 @@ impl AlgorithmOperator {
         // the point actually evaluated: the repaired one under `repair`.
         let problem = Constrained::new(problem, constraint_handling)
             .map_err(|e| ExecutionError::bad_argument(format!("or.solve: {e}")))?;
+        // Counts evaluations and stops the solver once `run_budget` is spent.
+        let problem = Budgeted::new(problem, run_budget);
 
         let solver_config = SolverConfig {
             population_size: pop_size,
@@ -22715,7 +22766,7 @@ impl AlgorithmOperator {
 
             // Write back first individual from Pareto Front: the point it was
             // scored at, which `repair` may have moved.
-            let resolved = res.pareto_front.first().map(|best| problem.resolve_multi(&best.variables));
+            let resolved = res.pareto_front.first().map(|best| problem.inner().resolve_multi(&best.variables));
             if let Some(best) = &resolved {
                 for (i, &val) in best.iter().enumerate() {
                     let node_id = node_ids[i];
@@ -22750,13 +22801,13 @@ impl AlgorithmOperator {
             let (objective, feasible) = match &resolved {
                 Some(best) => (
                     Value::Property(PropertyValue::Array(
-                        MultiObjectiveProblem::objectives(problem.inner(), best)
+                        MultiObjectiveProblem::objectives(problem.inner().inner(), best)
                             .into_iter()
                             .map(PropertyValue::Float)
                             .collect(),
                     )),
                     Value::Property(PropertyValue::Boolean(is_feasible(Problem::penalty(
-                        problem.inner(),
+                        problem.inner().inner(),
                         best,
                     )))),
                 ),
@@ -22767,6 +22818,7 @@ impl AlgorithmOperator {
             // (OPT-09, #2265): `history` holds one entry per iteration here too.
             record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(res.history.len() as i64)));
             record.bind("max_iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
+            Self::bind_run_budget_use(&mut record, &problem);
             self.results.push(record);
 
         } else {
@@ -22824,7 +22876,7 @@ impl AlgorithmOperator {
 
             // 4. Write back results: the point the answer was scored at, which
             // `repair` may have moved (OPT-10).
-            let best_variables = problem.resolve(&result.best_variables);
+            let best_variables = problem.inner().resolve(&result.best_variables);
             for (i, &val) in best_variables.iter().enumerate() {
                 let node_id = node_ids[i];
                 store
@@ -22867,8 +22919,8 @@ impl AlgorithmOperator {
             // The result envelope (OPT-09, #1776). `fitness` is objective plus
             // penalty, so on its own it cannot say whether the answer obeys the
             // budget and minimum: these columns separate the two.
-            let objective = Problem::objective(problem.inner(), &best_variables);
-            let feasible = is_feasible(Problem::penalty(problem.inner(), &best_variables));
+            let objective = Problem::objective(problem.inner().inner(), &best_variables);
+            let feasible = is_feasible(Problem::penalty(problem.inner().inner(), &best_variables));
             let gap = match best_known {
                 Some(best) => Value::Property(PropertyValue::Float(gap_to_best_known(objective, best))),
                 None => Value::Null,
@@ -22880,6 +22932,7 @@ impl AlgorithmOperator {
                 gap,
                 total_time_ms,
             );
+            Self::bind_run_budget_use(&mut record, &problem);
 
             self.results.push(record);
         }

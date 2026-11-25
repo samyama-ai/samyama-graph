@@ -178,13 +178,16 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     // Optimisation. Every solve yields the result envelope (OPT-09):
     // `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and
     // `total_time_ms`. A single-objective solve also yields `history`; a
-    // multi-objective one yields `front_size` instead.
+    // multi-objective one yields `front_size` instead. Both yield
+    // `evaluations` and `stopped_by`, what the run used of its time or
+    // evaluation budget (OPT-11, #1798).
     write(
         "algo.or.solve",
         Optimization,
         &[
             "algorithm", "objective", "fitness", "feasible", "gap", "total_time_ms",
-            "history", "iterations", "max_iterations", "front_size",
+            "history", "iterations", "max_iterations", "front_size", "evaluations",
+            "stopped_by",
         ],
     ),
     // Negative sampling for link prediction (ML-04, #1725): pairs
@@ -482,6 +485,9 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         aka(key("maxIterations", T::Integer, D::Integer(100)), "max_iterations"),
         // Not applied when left out: an unseeded solve draws from entropy (#2061).
         at_least(opt("seed", T::Integer), 0.0, B::Refused),
+        // Limits on the run itself (OPT-11, #1798); none when left out.
+        aka(at_least(opt("timeBudgetMs", T::Integer), 1.0, B::Refused), "time_budget_ms"),
+        aka(at_least(opt("maxEvaluations", T::Integer), 1.0, B::Refused), "max_evaluations"),
     ]),
     ("algo.negativeSampling", &[
         LABEL,
