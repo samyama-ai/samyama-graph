@@ -841,6 +841,56 @@ paths:
                   edges: 11000
                   persistence_degraded: false
 
+  /api/sparql:
+    post:
+      operationId: postSparql
+      summary: Run a SPARQL SELECT or ASK over the graph
+      description: |
+        Evaluates SPARQL 1.1 SELECT and ASK over the property graph read as
+        RDF where it is (#2100): no copy, nothing written. Triples follow the
+        `samyama convert` export: `<base>node/<id>`, `rdf:type <base>class/<Label>`,
+        `<base>prop/<key>`, `<base>rel/<TYPE>`, with edge properties reified
+        under `<base>statement/<id>`. `base` defaults to `https://samyama.ai/rdf/`.
+        CONSTRUCT, DESCRIBE and UPDATE are refused with 400, never answered
+        with an empty result. Read role, as `/api/query`.
+      requestBody:
+        required: true
+        content:
+          application/sparql-query:
+            schema:
+              type: string
+            example: "SELECT ?s WHERE { ?s a <https://samyama.ai/rdf/class/Person> }"
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                graph:
+                  type: string
+                  default: default
+                  description: Must be `default`; this build serves one graph.
+                base:
+                  type: string
+                  description: Base IRI the graph is read under.
+      responses:
+        '200':
+          description: W3C SPARQL 1.1 Query Results JSON
+          content:
+            application/sparql-results+json:
+              schema:
+                type: object
+              example:
+                head: { vars: [s] }
+                results:
+                  bindings:
+                    - s: { type: uri, value: "https://samyama.ai/rdf/node/1" }
+        '400':
+          description: A query that does not parse, a form not evaluated yet, or a graph other than `default`
+        '403':
+          description: The credential may not read this graph
+
   /api/changes:
     get:
       operationId: getChanges
