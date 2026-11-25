@@ -88,6 +88,10 @@ key reaches Google's request logs by their design, not ours.
   make your server fetch something (`src/query/csv_source.rs:114`). Both
   clauses read only under `--import-dir`, through the same gate.
 - **Raft and sharding** talk only to the peers you configured.
+- **`samyama healthcheck`** (`src/healthcheck.rs`) sends one `GET` to the
+  `/api/status` of the URL it is given, which is the local server by default
+  (the container image's `HEALTHCHECK`), with the token it was handed if any.
+  It reports the answer through its exit code and sends nothing else.
 
 ## Personal identifiers in what we publish (TRUST-10)
 
