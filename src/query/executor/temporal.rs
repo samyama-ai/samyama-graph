@@ -21,6 +21,7 @@
 //! Each is bounded by the next unit up, so 1000 microseconds is an error
 //! rather than a carry into milliseconds.
 
+use crate::graph::civil;
 use crate::graph::PropertyValue;
 use crate::query::executor::ExecutionError;
 
@@ -85,18 +86,19 @@ pub fn time_of_day_nanos(
 /// silently fell through to 1 January.
 pub fn date_days(
     map: &std::collections::HashMap<String, PropertyValue>,
-) -> Result<i32, ExecutionError> {
-    use chrono::NaiveDate;
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is a date");
-    let year = field(map, "year").ok_or_else(|| err("a date needs a year"))? as i32;
+) -> Result<i64, ExecutionError> {
+    let year = field(map, "year").ok_or_else(|| err("a date needs a year"))?;
+    // A component outside u32 is no valid month, week or day; mapping it to 0
+    // makes the validated constructors below refuse it rather than wrap it.
+    let small = |v: i64| u32::try_from(v).unwrap_or(0);
 
     let date = if has_any(map, &["week", "dayOfWeek"]) {
-        let week = field(map, "week").unwrap_or(1) as u32;
-        let dow = field(map, "dayOfWeek").unwrap_or(1) as u32;
+        let week = field(map, "week").unwrap_or(1);
+        let dow = field(map, "dayOfWeek").unwrap_or(1);
         if !(1..=7).contains(&dow) {
             return Err(err(format!("dayOfWeek must be 1..=7, got {dow}")));
         }
-        NaiveDate::from_isoywd_opt(year, week, weekday_from_iso(dow))
+        civil::from_isoywd(year, small(week), dow as u32)
             .ok_or_else(|| err(format!("invalid ISO week date {year}-W{week}-{dow}")))?
     } else if has_any(map, &["quarter", "dayOfQuarter"]) {
         let q = field(map, "quarter").unwrap_or(1);
@@ -105,35 +107,22 @@ pub fn date_days(
             return Err(err(format!("quarter must be 1..=4, got {q}")));
         }
         let first_month = (q - 1) * 3 + 1;
-        let start = NaiveDate::from_ymd_opt(year, first_month as u32, 1)
+        let start = civil::from_ymd(year, first_month as u32, 1)
             .ok_or_else(|| err(format!("invalid quarter start {year}-Q{q}")))?;
         start
-            .checked_add_signed(chrono::Duration::days(d - 1))
+            .checked_add(d - 1)
             .ok_or_else(|| err(format!("invalid dayOfQuarter {d}")))?
     } else if let Some(ord) = field(map, "ordinalDay") {
-        NaiveDate::from_yo_opt(year, ord as u32)
+        civil::from_yo(year, small(ord))
             .ok_or_else(|| err(format!("invalid ordinalDay {ord} for {year}")))?
     } else {
-        let month = field(map, "month").unwrap_or(1) as u32;
-        let day = field(map, "day").unwrap_or(1) as u32;
-        NaiveDate::from_ymd_opt(year, month, day)
+        let month = field(map, "month").unwrap_or(1);
+        let day = field(map, "day").unwrap_or(1);
+        civil::from_ymd(year, small(month), small(day))
             .ok_or_else(|| err(format!("invalid date {year}-{month}-{day}")))?
     };
 
-    Ok(date.signed_duration_since(epoch).num_days() as i32)
-}
-
-fn weekday_from_iso(dow: u32) -> chrono::Weekday {
-    use chrono::Weekday::*;
-    match dow {
-        1 => Mon,
-        2 => Tue,
-        3 => Wed,
-        4 => Thu,
-        5 => Fri,
-        6 => Sat,
-        _ => Sun,
-    }
+    Ok(date)
 }
 
 /// What a `timezone:` field named: a fixed offset, or an IANA zone.
@@ -321,31 +310,27 @@ pub fn truncate(
     value: &PropertyValue,
     overrides: &std::collections::HashMap<String, PropertyValue>,
 ) -> Result<PropertyValue, ExecutionError> {
-    use chrono::{Datelike, NaiveDate};
-
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch is a date");
     let (days, tod, offset, zone) = decompose(value)?;
-    let date = epoch
-        .checked_add_signed(chrono::Duration::days(days.unwrap_or(0)))
-        .ok_or_else(|| err("date out of range"))?;
+    let date = days.unwrap_or(0);
+    if !civil::day_in_range(date) {
+        return Err(err("date out of range"));
+    }
+    let (year, month, _) = civil::civil_from_days(date);
 
     // How much of the clock survives, and where the date lands.
     let (new_date, mut new_tod) = match unit.to_ascii_lowercase().as_str() {
-        "millennium" => (ymd(date.year() - date.year().rem_euclid(1000), 1, 1)?, 0),
-        "century" => (ymd(date.year() - date.year().rem_euclid(100), 1, 1)?, 0),
-        "decade" => (ymd(date.year() - date.year().rem_euclid(10), 1, 1)?, 0),
-        "year" => (ymd(date.year(), 1, 1)?, 0),
+        "millennium" => (ymd(year - year.rem_euclid(1000), 1, 1)?, 0),
+        "century" => (ymd(year - year.rem_euclid(100), 1, 1)?, 0),
+        "decade" => (ymd(year - year.rem_euclid(10), 1, 1)?, 0),
+        "year" => (ymd(year, 1, 1)?, 0),
         "weekyear" => (
-            NaiveDate::from_isoywd_opt(date.iso_week().year(), 1, chrono::Weekday::Mon)
+            civil::from_isoywd(civil::iso_week(date).0, 1, 1)
                 .ok_or_else(|| err("week-year out of range"))?,
             0,
         ),
-        "quarter" => (ymd(date.year(), (date.month() - 1) / 3 * 3 + 1, 1)?, 0),
-        "month" => (ymd(date.year(), date.month(), 1)?, 0),
-        "week" => (
-            date - chrono::Duration::days(date.weekday().num_days_from_monday() as i64),
-            0,
-        ),
+        "quarter" => (ymd(year, (month - 1) / 3 * 3 + 1, 1)?, 0),
+        "month" => (ymd(year, month, 1)?, 0),
+        "week" => (date - (civil::weekday(date) as i64 - 1), 0),
         "day" => (date, 0),
         "hour" => (date, tod.unwrap_or(0) / 3_600_000_000_000 * 3_600_000_000_000),
         "minute" => (date, tod.unwrap_or(0) / 60_000_000_000 * 60_000_000_000),
@@ -357,23 +342,19 @@ pub fn truncate(
 
     // Overrides are applied *after* truncation, so `{day: 2}` on a millennium
     // truncation gives 2000-01-02 rather than being rounded away.
-    let mut new_days = new_date.signed_duration_since(epoch).num_days();
+    let mut new_days = new_date;
     if !overrides.is_empty() {
-        let mut y = new_date.year();
-        let mut m = new_date.month();
-        let mut d = new_date.day();
-        if let Some(v) = field(overrides, "year") { y = v as i32; }
-        if let Some(v) = field(overrides, "month") { m = v as u32; }
-        if let Some(v) = field(overrides, "day") { d = v as u32; }
+        let (mut y, mut m, mut d) = civil::civil_from_days(new_date);
+        if let Some(v) = field(overrides, "year") { y = v; }
+        if let Some(v) = field(overrides, "month") { m = u32::try_from(v).unwrap_or(0); }
+        if let Some(v) = field(overrides, "day") { d = u32::try_from(v).unwrap_or(0); }
         if overrides.contains_key("dayOfWeek") {
-            let want = field(overrides, "dayOfWeek").unwrap_or(1) as i64;
+            let want = field(overrides, "dayOfWeek").unwrap_or(1);
             let base = ymd(y, m, d)?;
-            let cur = base.weekday().num_days_from_monday() as i64;
-            new_days = (base + chrono::Duration::days(want - 1 - cur))
-                .signed_duration_since(epoch)
-                .num_days();
+            let cur = civil::weekday(base) as i64 - 1;
+            new_days = base + (want - 1 - cur);
         } else {
-            new_days = ymd(y, m, d)?.signed_duration_since(epoch).num_days();
+            new_days = ymd(y, m, d)?;
         }
         // Clock overrides add on top of what truncation left.
         for (key, mult) in [
@@ -418,8 +399,8 @@ pub fn truncate(
     build(target, new_days, new_tod, offset, zone)
 }
 
-fn ymd(y: i32, m: u32, d: u32) -> Result<chrono::NaiveDate, ExecutionError> {
-    chrono::NaiveDate::from_ymd_opt(y, m, d).ok_or_else(|| err(format!("invalid date {y}-{m}-{d}")))
+fn ymd(y: i64, m: u32, d: u32) -> Result<i64, ExecutionError> {
+    civil::from_ymd(y, m, d).ok_or_else(|| err(format!("invalid date {y}-{m}-{d}")))
 }
 
 /// Split any temporal into (days, time-of-day, offset, zone), each optional.
@@ -428,7 +409,7 @@ fn decompose(
     v: &PropertyValue,
 ) -> Result<(Option<i64>, Option<i64>, Option<i32>, Option<String>), ExecutionError> {
     Ok(match v {
-        PropertyValue::Date(d) => (Some(*d as i64), None, None, None),
+        PropertyValue::Date(d) => (Some(*d), None, None, None),
         PropertyValue::LocalTime(n) => (None, Some(*n), None, None),
         PropertyValue::Time { nanos, offset_seconds } => (None, Some(*nanos), Some(*offset_seconds), None),
         PropertyValue::LocalDateTime { secs, nanos } => (
@@ -459,7 +440,7 @@ fn build(
     zone: Option<String>,
 ) -> Result<PropertyValue, ExecutionError> {
     Ok(match target {
-        "date" => PropertyValue::Date(days as i32),
+        "date" => PropertyValue::Date(days),
         "localtime" => PropertyValue::LocalTime(tod.rem_euclid(NANOS_PER_DAY)),
         "time" => PropertyValue::Time {
             nanos: tod.rem_euclid(NANOS_PER_DAY),
@@ -511,10 +492,10 @@ pub fn split_zone_suffix(s: &str) -> (&str, Option<&str>) {
 /// ```
 ///
 /// Years may also be signed and wider than four digits (`-999999999-01-01`),
-/// which is why the year is scanned rather than taken as a fixed slice.
-pub fn parse_iso_date(s: &str) -> Result<i32, ExecutionError> {
-    use chrono::{Datelike, NaiveDate};
-    let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
+/// which is why the year is scanned rather than taken as a fixed slice. The
+/// whole of openCypher's ±999,999,999-year range is accepted: the day number
+/// comes from [`civil`], not `chrono`, which stops at ±262,143 (#1009).
+pub fn parse_iso_date(s: &str) -> Result<i64, ExecutionError> {
     let t = s.trim();
     if t.is_empty() {
         return Err(err("empty date"));
@@ -537,11 +518,13 @@ pub fn parse_iso_date(s: &str) -> Result<i32, ExecutionError> {
         (&digits[..digits.len().min(if rest.len() > digits.len() { digits.len() } else { 4 })], &rest[digits.len().min(if rest.len() > digits.len() { digits.len() } else { 4 })..])
     };
     let year = sign * year_str.parse::<i64>().map_err(|_| err(format!("bad year in {s}")))?;
-    let year = i32::try_from(year).map_err(|_| err(format!("year out of range in {s}")))?;
+    if !civil::year_in_range(year) {
+        return Err(err(format!("year out of range in {s}")));
+    }
     let tail = tail.trim_start_matches('-');
 
     let date = if tail.is_empty() {
-        NaiveDate::from_ymd_opt(year, 1, 1)
+        civil::from_ymd(year, 1, 1)
     } else if let Some(w) = tail.strip_prefix('W').or_else(|| tail.strip_prefix('w')) {
         let w = w.replace('-', "");
         // Two week digits and an optional weekday digit. Checked before
@@ -551,7 +534,7 @@ pub fn parse_iso_date(s: &str) -> Result<i32, ExecutionError> {
         }
         let week: u32 = w[..2].parse().map_err(|_| err(format!("bad week in {s}")))?;
         let dow: u32 = if w.len() > 2 { w[2..3].parse().unwrap_or(1) } else { 1 };
-        NaiveDate::from_isoywd_opt(year, week, weekday_from_iso(dow))
+        civil::from_isoywd(year, week, dow)
     } else {
         let d = tail.replace('-', "");
         // Byte-sliced below, so a multi-byte character is refused first.
@@ -560,10 +543,10 @@ pub fn parse_iso_date(s: &str) -> Result<i32, ExecutionError> {
         }
         match d.len() {
             // Ordinal day: three digits.
-            3 => NaiveDate::from_yo_opt(year, d.parse().map_err(|_| err("bad ordinal"))?),
+            3 => civil::from_yo(year, d.parse().map_err(|_| err("bad ordinal"))?),
             // Month only.
-            2 => NaiveDate::from_ymd_opt(year, d.parse().map_err(|_| err("bad month"))?, 1),
-            4 => NaiveDate::from_ymd_opt(
+            2 => civil::from_ymd(year, d.parse().map_err(|_| err("bad month"))?, 1),
+            4 => civil::from_ymd(
                 year,
                 d[..2].parse().map_err(|_| err("bad month"))?,
                 d[2..].parse().map_err(|_| err("bad day"))?,
@@ -571,8 +554,7 @@ pub fn parse_iso_date(s: &str) -> Result<i32, ExecutionError> {
             _ => return Err(err(format!("cannot parse date: {s}"))),
         }
     };
-    let date = date.ok_or_else(|| err(format!("invalid date: {s}")))?;
-    Ok(date.signed_duration_since(epoch).num_days() as i32)
+    date.ok_or_else(|| err(format!("invalid date: {s}")))
 }
 
 /// A time of day in any ISO-8601 spelling, as nanoseconds since midnight.

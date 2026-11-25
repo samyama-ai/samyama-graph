@@ -94,9 +94,15 @@ pub enum PropertyValue {
     DateTime(i64),
     /// A calendar date: days since 1970-01-01, no time and no zone.
     ///
-    /// `i32` days spans roughly ±5.8 million years, which is far past what
-    /// `chrono::NaiveDate` accepts, so the representation is not the limit.
-    Date(i32),
+    /// `i64`, because openCypher dates span ±999,999,999 years -- about
+    /// 3.65 × 10¹¹ days, 170 times what an `i32` holds (#1009). The calendar
+    /// arithmetic is [`civil`](crate::graph::civil), not `chrono`, which stops
+    /// at ±262,143 years.
+    ///
+    /// Serialised exactly as the `i32` it used to be whenever it fits, so data
+    /// written before the widening still loads and ordinary dates write the
+    /// same bytes as before; see `date_wire`.
+    Date(#[serde(with = "date_wire")] i64),
     /// A time of day with nanosecond precision and no zone: nanoseconds since
     /// midnight, `0..86_400_000_000_000`.
     ///
@@ -134,6 +140,75 @@ pub enum PropertyValue {
     Null,
 }
 
+
+/// The serialised form of a [`PropertyValue::Date`] day number (#1009).
+///
+/// `Date` was an `i32` until it had to hold openCypher's ±999,999,999-year
+/// range. Its persisted forms must survive the widening:
+///
+/// * **bincode** (RocksDB node and edge properties, the WAL) is not
+///   self-describing, so a plain `i64` would read four bytes of the *next*
+///   field out of every date written before. A day number that fits an `i32`
+///   is therefore written as exactly that `i32` -- the old bytes, unchanged --
+///   and only a wider one is written as the escape `i32::MIN` followed by the
+///   full `i64`. `i32::MIN` days is year -5,877,641, which no earlier build
+///   could construct (`chrono` stops at ±262,143), so the escape cannot be
+///   mistaken for an old date.
+/// * **Human-readable formats** (JSON) carry a number of any width, so they
+///   write the `i64` and read either.
+///
+/// Old data reads unchanged; new data with an ordinary date is byte-identical
+/// to what the `i32` build wrote. Only a date past ±5.8 million years uses the
+/// new encoding, and only a build that can represent it needs to read it.
+mod date_wire {
+    use serde::de::{self, SeqAccess, Visitor};
+    use serde::ser::SerializeTuple;
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::fmt;
+
+    pub(super) const ESCAPE: i32 = i32::MIN;
+
+    pub fn serialize<S: Serializer>(days: &i64, s: S) -> Result<S::Ok, S::Error> {
+        if s.is_human_readable() {
+            return s.serialize_i64(*days);
+        }
+        match i32::try_from(*days) {
+            Ok(n) if n != ESCAPE => s.serialize_i32(n),
+            _ => {
+                let mut t = s.serialize_tuple(2)?;
+                t.serialize_element(&ESCAPE)?;
+                t.serialize_element(days)?;
+                t.end()
+            }
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<i64, D::Error> {
+        if d.is_human_readable() {
+            return i64::deserialize(d);
+        }
+        struct DayNumber;
+        impl<'de> Visitor<'de> for DayNumber {
+            type Value = i64;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a day number: an i32, or the escape i32::MIN and an i64")
+            }
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<i64, A::Error> {
+                let narrow: i32 = seq
+                    .next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(0, &self))?;
+                if narrow != ESCAPE {
+                    return Ok(narrow as i64);
+                }
+                seq.next_element()?
+                    .ok_or_else(|| de::Error::invalid_length(1, &self))
+            }
+        }
+        // A tuple is read element by element, so the second is read only when
+        // the first is the escape: an old four-byte date consumes four bytes.
+        d.deserialize_tuple(2, DayNumber)
+    }
+}
 
 /// Cypher's orderability, for `ORDER BY` — **not** the same order as
 /// [`PropertyValue`]'s `Ord`.
@@ -373,7 +448,15 @@ impl std::hash::Hash for PropertyValue {
         match self {
             // Discriminants 10.. so the pre-#689 variants keep their tags and
             // an existing hash index is not silently reshuffled.
-            PropertyValue::Date(d) => { 10.hash(state); d.hash(state); }
+            // Hashed as the `i32` it used to be when it fits, so widening the
+            // type (#1009) does not move any existing date's hash.
+            PropertyValue::Date(d) => {
+                10.hash(state);
+                match i32::try_from(*d) {
+                    Ok(n) => n.hash(state),
+                    Err(_) => d.hash(state),
+                }
+            }
             PropertyValue::LocalTime(n) => { 11.hash(state); n.hash(state); }
             PropertyValue::Time { nanos, offset_seconds } => {
                 12.hash(state); nanos.hash(state); offset_seconds.hash(state);
@@ -702,30 +785,19 @@ pub fn fmt_offset(offset_seconds: i32) -> String {
 }
 
 /// A date as `2015-07-21`, from days since the Unix epoch.
-pub(crate) fn fmt_date(days: i32) -> String {
-    match chrono::NaiveDate::from_ymd_opt(1970, 1, 1).and_then(|d| d.checked_add_signed(chrono::Duration::days(days as i64))) {
-        Some(d) => d.format("%Y-%m-%d").to_string(),
-        // Outside chrono's range. Reported rather than silently clamped: a
-        // wrong date that looks like a date is worse than an obvious marker.
-        None => format!("<date out of range: {days} days>"),
-    }
+///
+/// Any day number has a rendering: the calendar arithmetic is exact over the
+/// whole range, and years past 9999 or before 0 take ISO 8601's expanded form
+/// (`+999999999-12-31`, `-0001-01-01`) (#1009).
+pub(crate) fn fmt_date(days: i64) -> String {
+    crate::graph::civil::fmt_date(days)
 }
 
 /// A naive date-time as `2015-07-21T21:40:32.142`.
 pub(crate) fn fmt_local_date_time(secs: i64, nanos: u32) -> String {
-    match chrono::DateTime::from_timestamp(secs, nanos) {
-        Some(dt) => {
-            let d = dt.naive_utc();
-            let day = d.format("%Y-%m-%d").to_string();
-            let tod = fmt_time_of_day(
-                (d.time().signed_duration_since(chrono::NaiveTime::MIN))
-                    .num_nanoseconds()
-                    .unwrap_or(0),
-            );
-            format!("{day}T{tod}")
-        }
-        None => format!("<datetime out of range: {secs}s {nanos}ns>"),
-    }
+    let day = fmt_date(secs.div_euclid(86_400));
+    let tod = fmt_time_of_day(secs.rem_euclid(86_400) * 1_000_000_000 + nanos as i64);
+    format!("{day}T{tod}")
 }
 
 
@@ -809,16 +881,18 @@ impl PropertyValue {
     pub fn as_epoch_millis(&self) -> Option<i64> {
         match self {
             PropertyValue::DateTime(ms) => Some(*ms),
-            PropertyValue::Date(d) => Some(*d as i64 * 86_400_000),
+            // Checked: a date past about ±292 million years has no i64
+            // millisecond count (#1009).
+            PropertyValue::Date(d) => d.checked_mul(86_400_000),
             PropertyValue::LocalTime(n) => Some(n / 1_000_000),
             PropertyValue::Time { nanos, offset_seconds } => {
                 Some((nanos - (*offset_seconds as i64) * 1_000_000_000) / 1_000_000)
             }
             PropertyValue::LocalDateTime { secs, nanos } => {
-                Some(secs * 1000 + (*nanos as i64) / 1_000_000)
+                secs.checked_mul(1000)?.checked_add((*nanos as i64) / 1_000_000)
             }
             PropertyValue::ZonedDateTime { secs, nanos, .. } => {
-                Some(secs * 1000 + (*nanos as i64) / 1_000_000)
+                secs.checked_mul(1000)?.checked_add((*nanos as i64) / 1_000_000)
             }
             _ => None,
         }
@@ -976,6 +1050,148 @@ pub type PropertyMap = HashMap<String, PropertyValue>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `PropertyValue` exactly as it was derived while `Date` held an `i32`
+    /// (#1009). Variant order and field shapes are copied from that build;
+    /// bincode encodes a variant by its index, so this *is* the old format.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    enum LegacyPropertyValue {
+        String(String),
+        Integer(i64),
+        Float(f64),
+        Boolean(bool),
+        DateTime(i64),
+        Date(i32),
+        LocalTime(i64),
+        Time { nanos: i64, offset_seconds: i32 },
+        LocalDateTime { secs: i64, nanos: u32 },
+        ZonedDateTime { secs: i64, nanos: u32, offset_seconds: i32, zone: Option<String> },
+        Array(Vec<LegacyPropertyValue>),
+        Map(HashMap<String, LegacyPropertyValue>),
+        Vector(Vec<f32>),
+        Duration { months: i64, days: i64, seconds: i64, nanos: i32 },
+        Null,
+    }
+
+    /// One of every variant, with dates at the edges of the old range, in
+    /// both shapes.
+    fn every_variant() -> (Vec<LegacyPropertyValue>, Vec<PropertyValue>) {
+        use LegacyPropertyValue as L;
+        use PropertyValue as P;
+        let mut lm = HashMap::new();
+        lm.insert("d".to_string(), L::Date(-719_528));
+        let mut pm = HashMap::new();
+        pm.insert("d".to_string(), P::Date(-719_528));
+        let old = vec![
+            L::String("s".into()),
+            L::Integer(-7),
+            L::Float(0.5),
+            L::Boolean(true),
+            L::DateTime(1_437_514_832_142),
+            L::Date(16_637),
+            L::Date(0),
+            L::Date(-1),
+            L::Date(i32::MAX),
+            L::Date(i32::MIN + 1),
+            L::LocalTime(45_074_645_876_123),
+            L::Time { nanos: 1, offset_seconds: 3600 },
+            L::LocalDateTime { secs: 1_437_514_832, nanos: 142 },
+            L::ZonedDateTime { secs: 1, nanos: 2, offset_seconds: -3600, zone: Some("Europe/Paris".into()) },
+            L::Array(vec![L::Date(16_637), L::Integer(1)]),
+            L::Map(lm),
+            L::Vector(vec![0.25, -1.0]),
+            L::Duration { months: 1, days: 2, seconds: 3, nanos: 4 },
+            L::Null,
+        ];
+        let new = vec![
+            P::String("s".into()),
+            P::Integer(-7),
+            P::Float(0.5),
+            P::Boolean(true),
+            P::DateTime(1_437_514_832_142),
+            P::Date(16_637),
+            P::Date(0),
+            P::Date(-1),
+            P::Date(i32::MAX as i64),
+            P::Date(i32::MIN as i64 + 1),
+            P::LocalTime(45_074_645_876_123),
+            P::Time { nanos: 1, offset_seconds: 3600 },
+            P::LocalDateTime { secs: 1_437_514_832, nanos: 142 },
+            P::ZonedDateTime { secs: 1, nanos: 2, offset_seconds: -3600, zone: Some("Europe/Paris".into()) },
+            P::Array(vec![P::Date(16_637), P::Integer(1)]),
+            P::Map(pm),
+            P::Vector(vec![0.25, -1.0]),
+            P::Duration { months: 1, days: 2, seconds: 3, nanos: 4 },
+            P::Null,
+        ];
+        (old, new)
+    }
+
+    #[test]
+    fn bincode_written_by_the_i32_build_still_loads() {
+        // RocksDB properties and the WAL are bincode. A property map written
+        // before #1009 must read back unchanged -- including the value *after*
+        // a date, which a plain i64 would have eaten four bytes of.
+        let (old, new) = every_variant();
+        for (o, n) in old.iter().zip(&new) {
+            let bytes = bincode::serialize(o).unwrap();
+            let back: PropertyValue = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(&back, n, "{o:?}");
+        }
+        let bytes = bincode::serialize(&old).unwrap();
+        let back: Vec<PropertyValue> = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(back, new);
+    }
+
+    #[test]
+    fn an_ordinary_date_writes_the_same_bytes_as_before() {
+        // Not just readable: byte-identical, so the WAL checksum, anything
+        // keyed on encoded bytes, and an older build reading newer data all
+        // see no change for any date the old type could hold.
+        let (old, new) = every_variant();
+        assert_eq!(bincode::serialize(&new).unwrap(), bincode::serialize(&old).unwrap());
+    }
+
+    #[test]
+    fn a_date_wider_than_i32_round_trips_through_bincode() {
+        let lo = crate::graph::civil::days_from_civil(-999_999_999, 1, 1);
+        let hi = crate::graph::civil::days_from_civil(999_999_999, 12, 31);
+        for days in [lo, hi, i32::MAX as i64 + 1, i32::MIN as i64 - 1, i32::MIN as i64] {
+            // Followed by another value, so a misread width shows up as the
+            // neighbour coming back wrong.
+            let v = vec![PropertyValue::Date(days), PropertyValue::Integer(42)];
+            let bytes = bincode::serialize(&v).unwrap();
+            let back: Vec<PropertyValue> = bincode::deserialize(&bytes).unwrap();
+            assert_eq!(back, v, "{days}");
+        }
+    }
+
+    #[test]
+    fn json_carries_any_date_and_reads_the_old_form() {
+        let hi = crate::graph::civil::days_from_civil(999_999_999, 12, 31);
+        let v = PropertyValue::Date(hi);
+        let json = serde_json::to_string(&v).unwrap();
+        assert_eq!(json, format!("{{\"Date\":{hi}}}"));
+        assert_eq!(serde_json::from_str::<PropertyValue>(&json).unwrap(), v);
+        // What the i32 build wrote.
+        let old = serde_json::to_string(&LegacyPropertyValue::Date(16_637)).unwrap();
+        assert_eq!(serde_json::from_str::<PropertyValue>(&old).unwrap(), PropertyValue::Date(16_637));
+    }
+
+    #[test]
+    fn widening_did_not_move_an_ordinary_dates_hash() {
+        use std::hash::{Hash, Hasher};
+        fn h<T: Hash>(t: &T) -> u64 {
+            let mut s = std::collections::hash_map::DefaultHasher::new();
+            t.hash(&mut s);
+            s.finish()
+        }
+        // What the hand-written impl hashed for `Date(d: i32)` before #1009.
+        let mut s = std::collections::hash_map::DefaultHasher::new();
+        10.hash(&mut s);
+        16_637i32.hash(&mut s);
+        assert_eq!(h(&PropertyValue::Date(16_637)), s.finish());
+    }
 
     #[test]
     fn test_property_value_types() {

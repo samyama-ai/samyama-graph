@@ -2138,11 +2138,9 @@ fn temporal_helpers_directly() {
     );
     assert_eq!(temporal_epoch_nanos(&P::Integer(1)), None);
     assert_eq!(day_and_nanos_to_secs(1, -1), (86_399, 999_999_999));
-    assert_eq!(weekday_from_iso_num(7), chrono::Weekday::Sun);
-    assert_eq!(weekday_from_iso_num(3), chrono::Weekday::Wed);
-    assert_eq!(days_in_month(2020, 2), 29);
-    assert_eq!(days_in_month(2021, 12), 31);
-    assert_eq!(days_in_month(2021, 13), 31);
+    assert_eq!(crate::graph::civil::days_in_month(2020, 2), 29);
+    assert_eq!(crate::graph::civil::days_in_month(2021, 12), 31);
+    assert_eq!(crate::graph::civil::days_in_month(2021, 13), 0);
     assert_eq!(
         rebuild_temporal_like(&P::Integer(0), 5_000_000),
         P::DateTime(5)

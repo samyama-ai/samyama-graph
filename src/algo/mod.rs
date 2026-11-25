@@ -274,7 +274,7 @@ fn edge_time(edge: &crate::graph::Edge, property: Option<&str>) -> i64 {
             Some(PropertyValue::DateTime(ms)) => return *ms,
             Some(PropertyValue::LocalDateTime { secs, .. }) => return *secs,
             Some(PropertyValue::ZonedDateTime { secs, .. }) => return *secs,
-            Some(PropertyValue::Date(days)) => return *days as i64 * 86_400,
+            Some(PropertyValue::Date(days)) => return days.saturating_mul(86_400),
             Some(PropertyValue::Float(f)) => return *f as i64,
             // A property that is present but not a time is not silently
             // treated as zero -- zero is a real instant, and using it would
