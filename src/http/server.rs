@@ -1072,6 +1072,7 @@ impl HttpServer {
             .route("/api/verify", post(verify_handler))
             .route("/api/nlq", post(nlq_handler))
             .route("/api/status", get(status_handler))
+            .route("/api/sparql", post(super::sparql::sparql_handler))
             .route("/api/changes", get(changes_handler))
             .route("/api/memory", get(memory_handler))
             .route("/metrics", get(metrics_handler))
