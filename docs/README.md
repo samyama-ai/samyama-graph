@@ -34,6 +34,7 @@ eight of eighteen documents (#1450).
 - **[MIGRATING-FROM-FALKORDB.md](./MIGRATING-FROM-FALKORDB.md)** — FalkorDB and RedisGraph: the RESP differences (graph key, parameters, reply shape, `--compact`), the Cypher to rewrite, and how to move the data.
 - **[LEAVING-SAMYAMA.md](./LEAVING-SAMYAMA.md)** — getting your data out. Documented on purpose: an exit you cannot find is not an exit.
 - **[KG-CATALOG.md](./KG-CATALOG.md)** — every public knowledge graph built for Samyama: what it holds, its scale, schema and data licence, where to download it, and a query to start with.
+- **[EVALUATION-SETS.md](./EVALUATION-SETS.md)** — `samyama eval-gen`: a question set with gold answers, difficulty labels and unanswerable items generated from any knowledge graph snapshot, re-checkable with `samyama verify` (ML-14).
 - **[MOVING-DATA.md](./MOVING-DATA.md)** — `samyama convert`: which formats convert to and from `.sgsnap`, the RDF mapping file and presets, loss reports and exit codes.
 
 ### The query language
