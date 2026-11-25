@@ -108,6 +108,22 @@ the header, then the index catalog (`"t":"i"`), any hierarchy declarations
 gunzip -c graph.sgsnap | head -1 | python3 -m json.tool
 ```
 
+**Or ask for Parquet.** `?version=3` (or `samyama convert --sgsnap-version 3`)
+writes the same snapshot as a tar of Parquet files -- one per label, one per
+relationship type -- with a `manifest.json` holding the header and catalog.
+Another Samyama imports it like any snapshot; anything else unpacks it and
+reads the columns directly:
+
+```bash
+curl -X POST 'http://localhost:8080/api/snapshot/export?version=3' -o graph.sgsnap
+mkdir graph && tar xf graph.sgsnap -C graph
+duckdb -c "SELECT * FROM 'graph/nodes/*-Person.parquet' LIMIT 5"
+```
+
+Columns are named after the properties. A property whose values are not all
+one simple type is a text column holding the snapshot's JSON encoding; each
+column's `samyama.type` metadata says which.
+
 ---
 
 ## 3. Parquet / Arrow — for a warehouse, not for a graph
