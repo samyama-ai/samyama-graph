@@ -7773,7 +7773,7 @@ fn spawn_auto_embed(
             }
         };
         if let Some(store) = store {
-            let mut guard = store.write().await;
+            let mut guard = crate::store_lock::write(&store).await;
             match guard.set_node_property(
                 &tenant_id,
                 id,

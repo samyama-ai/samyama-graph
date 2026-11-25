@@ -129,7 +129,7 @@ pub async fn expire(sessions: &TxnSessions, id: &str, limit: Duration) {
 }
 
 pub async fn begin_handler(State(state): State<AppState>) -> Response {
-    let mut guard = Arc::clone(&state.store).write_owned().await;
+    let mut guard = crate::store_lock::write_owned(Arc::clone(&state.store)).await;
     let version = match guard.begin_session_transaction() {
         Ok(v) => v,
         Err(e) => return error(StatusCode::CONFLICT, e.to_string()),
@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         let (status, _) = post_json(&app, &format!("/api/tx/{tx}/rollback"), json!({})).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(state.store.read().await.node_count(), 0, "a rolled-back CREATE survived");
+        assert_eq!(crate::store_lock::read(&state.store).await.node_count(), 0, "a rolled-back CREATE survived");
     }
 
     #[tokio::test]
@@ -281,7 +281,7 @@ mod tests {
         assert_eq!(inside["records"][0][0], json!(1), "the transaction cannot read its own write: {inside}");
         let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(state.store.read().await.node_count(), 1);
+        assert_eq!(crate::store_lock::read(&state.store).await.node_count(), 1);
     }
 
     #[tokio::test]
@@ -318,7 +318,7 @@ mod tests {
         post_json(&app, "/api/query", json!({ "query": "CREATE (:T)", "tx": tx })).await;
         expire(&state.transactions, &tx, Duration::from_secs(7)).await;
 
-        assert_eq!(state.store.read().await.node_count(), 0, "the expired CREATE survived");
+        assert_eq!(crate::store_lock::read(&state.store).await.node_count(), 0, "the expired CREATE survived");
         let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
         let message = body["error"].as_str().unwrap();
@@ -346,7 +346,7 @@ mod tests {
 
         let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
-        assert_eq!(state.store.read().await.node_count(), 0, "a late commit kept its write");
+        assert_eq!(crate::store_lock::read(&state.store).await.node_count(), 0, "a late commit kept its write");
         assert!(state.store.try_read().is_ok(), "the lock was not released");
     }
 
@@ -388,7 +388,7 @@ mod tests {
         pm.fail_next_apply_for_test();
         let (status, body) = post_json(&app, &format!("/api/tx/{tx}/commit"), json!({})).await;
         assert_ne!(status, StatusCode::OK, "a commit that was not persisted reported success: {body}");
-        let guard = state.store.read().await;
+        let guard = crate::store_lock::read(&state.store).await;
         assert_eq!(guard.node_count(), 0, "the refused CREATE is still in memory");
         assert!(guard.session_transaction_version().is_none(), "the transaction is still open");
     }
