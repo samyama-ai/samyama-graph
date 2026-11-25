@@ -25,6 +25,8 @@ pub mod pca;
 pub mod centrality;
 pub mod centrality_extra;
 pub mod link_prediction;
+pub mod neighbour_sampling;
+pub mod subgraph_sampling;
 pub mod negative_sampling;
 pub mod community_detect;
 pub mod metrics;
@@ -35,7 +37,9 @@ pub mod embeddings;
 pub mod split;
 
 pub use common::{GraphView, NodeId};
-pub use constrained_path::{constrained_shortest_path, ConstrainedPath, ConstrainedPathError};
+pub use constrained_path::{
+    constrained_shortest_path, constrained_shortest_path_search, ConstrainedPath, ConstrainedPathError, ConstrainedSearch,
+};
 pub use pagerank::{page_rank, page_rank_with, PageRankConfig};
 pub use progress::{NoProgress, Progress, Stopped};
 pub use incremental::{
@@ -57,6 +61,12 @@ pub use centrality::{
     eigenvector_centrality, harmonic_centrality, ranked, Scores,
 };
 pub use link_prediction::{predict_links, score_one, LinkScore, PairScore};
+pub use neighbour_sampling::{
+    sample_neighbours, Direction as SampleDirection, Fanout, SampleError, SampleSpec, SampledEdge,
+};
+pub use subgraph_sampling::{
+    ego_network, forest_fire, random_walk_sample, snowball, stratified, Allocation as StratumAllocation,
+};
 pub use negative_sampling::{negative_samples, NegativeStrategy};
 pub use similarity_extra::{
     constraint, cosine_similarity, effective_size, node_similarity, overlap_coefficient,

@@ -57,6 +57,7 @@ pub mod edge;
 pub mod feature;
 pub mod node;
 pub mod projection;
+pub mod retention;
 pub mod property;
 pub mod store;
 pub mod types;

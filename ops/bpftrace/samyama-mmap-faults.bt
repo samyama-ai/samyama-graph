@@ -1,0 +1,72 @@
+#!/usr/bin/env bpftrace
+/*
+ * samyama-mmap-faults.bt -- page faults per statement (#2219).
+ *
+ *   sudo bpftrace -p "$(pidof samyama)" ops/bpftrace/samyama-mmap-faults.bt [min_faults]
+ *
+ * A major fault is a page read from disk (an mmap'd file, swapped-out heap);
+ * a minor fault maps a page already in memory, which is what first-touching a
+ * freshly allocated arena costs. Both stall the thread that takes them.
+ *
+ * Faults are counted per thread between samyama:query__start and query__done,
+ * and between persist__start and persist__done. For every span with at least
+ * min_faults faults (default 1000) it prints one line:
+ *
+ *   FAULTS query    minor=24311 major=0   412 ms  MATCH ...
+ *   FAULTS persist  minor=1520  major=12   31 ms  mutations=5000
+ *
+ * Faults outside any span (snapshot export/import, RocksDB background
+ * threads, start-up) are totalled per thread name. Ctrl-C prints those
+ * totals and the user stacks that took major faults.
+ */
+
+BEGIN
+{
+	@min = $1 > 0 ? $1 : 1000;
+}
+
+usdt::samyama:query__start   { @span[tid] = 1; @t0[tid] = nsecs; @me = pid; }
+usdt::samyama:persist__start { @span[tid] = 2; @t0[tid] = nsecs; @me = pid; }
+
+software:page-faults:1
+/pid == @me/
+{
+	if (@span[tid]) { @minor[tid] += 1; } else { @outside_minor[comm] = count(); }
+}
+
+software:major-faults:1
+/pid == @me/
+{
+	if (@span[tid]) { @major[tid] += 1; } else { @outside_major[comm] = count(); }
+	@major_stacks[ustack(6)] = count();
+}
+
+usdt::samyama:query__done
+/@span[tid] == 1/
+{
+	/* software:page-faults counts every fault, major ones included. */
+	$minor = @minor[tid] - @major[tid];
+	@query_faults = hist(@minor[tid]);
+	if ((int64)@minor[tid] >= @min) {
+		printf("FAULTS query    minor=%d major=%d  %d ms  %s\n", $minor, @major[tid],
+		       (nsecs - @t0[tid]) / 1000000, str(arg0, arg1 < 120 ? arg1 : 120));
+	}
+	delete(@span[tid]); delete(@t0[tid]); delete(@minor[tid]); delete(@major[tid]);
+}
+
+usdt::samyama:persist__done
+/@span[tid] == 2/
+{
+	$minor = @minor[tid] - @major[tid];
+	@persist_faults = hist(@minor[tid]);
+	if ((int64)@minor[tid] >= @min) {
+		printf("FAULTS persist  minor=%d major=%d  %d ms  mutations=%d\n", $minor, @major[tid],
+		       (nsecs - @t0[tid]) / 1000000, arg0);
+	}
+	delete(@span[tid]); delete(@t0[tid]); delete(@minor[tid]); delete(@major[tid]);
+}
+
+END
+{
+	clear(@min); clear(@me); clear(@span); clear(@t0); clear(@minor); clear(@major);
+}
