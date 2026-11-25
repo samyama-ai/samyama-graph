@@ -1360,6 +1360,10 @@ pub struct GraphStore {
     /// In memory only; see `crate::graph::feature`.
     pub features: Arc<crate::graph::feature::FeatureRegistry>,
 
+    /// Per-label retention rules (#2217). Persisted through the index
+    /// catalog; see [`crate::graph::retention`].
+    retention: crate::graph::retention::RetentionRules,
+
     /// Columnar storage for node properties
     pub node_columns: ColumnStore,
 
@@ -1509,6 +1513,7 @@ impl GraphStore {
             structure_registry: Arc::new(crate::index::structure::StructureRegistry::new()),
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
             features: Arc::new(crate::graph::feature::FeatureRegistry::new()),
+            retention: Default::default(),
             node_columns: ColumnStore::new(),
             edge_columns: ColumnStore::new(),
             index_sender: None,
@@ -6627,6 +6632,7 @@ NodeDeleted { id, .. } => {
         self.graph_projections = Arc::new(crate::graph::projection::GraphProjections::new());
         // Materialized feature values name nodes `clear` just removed.
         self.features = Arc::new(crate::graph::feature::FeatureRegistry::new());
+        self.retention.clear();
         self.node_columns = ColumnStore::new();
         self.edge_columns = ColumnStore::new();
         self.next_node_id = 1;
@@ -6762,6 +6768,53 @@ NodeDeleted { id, .. } => {
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Set `label`'s retention rule, replacing any it had (#2217). Returns
+    /// the rule it replaced.
+    pub fn set_retention(
+        &mut self,
+        label: &str,
+        rule: crate::graph::retention::RetentionRule,
+    ) -> Option<crate::graph::retention::RetentionRule> {
+        let old = self.retention.insert(label.to_string(), rule);
+        if old != Some(rule) {
+            // A cached `db.retention.list` must not outlive the rule it shows.
+            self.bump_epoch();
+            self.mark_index_catalog_changed();
+        }
+        old
+    }
+
+    /// Remove `label`'s retention rule. Returns it, or `None` if it had none.
+    pub fn drop_retention(&mut self, label: &str) -> Option<crate::graph::retention::RetentionRule> {
+        let old = self.retention.remove(label);
+        if old.is_some() {
+            self.bump_epoch();
+            self.mark_index_catalog_changed();
+        }
+        old
+    }
+
+    /// Every label's retention rule, by label.
+    pub fn retention_rules(&self) -> &crate::graph::retention::RetentionRules {
+        &self.retention
+    }
+
+    /// Delete every node the retention rules no longer cover at `now_ms`,
+    /// with its relationships, and return how many nodes went (#2217).
+    ///
+    /// Each deletion is journalled like any other, so a caller with the
+    /// write log enabled persists the sweep the way it persists a statement.
+    pub fn sweep_retention(&mut self, tenant_id: &str, now_ms: i64) -> usize {
+        if self.retention.is_empty() {
+            return 0;
+        }
+        let doomed = crate::graph::retention::expired(self, &self.retention, now_ms);
+        doomed
+            .into_iter()
+            .filter(|id| self.delete_node(tenant_id, *id).is_ok())
+            .count()
+    }
+
     /// Every index declaration in the store, in the order `SHOW INDEXES` sorts
     /// them.
     ///
@@ -6795,6 +6848,11 @@ NodeDeleted { id, .. } => {
         definitions.extend(self.point_index.listing().into_iter().map(
             |(name, label, property)| IndexDefinition::Point { name, label, property },
         ));
+        definitions.extend(self.retention.iter().map(|(label, rule)| IndexDefinition::Retention {
+            label: label.clone(),
+            max_age_ms: rule.max_age_ms,
+            max_records: rule.max_records,
+        }));
         // Sorted so two runs of the same DDL produce byte-identical records and
         // a diff of the catalog is a diff of the indexes, not of hash order.
         definitions.sort_by_key(|d| match d {
@@ -6821,6 +6879,9 @@ NodeDeleted { id, .. } => {
             }
             IndexDefinition::VectorKind { label, property, .. } => {
                 (6u8, label.clone(), property.clone(), String::new())
+            }
+            IndexDefinition::Retention { label, .. } => {
+                (7u8, label.clone(), String::new(), String::new())
             }
         });
         IndexCatalog { definitions }
@@ -7034,6 +7095,15 @@ NodeDeleted { id, .. } => {
                 }
                 IndexDefinition::VectorKind { label, property, kind } => {
                     vector_kinds.push((label, property, *kind));
+                }
+                IndexDefinition::Retention { label, max_age_ms, max_records } => {
+                    self.retention.insert(
+                        label.clone(),
+                        crate::graph::retention::RetentionRule {
+                            max_age_ms: *max_age_ms,
+                            max_records: *max_records,
+                        },
+                    );
                 }
                 IndexDefinition::VectorParams { label, property, m, ef_construction, ef } => {
                     vector_params.push((
