@@ -4413,6 +4413,32 @@ impl QueryPlanner {
                 )));
             }
             Ok(Box::new(SchemaForLlmOperator::new(token_budget)))
+        } else if call_clause.procedure_name.eq_ignore_ascii_case("rdf.sparql") {
+            // SPARQL over the graph from Cypher (#2100, part 3b). The query and
+            // the optional base are string literals, as the full-text
+            // procedure's are: read at plan time, so a wrong argument is a
+            // planning error rather than a row that never arrives.
+            use crate::query::executor::sparql_call::SparqlCallOperator;
+            let args = &call_clause.arguments;
+            let text = |e: &Expression, what: &str| -> ExecutionResult<String> {
+                match e {
+                    Expression::Literal(PropertyValue::String(s)) => Ok(s.clone()),
+                    _ => Err(ExecutionError::PlanningError(format!(
+                        "rdf.sparql: {what} must be a string literal"
+                    ))),
+                }
+            };
+            match args.len() {
+                1 | 2 => {}
+                n => {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "rdf.sparql takes (query) or (query, baseIri); got {n} arguments"
+                    )))
+                }
+            }
+            let query = text(&args[0], "the query")?;
+            let base = args.get(1).map(|b| text(b, "the base IRI")).transpose()?;
+            Ok(Box::new(SparqlCallOperator::new(query, base)))
         } else if let Some((mode, bare)) =
             AlgorithmOperator::unsupported_gds_mode(&call_clause.procedure_name)
         {

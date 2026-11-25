@@ -89,6 +89,7 @@ pub mod structure_ops;
 pub mod point_ops;
 pub mod hybrid_ops;
 pub mod vector_ops;
+pub mod sparql_call;
 pub mod semi_join_detector;
 pub mod leapfrog;
 pub mod logical_optimizer;
