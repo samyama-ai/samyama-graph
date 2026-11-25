@@ -422,7 +422,7 @@ ratio, and placing them largest first keeps the overshoot to one group per split
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
 |---|---|---|---|---|---|---|---|
 | PCA | pca | No edges: it reads numeric node properties | Node properties, not edge weights; a non-numeric or missing value is the caller's to handle | Not applicable | Not applicable: there is no graph | Components in eigenvalue-descending order; equal eigenvalues give an arbitrary but reproducible basis | Centred by default, scaled on request. **Component sign is not fixed** **(differs)**. Deterministic: a fixed start vector and a seeded RNG |
-| Optimisation solvers | or.solve | Not applicable | Not applicable | Not applicable | Not applicable | Solver-specific; every solver is seed-reproducible (OPT-08) | Solver-specific. Every row carries `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and `total_time_ms` (OPT-09), multi-objective rows included; `fitness` includes the constraint penalty, `objective` does not |
+| Optimisation solvers | or.solve | Not applicable | Not applicable | Not applicable | Not applicable | Solver-specific; every solver is seed-reproducible (OPT-08) | Solver-specific. Every row carries `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and `total_time_ms` (OPT-09), multi-objective rows included, and `evaluations` and `stopped_by` (`iterations`, `time_budget` or `evaluation_budget`) for the optional `timeBudgetMs` and `maxEvaluations` limits (OPT-11); `fitness` includes the constraint penalty, `objective` does not |
 
 ## Where a convention differs from the obvious one
 

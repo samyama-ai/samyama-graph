@@ -635,7 +635,11 @@ paths:
                   description: >
                     Problem dimension; defaults to the benchmark's own. The only
                     spelling accepted — `n_var`, `dimensions` and
-                    `num_variables` are rejected, not silently ignored.
+                    `num_variables` are rejected, not silently ignored. Only a
+                    single-objective benchmark can change size; ZDT, DTLZ and
+                    `uc2_dosing` answer 400 to a `dim` other than their own
+                    (OPT-11). For a problem that grows with the graph, use
+                    `algo.or.solve`, one variable per node.
                 seed:
                   type: integer
                   format: int64
