@@ -115,7 +115,7 @@ fn an_existing_file_is_replaced_whole() {
     let path = dir.path().join("g.sgsnap");
     std::fs::write(&path, b"not a snapshot").unwrap();
 
-    write_file(&sample(), &path, &WriteOptions { compression_level: 1 }).expect("write_file");
+    write_file(&sample(), &path, &WriteOptions { compression_level: 1, ..Default::default() }).expect("write_file");
 
     let mut back = GraphStore::new();
     let imported = import_tenant(&mut back, std::fs::File::open(&path).unwrap()).expect("import");

@@ -217,6 +217,68 @@ Reading rules, which a second implementation must follow to agree with this one:
 error never leaves a truncated `.sgsnap` that a later import would read as
 short. It returns the export's `ExportStats`, `dropped` included.
 
+### v3: Parquet, opt-in (#1099)
+
+v3 is a second container for the same content, written only when asked for:
+`WriteOptions { version: 3, .. }`, `samyama convert --sgsnap-version 3`, or
+`POST /api/snapshot/export?version=3`. **v2 stays the default** everywhere, and
+import reads v1, v2 and v3 without being told which, by looking at the file's
+first block.
+
+```
+tar(  manifest.json
+      nodes/00000-<label>.parquet ...     one per first label (sorted); unlabelled last
+      edges/00000-<type>.parquet ...      one per relationship type
+      <end-of-archive> )
+```
+
+- **One file, not a directory.** Every path that moves a snapshot -- HTTP
+  upload, `gh release upload`, S3, encryption at rest -- moves one stream. The
+  container is plain ustar (GNU base-256 sizes past 8 GiB), so `tar xf` gives
+  the directory back and DuckDB or Polars read each member as ordinary
+  Parquet: `SELECT * FROM 'nodes/00000-Person.parquet'`.
+- **`manifest.json` comes first** and carries everything a v2 file says
+  before its first node line: the header (the same `SnapshotHeader`, with
+  `version: 3`, so the loss report, sources, structures, `queries`,
+  `read_only` and `results` all mean what they mean in v2), the index catalog,
+  the hierarchy declarations, and the member list with each file's label or
+  type and row count. `layout` is `samyama.sgsnap.v3/parquet`. Reading the
+  header reads one small member and none of the data.
+- **Columns mirror the store's columns (ADR-021).** One column per property key
+  the file's rows carry. A key whose values all have one simple type in that
+  file is typed: String `Utf8`, Integer `Int64`, Float `Float64`, Boolean,
+  Date `Date32`, DateTime `Timestamp(ms, UTC)`, LocalTime `Time64(ns)`, Vector
+  `List<Float32>`. Anything else -- arrays, maps, durations, zoned and offset
+  times, explicit nulls, or a key whose type differs between rows of one file
+  -- is a `Utf8` column holding the same JSON codec as v2 (§Typed values). An
+  absent property is a Parquet null. Each column's Arrow metadata carries
+  `samyama.key` (the property name) and `samyama.type`; the reader goes by the
+  metadata, never the column name, which differs from the key only when the
+  key collides with a system column.
+- **System columns.** Nodes: `_id`, `_labels` (all labels, sorted),
+  `_created_at`, `_updated_at`. Edges: `_id`, `_src`, `_tgt`; the rows that
+  came from the edge arena (with properties) come first, in id order, and the
+  manifest's `full_rows` says how many; the bulk-loaded (stub) rows follow.
+- **Compression** is zstd inside Parquet. `compression_level` is a gzip
+  setting and does not apply.
+- **Import has one implementation.** A v3 file is read as the JSON-lines
+  stream a v2 file decompresses to: header, catalog, hierarchies, nodes merged
+  back into id order across the label files, the arena edges merged into id
+  order, then the stub edges. The v2 importer reads that, so dedup, merge
+  policies, quotas, rollback and the index catalog behave identically. A v3
+  file imports to the same graph as the v2 export of the same store -- with
+  one exception: stub edges of different types are read type by type, so when
+  their types interleave a fresh import numbers them in a different order than
+  a v2 import would. The relationships are the same.
+- **Integrity.** Every member must be present and listed, every row count must
+  match the manifest, tar header checksums are checked, Parquet checks its own
+  footers, and the end-of-archive marker is required: a truncated or damaged
+  file is refused, and the import rolls back. Encryption (REL-09) wraps a v3
+  file exactly as it wraps a v2 one. `edit_header` (relinking a query
+  catalog, results, `read_only`) rewrites the manifest and copies every data
+  member byte for byte. `samyama verify`, the content hash, the key and PII
+  scans and the schema diagram read v3 through the same stream as import.
+
 ## Consequences
 
 ### Positive
@@ -238,16 +300,22 @@ short. It returns the export's `ExportStats`, `dropped` included.
 |--------|------------------|
 | RocksDB `BackupEngine` | Bit-perfect but locked to RocksDB major version, blocks columnar-on-import. |
 | Cap'n Proto / FlatBuffers | Faster, smaller, schema-versioned — but no human-readable debug story. Re-evaluate as `binary: true` mode in v3. |
-| Parquet / Arrow | Columnar export — strong analytics fit, awkward for high-cardinality edge type. Future analytics-export candidate. |
+| Parquet / Arrow as the only format | Columnar export — strong analytics fit, awkward for high-cardinality edge type. Shipped as the opt-in v3 container (#1099) beside v2, not instead of it. |
 | Neo4j-style dump-load | Closed format, vendor lock-in. |
 
-## Follow-ups (proposed v3)
+## Follow-ups
+
+v3 (#1099) is the Parquet container above. It settles two of the items this
+list used to propose for "v3": zstd compression (inside Parquet), and a
+structure that survives damage at the file head (the tar checksums, the
+manifest's member list and the required end marker). The rest still stand:
 
 1. **SHA-256 footer line** over the body. CLI `sgsnap verify`.
 2. **Optional binary mode** via header flag `binary: true` → length-prefixed Cap'n Proto frames.
-3. **Optional Zstd compression** alongside gzip (~20 % ratio improvement, faster).
-4. **Round-trip edge timestamps** (additive — v2 readers ignore the new fields).
-5. **Magic byte segment header** to survive concatenation / corruption at the file head.
+3. **Round-trip edge timestamps** (additive — v2 readers ignore the new fields).
+4. **Making v3 the default**, once it has been measured against v2 on the
+   published KGs for size and import time. Not done here: nothing that reads
+   `.sgsnap` today should meet a new format it did not ask for.
 
 ## References
 

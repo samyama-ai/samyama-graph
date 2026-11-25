@@ -544,13 +544,20 @@ pub fn scan_snapshot_path(path: &std::path::Path) -> Result<Report, String> {
     use std::io::{BufReader, Read};
 
     let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut magic = [0u8; 2];
-    let gzipped = match file.read_exact(&mut magic) {
-        Ok(()) => magic == [0x1f, 0x8b],
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
+    let mut head = Vec::with_capacity(512);
+    if let Err(e) = (&mut file).take(512).read_to_end(&mut head) {
+        return Err(format!("{}: {e}", path.display()));
+    }
+    if head.len() < 2 {
+        return Err(format!("{}: failed to fill whole buffer", path.display()));
+    }
+    let gzipped = head[..2] == [0x1f, 0x8b];
     let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    if gzipped {
+    if crate::snapshot::v3::looks_like_v3(&head) {
+        // A v3 (Parquet) snapshot, read as the JSON lines a v2 one holds (#1099).
+        let lines = crate::snapshot::open_lines(file).map_err(|e| format!("{}: {e}", path.display()))?;
+        scan_snapshot(BufReader::new(lines))
+    } else if gzipped {
         scan_snapshot(BufReader::new(flate2::read::GzDecoder::new(file)))
     } else {
         scan_snapshot(BufReader::new(file))
