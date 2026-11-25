@@ -2318,7 +2318,7 @@ mod tests {
         let nodes = store2.all_nodes();
         assert_eq!(nodes.len(), 1);
         assert_eq!(
-            nodes[0].get_property("ts"),
+            store2.node_property(nodes[0].id, "ts").as_ref(),
             Some(&PropertyValue::DateTime(1710000000000))
         );
     }
@@ -2341,7 +2341,7 @@ mod tests {
         let nodes = store2.all_nodes();
         assert_eq!(nodes.len(), 1);
         assert_eq!(
-            nodes[0].get_property("embedding"),
+            store2.node_property(nodes[0].id, "embedding").as_ref(),
             Some(&PropertyValue::Vector(vec![1.0, 2.5, 3.0]))
         );
     }
@@ -2381,7 +2381,7 @@ mod tests {
         // Vector property must be readable (was already working before the fix)
         let nodes = dst.all_nodes();
         assert_eq!(
-            nodes[0].get_property("embedding"),
+            dst.node_property(nodes[0].id, "embedding").as_ref(),
             Some(&PropertyValue::Vector(vec![1.0, 0.0, 0.0, 0.0]))
         );
 
@@ -2420,7 +2420,7 @@ mod tests {
         let nodes = store2.all_nodes();
         assert_eq!(nodes.len(), 1);
         assert_eq!(
-            nodes[0].get_property("interval"),
+            store2.node_property(nodes[0].id, "interval").as_ref(),
             Some(&PropertyValue::Duration {
                 months: 14,
                 days: 5,
@@ -2490,7 +2490,7 @@ mod tests {
         assert_eq!(nodes.len(), 1);
 
         // Verify array
-        if let Some(PropertyValue::Array(arr)) = nodes[0].get_property("tags") {
+        if let Some(PropertyValue::Array(arr)) = store2.node_property(nodes[0].id, "tags").as_ref() {
             assert_eq!(arr.len(), 2);
             assert_eq!(arr[0], PropertyValue::String("a".to_string()));
             assert_eq!(arr[1], PropertyValue::Integer(1));
@@ -2499,7 +2499,7 @@ mod tests {
         }
 
         // Verify map
-        if let Some(PropertyValue::Map(m)) = nodes[0].get_property("coords") {
+        if let Some(PropertyValue::Map(m)) = store2.node_property(nodes[0].id, "coords").as_ref() {
             assert_eq!(m.len(), 2);
             assert_eq!(m.get("x"), Some(&PropertyValue::Float(1.5)));
             assert_eq!(m.get("y"), Some(&PropertyValue::Float(2.5)));

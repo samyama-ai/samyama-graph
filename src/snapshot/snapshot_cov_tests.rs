@@ -263,14 +263,6 @@ fn a_dedup_merge_adds_list_values_without_overwriting() {
             PropertyValue::String("south".into())
         ])
     );
-    assert!(
-        store
-            .get_node(existing)
-            .unwrap()
-            .get_property("tags")
-            .is_some(),
-        "row copy too"
-    );
     assert_eq!(store.label_node_count(&Label::new("Country")), 2);
 }
 
