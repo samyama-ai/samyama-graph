@@ -2829,6 +2829,9 @@ NodeDeleted { id, .. } => {
         
         // Add to free list for reuse (In true MVCC, we only reuse after compaction/vacuum)
         self.free_node_ids.push(id.as_u64());
+        // The id is reused: a materialized feature must not answer for the
+        // next node that takes it (ML-13).
+        self.features.forget_node(id);
         // The history goes with the node. The id is reused, and the next node
         // to take it must not answer for this one's earlier states. A death
         // version is not recorded yet, so a snapshot loses a node deleted after
