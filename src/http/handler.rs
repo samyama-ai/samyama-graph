@@ -115,7 +115,7 @@ fn apply_plan_fields(payload: &mut QueryRequest) -> Result<(), String> {
 ///
 /// Two refusals, both before the query runs: a value that cannot be
 /// represented exactly, and a key the query never mentions.
-fn bound_params(payload: &QueryRequest) -> Result<crate::query::BoundParams, String> {
+pub(crate) fn bound_params(payload: &QueryRequest) -> Result<crate::query::BoundParams, String> {
     let bound = crate::query::bind::properties_from_json(&payload.params)?;
     crate::query::bind::reject_unused(&payload.query, &bound)?;
     Ok(bound)
@@ -588,7 +588,7 @@ pub struct QueryStats {
     pub is_write: bool,
 }
 
-fn ms(d: std::time::Duration) -> f64 {
+pub(crate) fn ms(d: std::time::Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
@@ -603,7 +603,7 @@ fn ms(d: std::time::Duration) -> f64 {
 /// Synchronous, and called while the store guard is already held: a `RecordBatch` is not
 /// `Send`, so awaiting anything after the query has run would make the handler's future
 /// non-`Send`.
-fn merged_node_properties(
+pub(crate) fn merged_node_properties(
     records: &[crate::query::Record],
     store: &crate::graph::GraphStore,
 ) -> HashMap<u64, HashMap<String, PropertyValue>> {
@@ -624,7 +624,7 @@ fn merged_node_properties(
 ///
 /// A statement that does not parse is let through: it fails with its parse
 /// error on the read path, which cannot write.
-fn read_only_refusal(state: &AppState, payload: &QueryRequest) -> Option<axum::response::Response> {
+pub(crate) fn read_only_refusal(state: &AppState, payload: &QueryRequest) -> Option<axum::response::Response> {
     if !payload.read_only
         || !state
             .engine
@@ -685,6 +685,14 @@ async fn run_query(
     headers: axum::http::HeaderMap,
     Json(payload): Json<QueryRequest>,
 ) -> impl IntoResponse {
+    // A named subgraph of the tenant graph is addressed by `graph` (#337).
+    if payload.graph != default_graph() {
+        let scope = state.store.read().await.subgraph(&payload.graph);
+        if let Some(scope) = scope {
+            return crate::http::subgraphs::query_subgraph(&state, subject, &headers, &payload, &scope).await;
+        }
+    }
+
     // Tenant binding and the statement's role (#1328). The route itself was
     // let through at Read by `require_credential`.
     if let Some(Extension(Subject(user))) = &subject {
@@ -706,7 +714,8 @@ async fn run_query(
             Json(serde_json::json!({
                 "error": format!(
                     "This build serves a single graph ('{}'); the requested graph '{}' does not \
-                     exist and the argument cannot be honoured. Previously it was ignored and \
+                     exist, no named subgraph has that name, and the argument cannot be \
+                     honoured. Previously it was ignored and \
                      the query silently ran against '{}', merging datasets. Omit the argument, \
                      or use a separate data directory per dataset.",
                     default_graph(), payload.graph, default_graph()
@@ -883,7 +892,7 @@ fn stream_stall_budget() -> std::time::Duration {
 }
 
 /// Did the client ask for `application/x-ndjson`?
-fn accepts_ndjson(headers: &axum::http::HeaderMap) -> bool {
+pub(crate) fn accepts_ndjson(headers: &axum::http::HeaderMap) -> bool {
     headers
         .get_all(axum::http::header::ACCEPT)
         .iter()
@@ -1302,7 +1311,7 @@ fn render_value(
     }
 }
 
-fn render_query_result(
+pub(crate) fn render_query_result(
     result: Result<crate::query::RecordBatch, Box<dyn std::error::Error>>,
     full_props: &HashMap<u64, HashMap<String, PropertyValue>>,
     served_from_cache: bool,
@@ -1754,10 +1763,24 @@ pub fn sorted_label_strs(labels: &std::collections::HashSet<crate::graph::Label>
     v
 }
 
-const SCHEMA_PROPERTY_SAMPLE: usize = 1000;
+pub(crate) const SCHEMA_PROPERTY_SAMPLE: usize = 1000;
 
-pub async fn schema_handler(State(state): State<AppState>) -> impl IntoResponse {
+/// `GET /api/schema` query string.
+#[derive(Deserialize, Default)]
+pub struct SchemaQuery {
+    /// Describe this named subgraph instead of the whole graph (#337).
+    #[serde(default)]
+    pub subgraph: Option<String>,
+}
+
+pub async fn schema_handler(
+    State(state): State<AppState>,
+    query: Option<Query<SchemaQuery>>,
+) -> axum::response::Response {
     let store_guard = state.store.read().await;
+    if let Some(name) = query.and_then(|Query(q)| q.subgraph) {
+        return crate::http::subgraphs::subgraph_schema_response(&store_guard, &name);
+    }
 
     let total_nodes = store_guard.node_count();
     let total_edges = store_guard.edge_count();
@@ -1875,6 +1898,7 @@ pub async fn schema_handler(State(state): State<AppState>) -> impl IntoResponse 
             "avg_out_degree": avg_out_degree,
         }
     }))
+    .into_response()
 }
 
 /// Request for sampling a subgraph for visualization
