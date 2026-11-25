@@ -1,0 +1,5 @@
+{
+  "samyama-no-unwrap-on-request-paths": 26,
+  "samyama-store-write-lock-outside-mutate": 2,
+  "samyama-cypher-built-with-format": 0
+}
