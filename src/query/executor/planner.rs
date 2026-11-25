@@ -929,6 +929,9 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
     "db.labels",
     "db.propertyKeys",
     "db.relationshipTypes",
+    "db.retention.drop",
+    "db.retention.list",
+    "db.retention.set",
     "db.schema.forLLM",
     "db.schema.visualization",
 ];
@@ -4118,6 +4121,20 @@ impl QueryPlanner {
             )?));
         }
 
+        // Per-label retention rules (#2217).
+        if let Some(procedure) = super::retention_ops::RetentionProcedure::from_name(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::retention_ops::RetentionOperator::new(
+                procedure,
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
+        }
+
         // BM25 + vector + local expansion, fused and reranked (#1279).
         if super::hybrid_ops::is_procedure(&call_clause.procedure_name) {
             let yields: Vec<(String, Option<String>)> = call_clause
@@ -4439,6 +4456,32 @@ impl QueryPlanner {
                 )));
             }
             Ok(Box::new(SchemaForLlmOperator::new(token_budget)))
+        } else if call_clause.procedure_name.eq_ignore_ascii_case("rdf.sparql") {
+            // SPARQL over the graph from Cypher (#2100, part 3b). The query and
+            // the optional base are string literals, as the full-text
+            // procedure's are: read at plan time, so a wrong argument is a
+            // planning error rather than a row that never arrives.
+            use crate::query::executor::sparql_call::SparqlCallOperator;
+            let args = &call_clause.arguments;
+            let text = |e: &Expression, what: &str| -> ExecutionResult<String> {
+                match e {
+                    Expression::Literal(PropertyValue::String(s)) => Ok(s.clone()),
+                    _ => Err(ExecutionError::PlanningError(format!(
+                        "rdf.sparql: {what} must be a string literal"
+                    ))),
+                }
+            };
+            match args.len() {
+                1 | 2 => {}
+                n => {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "rdf.sparql takes (query) or (query, baseIri); got {n} arguments"
+                    )))
+                }
+            }
+            let query = text(&args[0], "the query")?;
+            let base = args.get(1).map(|b| text(b, "the base IRI")).transpose()?;
+            Ok(Box::new(SparqlCallOperator::new(query, base)))
         } else if let Some((mode, bare)) =
             AlgorithmOperator::unsupported_gds_mode(&call_clause.procedure_name)
         {
