@@ -52,6 +52,12 @@ impl PhysicalOperator for Probe {
     fn is_mutating(&self) -> bool {
         true
     }
+    fn is_materialized(&self) -> bool {
+        true
+    }
+    fn amplifies_rows(&self) -> bool {
+        true
+    }
     fn describe(&self) -> OperatorDescription {
         OperatorDescription {
             name: "Probe".to_string(),
@@ -77,8 +83,39 @@ fn the_wrapper_forwards_every_optional_method() {
         Some(vec![Some(PropertyValue::Integer(1)), None])
     );
     assert!(plan.is_mutating());
+    assert!(plan.is_materialized());
+    assert!(
+        plan.amplifies_rows(),
+        "the row budget decides what to wrap by this (#2290)"
+    );
     assert!(plan.children_mut().is_empty());
     assert_eq!(plan.describe().name, "Probe");
+}
+
+/// PROFILE wraps the plan first and the row budget second, as
+/// `execute_plan_into` does. The budget must still stop the profiled operator
+/// at the budget, not after it has produced everything (#2290).
+#[test]
+fn a_profiled_amplifying_operator_is_still_stopped_by_the_row_budget() {
+    let store = GraphStore::new();
+    let mut plan: OperatorBox = Box::new(probe(1_000));
+    let nodes = instrument(&mut plan);
+    crate::query::executor::budget::enforce(&mut plan, 5);
+    let mut pulled = 0;
+    let err = loop {
+        match plan.next(&store) {
+            Ok(Some(_)) => pulled += 1,
+            Ok(None) => panic!("all {pulled} rows came through a 5-row budget"),
+            Err(e) => break e,
+        }
+    };
+    assert!(format!("{err}").contains("RowBudgetExceeded"), "{err}");
+    assert_eq!(pulled, 5, "refused on the sixth row");
+    assert_eq!(
+        nodes[0].rows(),
+        6,
+        "the profiled operator stopped there too"
+    );
 }
 
 #[test]
