@@ -36,7 +36,9 @@ pub mod embeddings;
 pub mod split;
 
 pub use common::{GraphView, NodeId};
-pub use constrained_path::{constrained_shortest_path, ConstrainedPath, ConstrainedPathError};
+pub use constrained_path::{
+    constrained_shortest_path, constrained_shortest_path_search, ConstrainedPath, ConstrainedPathError, ConstrainedSearch,
+};
 pub use pagerank::{page_rank, page_rank_with, PageRankConfig};
 pub use progress::{NoProgress, Progress, Stopped};
 pub use community::{weakly_connected_components, WccResult, strongly_connected_components, SccResult};

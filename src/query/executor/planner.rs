@@ -929,6 +929,9 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
     "db.labels",
     "db.propertyKeys",
     "db.relationshipTypes",
+    "db.retention.drop",
+    "db.retention.list",
+    "db.retention.set",
     "db.schema.forLLM",
     "db.schema.visualization",
 ];
@@ -4106,6 +4109,20 @@ impl QueryPlanner {
                 .map(|item| (item.name.clone(), item.alias.clone()))
                 .collect();
             return Ok(Box::new(super::feature_ops::FeatureOperator::new(
+                procedure,
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
+        }
+
+        // Per-label retention rules (#2217).
+        if let Some(procedure) = super::retention_ops::RetentionProcedure::from_name(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::retention_ops::RetentionOperator::new(
                 procedure,
                 call_clause.arguments.clone(),
                 &yields,

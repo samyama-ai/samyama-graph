@@ -175,9 +175,10 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     // `splitLeakage` reads a stored split back and lists every leak across it.
     read("algo.split", &["algo.trainTestSplit"], Dataset, &["node", "split", "group"]),
     read("algo.splitLeakage", &["algo.leakageCheck"], Dataset, &["node1", "node2", "split1", "split2", "reason"]),
-    // Optimisation. A single-objective solve also yields `history`,
-    // `iterations` and `max_iterations`; a multi-objective one yields
-    // `front_size` instead.
+    // Optimisation. Every solve yields the result envelope (OPT-09):
+    // `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and
+    // `total_time_ms`. A single-objective solve also yields `history`; a
+    // multi-objective one yields `front_size` instead.
     write(
         "algo.or.solve",
         Optimization,
@@ -198,12 +199,14 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     // The cheapest path within a limit on a second edge property
     // (OPT-06, #1770). Two names, because both are what a caller
     // reaches for. A read: it returns the path it found and both of
-    // its totals, and writes nothing.
+    // its totals, with the result envelope -- one row even when nothing
+    // fits, `feasible: false` -- and writes nothing.
     read(
         "algo.or.constrainedShortestPath",
         &["algo.or.shortestPathWithConstraints"],
         Optimization,
-        &["path", "cost", "resource"],
+        // The path and its totals, then the result envelope (OPT-09, #2265).
+        &["path", "cost", "resource", "objective", "feasible", "gap", "iterations", "total_time_ms"],
     ),
 ];
 

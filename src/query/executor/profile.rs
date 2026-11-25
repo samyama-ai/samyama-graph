@@ -241,6 +241,21 @@ impl PhysicalOperator for ProfiledOperator {
         self.inner.is_mutating()
     }
 
+    /// Forwarded, so a profiled write drains its input the way the
+    /// unprofiled one does (#870).
+    fn is_materialized(&self) -> bool {
+        self.inner.is_materialized()
+    }
+
+    /// Forwarded, so the row budget still wraps a profiled cartesian product
+    /// or expansion (#2290). The budget is applied after PROFILE wraps the
+    /// plan, and wraps only what answers `true` here: answering the default
+    /// `false` left every operator of a profiled plan unbudgeted, so `PROFILE`
+    /// of a runaway product built all of it before the plain run refused it.
+    fn amplifies_rows(&self) -> bool {
+        self.inner.amplifies_rows()
+    }
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         self.inner.children_mut()
     }
