@@ -100,7 +100,7 @@ pub async fn sparql_handler(
     }
     let base = req.base.unwrap_or_else(|| DEFAULT_BASE_IRI.to_string());
 
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
     let answer = SparqlEngine::over_graph(&store, MappingConfig::new(base)).query(&req.query);
     drop(store);
 
