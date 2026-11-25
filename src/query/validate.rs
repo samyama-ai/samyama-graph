@@ -25,12 +25,17 @@ pub enum ValidationError {
     DuplicateColumn(String),
     UnionColumnMismatch { left: Vec<String>, right: Vec<String> },
     MixedUnionAndUnionAll,
+    /// The query ends with a `WITH` (#2358): openCypher requires a `RETURN`,
+    /// an updating clause or a procedure call last. Neo4j: "Query cannot
+    /// conclude with WITH", InvalidClauseComposition.
+    ConcludesWithWith,
     CreateOnBoundVariable(String),
     CreateRelationshipWithoutType,
     CreateUndirectedRelationship,
     CreateVariableLengthRelationship,
-    /// `WALK` with an unbounded quantifier under `ALL` (#1141). Its own variant
-    /// rather than a generic message, so a caller can branch on it.
+    /// `WALK` with an unbounded quantifier under `ALL` or `ALL SHORTEST` (#1141,
+    /// #1648). Its own variant rather than a generic message, so a caller can branch
+    /// on it.
     UnboundedWalk,
     CreateOnBoundRelationship(String),
     MergeRelationshipWithoutType,
@@ -136,6 +141,7 @@ impl ValidationError {
             Self::DuplicateColumn { .. } => c::CLAUSE_CONFLICT,
             Self::UnionColumnMismatch { .. } => c::CLAUSE_CONFLICT,
             Self::MixedUnionAndUnionAll { .. } => c::CLAUSE_CONFLICT,
+            Self::ConcludesWithWith => c::CLAUSE_CONFLICT,
             Self::UnaliasedWithItem { .. } => c::CLAUSE_CONFLICT,
             Self::PatternInProjection { .. } => c::CLAUSE_CONFLICT,
             Self::ExistsSubqueryPosition => c::CLAUSE_CONFLICT,
@@ -343,6 +349,11 @@ impl std::fmt::Display for ValidationError {
                 f,
                 "Cannot mix UNION and UNION ALL in the same query"
             ),
+            Self::ConcludesWithWith => write!(
+                f,
+                "Query cannot conclude with WITH (must be a RETURN clause, an update clause, \
+                 a unit subquery call, or a procedure call with no YIELD)"
+            ),
             Self::CreateOnBoundVariable(name) => write!(
                 f,
                 "Variable `{name}` already declared; CREATE cannot add labels or properties to it"
@@ -364,12 +375,11 @@ impl std::fmt::Display for ValidationError {
                 "an unbounded WALK under ALL has no finite answer: a walk may reuse \
                  edges and nodes, so any cycle makes the result infinite, and \
                  ISO/IEC 39075 forbids the combination. Give the quantifier an upper \
-                 bound (`*1..4`), or use TRAIL, ACYCLIC or SIMPLE, each of which is \
-                 finite by construction. A selector does not rescue it in this \
-                 engine: candidates are enumerated before the selector is applied, \
-                 so an unbounded walk never reaches it. Bounding the search from a \
-                 selector needs a traversal that can re-reach its own start node, \
-                 which the first-reach one cannot (#1648)"
+                 bound (`*1..4`), use TRAIL, ACYCLIC or SIMPLE, each of which is \
+                 finite by construction, or select one path per endpoint pair with \
+                 ANY or ANY SHORTEST. ALL SHORTEST is finite in the standard but not \
+                 here: its candidates are enumerated before the selector is applied, \
+                 so an unbounded walk never reaches it (#1648)"
             ),
             Self::CreateOnBoundRelationship(name) => write!(
                 f,
@@ -2878,16 +2888,22 @@ fn validate_function_argument_kinds(query: &Query) -> Result<(), ValidationError
 /// Refusing is the alternative to returning a capped subset and calling it the
 /// answer, which is the silent-wrong-answer class this engine treats as P0.
 ///
-/// **Refused under every selector, not only `ALL`.** `ANY SHORTEST WALK` is finite
-/// in the standard — a shortest path cannot repeat a node — but it is not finite
-/// *here*, because this implementation enumerates the candidates and then applies
-/// the selector, so the selector never gets a turn. Allowing it hung the query.
-/// Making it work needs shortest-first traversal, which is a different operator;
-/// refusing until then is the honest position, and the message says which limit is
+/// **`ANY` and `ANY SHORTEST` are answered (#1648).** The standard lets a selector
+/// bound an unbounded quantifier, and the single-path ones need no candidates: the
+/// operator searches shortest-first over `(node, min(depth, min_hops))` and keeps
+/// the first walk to reach each end node, which terminates on the state count
+/// rather than on a length (`VarLengthExpandOperator::expand_shortest_walks`).
+///
+/// **`ALL SHORTEST` is still refused.** It is finite in the standard, but it wants
+/// every minimum-length walk, and this implementation answers it by enumerating the
+/// candidates and then applying the selector, so on an unbounded walk the selector
+/// never gets a turn. Allowing it hung the query. The message says which limit is
 /// being hit.
 fn validate_unbounded_walk_is_refused(query: &Query) -> Result<(), ValidationError> {
     let mut refuse = |path: &crate::query::ast::PathPattern| {
-        if path.restrictor != crate::query::ast::PathRestrictor::Walk {
+        if path.restrictor != crate::query::ast::PathRestrictor::Walk
+            || path.selector.bounds_an_unbounded_search()
+        {
             return Ok(());
         }
         for seg in &path.segments {
@@ -2917,7 +2933,48 @@ fn validate_unbounded_walk_is_refused(query: &Query) -> Result<(), ValidationErr
     Ok(())
 }
 
+/// A query may not end with `WITH` (#2358).
+///
+/// `MATCH (m) WITH m.city AS city, count(m) AS n ORDER BY n DESC LIMIT 1` used
+/// to run and return a row with a column `m`, which that `WITH` did not even
+/// keep: an answer-shaped reply to a statement openCypher refuses. NLQ models
+/// write this shape, so a wrong query looked like a right one.
+///
+/// Both AST shapes are read. In the clause pipeline the last clause decides,
+/// past a `WHERE` that belongs to the `WITH`. In the older shape a `WITH` is
+/// last when nothing reads, writes, calls or returns after it.
+fn validate_query_conclusion(query: &Query) -> Result<(), ValidationError> {
+    use crate::query::ast::Clause;
+    let ends_with_with = if !query.clauses.is_empty() {
+        matches!(
+            query.clauses.iter().rev().find(|c| !matches!(c, Clause::Where(_))),
+            Some(Clause::With(_))
+        )
+    } else {
+        // `with_clause` is always the latest WITH; earlier ones and what
+        // followed them are in `extra_with_stages`. So only what follows the
+        // latest one is read here: the MATCHes past `with_split_index` and an
+        // UNWIND after it.
+        let reads_after_with = query.with_split_index.is_some_and(|i| query.match_clauses.len() > i)
+            || !query.post_with_unwind_clauses.is_empty();
+        query.with_clause.is_some()
+            && !reads_after_with
+            && query.return_clause.is_none()
+            && query.write_clause().is_none()
+            && query.merge_clause.is_none()
+            && query.foreach_clause.is_none()
+            && query.call_clause.is_none()
+            && query.call_subquery.is_none()
+            && query.correlated_call.is_none()
+    };
+    if ends_with_with {
+        return Err(ValidationError::ConcludesWithWith);
+    }
+    Ok(())
+}
+
 pub fn validate(query: &Query) -> Result<(), ValidationError> {
+    validate_query_conclusion(query)?;
     validate_exists_body_positions(query)?;
     validate_unbounded_walk_is_refused(query)?;
     validate_variables_are_bound(query)?;

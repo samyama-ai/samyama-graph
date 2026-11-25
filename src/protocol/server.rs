@@ -291,7 +291,7 @@ async fn respond_unaudited(
             RespValue::Error("ERR a transaction is already open on this connection".to_string())
         }
         (Some("GRAPH.BEGIN"), None) => {
-            let mut guard = Arc::clone(store).write_owned().await;
+            let mut guard = crate::store_lock::write_owned(Arc::clone(store)).await;
             let reply = handler.begin_transaction_on(&mut guard);
             if !matches!(reply, RespValue::Error(_)) {
                 txn.open = Some(OpenTxn { guard, deadline: tokio::time::Instant::now() + limit });
@@ -593,7 +593,7 @@ mod tests {
         let mut setup = ConnTxn::default();
         let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:Keep)"]), &store, &mut setup, None).await;
         assert!(!is_error(&r), "{r:?}");
-        let keep = store.read().await.get_nodes_by_label(&crate::graph::Label::new("Keep"))[0].id;
+        let keep = crate::store_lock::read(&store).await.get_nodes_by_label(&crate::graph::Label::new("Keep"))[0].id;
         assert!(pm.storage().get_node("default", keep.as_u64()).unwrap().is_some(), "setup did not persist");
 
         let c = creds(&[&format!("ro:{TEST_DIGEST}:roles=read")]);
@@ -613,7 +613,7 @@ mod tests {
         let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T)"]), &store, &mut txn, Some(&c)).await;
         assert!(is_error(&r), "a write ran inside a transaction: {r:?}");
         respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, Some(&c)).await;
-        assert_eq!(store.read().await.node_count(), 1, "the store changed under a read-only credential");
+        assert_eq!(crate::store_lock::read(&store).await.node_count(), 1, "the store changed under a read-only credential");
         assert!(
             pm.storage().get_node("default", keep.as_u64()).unwrap().is_some(),
             "a refused GRAPH.DELETE still dropped the graph on disk"
@@ -630,12 +630,12 @@ mod tests {
         let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]), &store, &mut txn, None).await;
         assert!(!is_error(&r), "{r:?}");
         assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.ROLLBACK"]), &store, &mut txn, None).await));
-        assert_eq!(store.read().await.node_count(), 0, "a rolled-back CREATE survived");
+        assert_eq!(crate::store_lock::read(&store).await.node_count(), 0, "a rolled-back CREATE survived");
 
         respond(&handler, &cmd(&["GRAPH.BEGIN"]), &store, &mut txn, None).await;
         respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:T {x: 1})"]), &store, &mut txn, None).await;
         assert!(!is_error(&respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn, None).await));
-        assert_eq!(store.read().await.node_count(), 1, "a committed CREATE was lost");
+        assert_eq!(crate::store_lock::read(&store).await.node_count(), 1, "a committed CREATE was lost");
     }
 
     #[tokio::test]
@@ -800,7 +800,7 @@ mod tests {
         let _ = client.read(&mut reply).await.unwrap();
         drop(client);
         tokio::time::timeout(std::time::Duration::from_secs(10), server).await.unwrap().unwrap();
-        let guard = store.read().await;
+        let guard = crate::store_lock::read(&store).await;
         assert_eq!(guard.node_count(), 0, "a transaction left open by a closed connection kept its write");
         assert!(guard.session_transaction_version().is_none(), "the store still has a transaction open");
     }
@@ -861,7 +861,7 @@ mod tests {
         // 1. The write is gone, and the deadline that removed it was the
         //    configured one.
         {
-            let guard = store.read().await;
+            let guard = crate::store_lock::read(&store).await;
             let waited = opened.elapsed();
             assert!(
                 waited < std::time::Duration::from_secs(5),
@@ -910,7 +910,7 @@ mod tests {
 
         let r = respond(&handler, &cmd(&["GRAPH.QUERY", "default", "CREATE (:P {x: 1})"]), &store, &mut txn, None).await;
         assert!(!is_error(&r), "{r:?}");
-        let p = store.read().await.get_nodes_by_label(&crate::graph::Label::new("P"))[0].id;
+        let p = crate::store_lock::read(&store).await.get_nodes_by_label(&crate::graph::Label::new("P"))[0].id;
         // The failure is injected, not provoked with a `max_nodes: Some(1)`
         // quota as it was. A quota is checked before the row is created now, so
         // it refuses the statement rather than the commit and this test would be
@@ -924,7 +924,7 @@ mod tests {
         let r = respond(&handler, &cmd(&["GRAPH.COMMIT"]), &store, &mut txn, None).await;
         assert!(is_error(&r), "a COMMIT that was not persisted reported success: {r:?}");
 
-        let guard = store.read().await;
+        let guard = crate::store_lock::read(&store).await;
         assert!(guard.session_transaction_version().is_none(), "the transaction is still open");
         assert_eq!(guard.node_count(), 1, "the refused CREATE is still in memory");
         assert_eq!(guard.node_property(p, "x"), Some(crate::graph::PropertyValue::Integer(1)), "the refused SET is still in memory");

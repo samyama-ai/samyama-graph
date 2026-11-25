@@ -28,6 +28,8 @@ pub enum AlgorithmCategory {
     GraphMetric,
     Temporal,
     Embedding,
+    /// Draws part of the graph, as a GNN trainer's minibatches (ML-02).
+    Sampling,
     Optimization,
     /// Prepares a training dataset: leakage-safe splits and their check (ML-05).
     Dataset,
@@ -104,6 +106,19 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     read("algo.dagLongestPath", &["algo.longestPath"], Path, &["node", "position"]),
     read("algo.transitiveClosure", &[], Path, &["source", "target"]),
     read("algo.randomWalk", &[], Path, &["node", "step"]),
+    read(
+        "algo.sample.neighbors",
+        &["algo.sample.neighbours", "algo.sampleNeighbors", "algo.sampleNeighbours",
+          "algo.neighbourSampling", "algo.neighborSampling"],
+        Sampling,
+        &["batch", "hop", "node", "neighbour"],
+    ),
+    // Subgraph samples (ML-03, #1720): which nodes are in the sample.
+    read("algo.sample.forestFire", &["algo.forestFire", "algo.forestFireSample", "algo.forestFireSampling"], Sampling, &["node", "position"]),
+    read("algo.sample.snowball", &["algo.snowball", "algo.snowballSample", "algo.snowballSampling"], Sampling, &["node", "hop"]),
+    read("algo.sample.egoNetwork", &["algo.egoNetwork", "algo.ego", "algo.egoGraph"], Sampling, &["node", "distance"]),
+    read("algo.sample.randomWalk", &["algo.randomWalkSample", "algo.randomWalkSampling"], Sampling, &["node", "position"]),
+    read("algo.sample.stratified", &["algo.stratifiedSample", "algo.stratifiedSampling"], Sampling, &["node", "stratum"]),
     read("algo.maxFlow", &[], Path, &["max_flow"]),
     // A summary row (`total_weight`, `components`), then one row per tree
     // edge (`source`, `target`, `weight`).
@@ -160,9 +175,10 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     // `splitLeakage` reads a stored split back and lists every leak across it.
     read("algo.split", &["algo.trainTestSplit"], Dataset, &["node", "split", "group"]),
     read("algo.splitLeakage", &["algo.leakageCheck"], Dataset, &["node1", "node2", "split1", "split2", "reason"]),
-    // Optimisation. A single-objective solve also yields `history`,
-    // `iterations` and `max_iterations`; a multi-objective one yields
-    // `front_size` instead.
+    // Optimisation. Every solve yields the result envelope (OPT-09):
+    // `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and
+    // `total_time_ms`. A single-objective solve also yields `history`; a
+    // multi-objective one yields `front_size` instead.
     write(
         "algo.or.solve",
         Optimization,
@@ -183,12 +199,14 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     // The cheapest path within a limit on a second edge property
     // (OPT-06, #1770). Two names, because both are what a caller
     // reaches for. A read: it returns the path it found and both of
-    // its totals, and writes nothing.
+    // its totals, with the result envelope -- one row even when nothing
+    // fits, `feasible: false` -- and writes nothing.
     read(
         "algo.or.constrainedShortestPath",
         &["algo.or.shortestPathWithConstraints"],
         Optimization,
-        &["path", "cost", "resource"],
+        // The path and its totals, then the result envelope (OPT-09, #2265).
+        &["path", "cost", "resource", "objective", "feasible", "gap", "iterations", "total_time_ms"],
     ),
 ];
 
@@ -502,6 +520,64 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         LABEL,
         EDGE_TYPE,
     ]),
+    // Neighbour sampling (ML-02, #1717). `seeds` is one node id or a list.
+    // `batchSize` has no fixed default: left out, every seed is one batch.
+    ("algo.sample.neighbors", &[
+        pos("seeds", T::List, true),
+        Param { name: "fanout", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None, bound: None },
+        key("direction", T::String, D::String("out")),
+        opt("weightProperty", T::String),
+        opt("batchSize", T::Integer),
+        key("seed", T::Integer, D::Integer(42)),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    // Subgraph sampling (ML-03, #1720). The seed nodes are one node id or a
+    // list; forest fire may start anywhere, stratified takes none.
+    ("algo.sample.forestFire", &[
+        pos("seeds", T::List, false),
+        Param { name: "size", kind: ParamKind::Config, ty: T::Integer, required: true, default: None, also: None, bound: None },
+        key("forwardProbability", T::Float, D::Float(0.7)),
+        key("direction", T::String, D::String("out")),
+        key("seed", T::Integer, D::Integer(42)),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    ("algo.sample.snowball", &[
+        pos("seeds", T::List, true),
+        key("hops", T::Integer, D::Integer(2)),
+        // -1 takes every neighbour.
+        key("perNode", T::Integer, D::Integer(-1)),
+        opt("maxNodes", T::Integer),
+        key("direction", T::String, D::String("out")),
+        key("seed", T::Integer, D::Integer(42)),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    ("algo.sample.egoNetwork", &[
+        pos("seeds", T::List, true),
+        key("hops", T::Integer, D::Integer(1)),
+        key("direction", T::String, D::String("out")),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    ("algo.sample.randomWalk", &[
+        pos("seeds", T::List, true),
+        Param { name: "size", kind: ParamKind::Config, ty: T::Integer, required: true, default: None, also: None, bound: None },
+        key("restartProbability", T::Float, D::Float(0.15)),
+        // Left out, 100 steps per node of `size`.
+        opt("maxSteps", T::Integer),
+        key("direction", T::String, D::String("out")),
+        key("seed", T::Integer, D::Integer(42)),
+        LABEL,
+        EDGE_TYPE,
+    ]),
+    // Exactly one of `fraction` and `perStratum` is given.
+    ("algo.sample.stratified", &[
+        opt("fraction", T::Float),
+        opt("perStratum", T::Integer),
+        key("seed", T::Integer, D::Integer(42)),
+    ]),
 ];
 
 /// What each algorithm computes, one sentence, by catalogue name (#2013).
@@ -583,6 +659,12 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
     ("algo.split", "Assigns each node to train, validation or test so that related nodes (a component, a community, a source, or a time window) land in the same split."),
     ("algo.splitLeakage", "The pairs of related nodes that a split put in different splits, each with the reason they count as a leak."),
+    ("algo.sample.neighbors", "Samples up to fanout neighbours per node at each hop out from the seed nodes, in minibatches, as a GNN trainer draws them; seeded, so the same seed returns the same rows."),
+    ("algo.sample.forestFire", "A sample of size nodes burnt outward from the seed nodes as a forest fire, each burning node igniting a geometric number of its unburnt neighbours; seeded."),
+    ("algo.sample.snowball", "The seed nodes and their neighbourhood, wave by wave for hops waves, taking up to perNode new neighbours of each node."),
+    ("algo.sample.egoNetwork", "The seed nodes and every node within hops of them, each at its smallest distance."),
+    ("algo.sample.randomWalk", "The first size distinct nodes a random walk from the seed nodes visits, restarting at a seed with restartProbability; seeded."),
+    ("algo.sample.stratified", "The same share of each label group of nodes, by fraction or perStratum; seeded."),
 ];
 
 impl AlgorithmEntry {

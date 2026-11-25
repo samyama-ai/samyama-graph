@@ -75,6 +75,15 @@ pub enum IndexDefinition {
         property: String,
         kind: crate::vector::IndexKind,
     },
+    /// `CALL db.retention.set(label, {maxAge, maxRecords})` (#2217): how long
+    /// nodes of `label` are kept and how many. Not an index, but a declaration
+    /// that must survive a restart exactly as one does, and the catalog is
+    /// where those live. Last, for the reasons `VectorParams` is.
+    Retention {
+        label: String,
+        max_age_ms: Option<u64>,
+        max_records: Option<u64>,
+    },
 }
 
 /// Every index declaration a tenant has, as one record.
