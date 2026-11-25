@@ -2411,6 +2411,111 @@ async fn enrich_and_verify_report_query_errors_and_empty_work() {
 }
 
 #[tokio::test]
+async fn retract_withdraws_what_the_model_wrote_and_leaves_ingested_data() {
+    use crate::agent::enrich::{ENRICHMENT_PROPERTY, GENERATED_PROPERTY};
+
+    let s = state();
+    let (pump, site) = {
+        let mut store = s.store.write().await;
+        crate::agent::enrich::seed_promoted_enrichment(&mut store)
+    };
+
+    let r = post_json(
+        routes(s.clone()),
+        "/api/retract",
+        json!({ "query": "MATCH (p:Pump) RETURN p" }),
+    )
+    .await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.text());
+    let body = r.json();
+    assert_eq!(body["selected_node_ids"], json!([pump.as_u64()]));
+    assert_eq!(body["report"]["nodes_processed"], 1, "{}", r.text());
+    assert_eq!(body["report"]["properties_removed"], 1, "{}", r.text());
+    assert_eq!(body["report"]["edges_removed"], 1, "{}", r.text());
+    assert_eq!(
+        body["report"]["nodes_removed"],
+        1,
+        "the Mode node the model created whole: {}",
+        r.text()
+    );
+
+    let store = s.store.read().await;
+    let props = store.node_properties_merged(pump);
+    assert_eq!(
+        props.get("name"),
+        Some(&PropertyValue::String("P1".into())),
+        "ingested data survives retraction"
+    );
+    assert!(props.get("vendor").is_none(), "the promoted value is gone");
+    assert!(
+        props.get(GENERATED_PROPERTY).is_none(),
+        "and so is the marker that said it was generated"
+    );
+    assert!(
+        props.contains_key(ENRICHMENT_PROPERTY),
+        "the quarantined evidence stays: retraction withdraws the belief, \
+         not the evidence it was taken on"
+    );
+    let edges = store.get_outgoing_edges(pump);
+    assert_eq!(edges.len(), 1, "only the ordinary edge is left");
+    assert_eq!(edges[0].target, site);
+    assert!(
+        store
+            .nodes_with_label(&crate::graph::Label::new("Mode"))
+            .map(|ids| ids.is_empty())
+            .unwrap_or(true),
+        "the generated target goes with its edge"
+    );
+}
+
+#[tokio::test]
+async fn retract_and_verify_refuse_a_write_query_before_touching_the_graph() {
+    let s = state();
+    let (pump, _) = {
+        let mut store = s.store.write().await;
+        crate::agent::enrich::seed_promoted_enrichment(&mut store)
+    };
+    let before = s.store.read().await.node_count();
+
+    // Both routes take a client-supplied statement, so each refuses a write
+    // at the door rather than handing it to the engine.
+    //
+    // The refusal is asserted by its **exact** message, not by a `read-only`
+    // substring. The engine refuses the write too -- these handlers only ever
+    // pass it an immutable reborrow of the store -- and its own message
+    // ("`CREATE` writes, and this connection is read-only") contains that
+    // substring. A substring assertion therefore passes with the handler's
+    // guard deleted, proving nothing about the handler. Break-tested: removing
+    // the guard fails this on the message, and only on the message.
+    for (path, refusal) in [
+        ("/api/retract", "retract query must be read-only"),
+        ("/api/verify", "verify query must be read-only"),
+    ] {
+        let r = post_json(
+            routes(s.clone()),
+            path,
+            json!({ "query": "CREATE (:Sneaked) RETURN 1" }),
+        )
+        .await;
+        assert_eq!(r.status, StatusCode::BAD_REQUEST, "{path}: {}", r.text());
+        assert_eq!(r.json()["error"], refusal, "{path}: {}", r.text());
+    }
+    assert_eq!(
+        s.store.read().await.node_count(),
+        before,
+        "the write never ran"
+    );
+    assert!(
+        s.store
+            .read()
+            .await
+            .node_properties_merged(pump)
+            .contains_key("vendor"),
+        "and nothing was retracted on the way to the refusal"
+    );
+}
+
+#[tokio::test]
 async fn nlq_without_a_configured_provider_is_refused() {
     if std::env::var("NLQ_PROVIDER").is_ok() {
         return; // the refusal under test is for an unset provider
