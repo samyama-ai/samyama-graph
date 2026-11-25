@@ -12,6 +12,24 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
+/// `samyama healthcheck [--url U] [--timeout S] [--token T]`: exit 0 when the
+/// server at `U` is healthy, 1 when it is not, 64 on arguments it cannot use
+/// (#2202). One line on stdout says why. See `samyama::healthcheck`.
+async fn cmd_healthcheck(argv: &[String]) -> i32 {
+    use samyama::healthcheck::{check, parse_args, EXIT_USAGE};
+    let args = match parse_args(&argv[2..], |k| std::env::var(k).ok()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("samyama healthcheck: {e}
+usage: samyama healthcheck [--url <url>] [--timeout <seconds>] [--token <token>]");
+            return EXIT_USAGE;
+        }
+    };
+    let (code, why) = check(&args).await;
+    println!("{why}");
+    code
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().collect();
     // `--sandbox` (#2218) confines the process before the async runtime
@@ -75,6 +93,7 @@ async fn async_main(argv: Vec<String>, sandboxed: Option<samyama::sandbox::Appli
         Some("snapshot-read-only") => std::process::exit(cmd_snapshot_read_only(&argv)),
         Some("results-build") => std::process::exit(cmd_results_build(&argv)),
         Some("convert") => std::process::exit(cmd_convert(&argv)),
+        Some("healthcheck") => std::process::exit(cmd_healthcheck(&argv).await),
         _ => {}
     }
 
@@ -2589,6 +2608,37 @@ async fn start_server() {
             )
             .await;
         });
+    }
+
+    // Retention sweeps (#2217). `--retention-interval-secs` or
+    // `SAMYAMA_RETENTION_INTERVAL_SECS`; every 5 s unless set, and 0 turns
+    // the sweeper off. A sweep with no `db.retention.set` rule is one read
+    // lock and nothing else.
+    let retention_every: u64 = {
+        let args: Vec<String> = std::env::args().collect();
+        let raw = args
+            .iter()
+            .position(|a| a == "--retention-interval-secs")
+            .map(|i| args.get(i + 1).cloned().unwrap_or_default())
+            .or_else(|| std::env::var("SAMYAMA_RETENTION_INTERVAL_SECS").ok());
+        match raw {
+            None => 5,
+            Some(v) => match v.parse::<u64>() {
+                Ok(n) => n,
+                Err(_) => {
+                    eprintln!("FATAL: --retention-interval-secs expects a whole number of seconds, got {v:?}");
+                    std::process::exit(1);
+                }
+            },
+        }
+    };
+    if retention_every > 0 {
+        samyama::graph::retention::spawn_sweeper(
+            Arc::clone(&store),
+            persistence.clone(),
+            "default".to_string(),
+            std::time::Duration::from_secs(retention_every),
+        );
     }
 
     // Start HTTP server for Visualizer API (port from --http-port, default 8080)

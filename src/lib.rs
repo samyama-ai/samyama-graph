@@ -118,6 +118,7 @@
 pub mod auth;
 pub mod logging;
 pub mod sandbox;
+pub mod healthcheck;
 #[cfg(feature = "otel")]
 pub mod otel;
 pub mod allocator;
