@@ -215,6 +215,19 @@ pub struct Options {
     /// How RDF input becomes a graph (#1910). `None` reads it under the
     /// `generic` preset.
     pub mapping: Option<rdf_mapping::Mapping>,
+    /// The `.sgsnap` version a `.sgsnap` output is written in: 2 (gzip JSON
+    /// lines) or 3 (Parquet, #1099). `None` is 2, the default. Reading needs no
+    /// option; every version is recognised from the file.
+    pub sgsnap_version: Option<u32>,
+}
+
+impl Options {
+    fn sgsnap_write_options(&self) -> crate::snapshot::WriteOptions {
+        crate::snapshot::WriteOptions {
+            version: self.sgsnap_version.unwrap_or(crate::snapshot::format::SNAPSHOT_VERSION),
+            ..Default::default()
+        }
+    }
 }
 
 /// What one read or write did, in the format's own terms.
@@ -644,7 +657,8 @@ pub fn write(
     let report =
         match format {
             Format::Sgsnap => FormatReport::SgsnapWrite(
-                crate::snapshot::export_tenant(store, out).map_err(engine)?,
+                crate::snapshot::export_tenant_with_options(store, out, &opts.sgsnap_write_options())
+                    .map_err(engine)?,
             ),
             f @ (Format::Turtle | Format::NTriples | Format::RdfXml | Format::JsonLd) => {
                 let (text, report) = rdf_text(store, f)?;
@@ -682,7 +696,7 @@ pub fn write_path(
     let report = match format {
         Format::Sgsnap => {
             let (stats, _kept) =
-                crate::snapshot::write_file_if(store, path, &Default::default(), |stats| {
+                crate::snapshot::write_file_if(store, path, &opts.sgsnap_write_options(), |stats| {
                     !opts.require_lossless || stats.dropped.is_empty()
                 })
                 .map_err(engine)?;
