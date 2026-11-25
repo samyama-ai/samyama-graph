@@ -175,14 +175,18 @@ mod tests {
         assert!(SparqlHttpEndpoint::default().start(1).await.is_ok());
     }
 
+    /// Was `stub_results_serialize_to_empty_text_in_every_format`, pinning the
+    /// stub that answered every format with "": JSON is now the W3C document,
+    /// and what is not serialised yet is refused rather than returned empty.
     #[test]
-    fn stub_results_serialize_to_empty_text_in_every_format() {
+    fn results_serialize_to_json_and_refuse_other_formats() {
         let r = SparqlResults::Boolean(true);
-        for f in [ResultFormat::Json, ResultFormat::Xml, ResultFormat::Csv, ResultFormat::Tsv] {
-            assert_eq!(r.serialize(f).unwrap(), "");
+        assert_eq!(r.serialize(ResultFormat::Json).unwrap(), r#"{"boolean":true,"head":{}}"#);
+        for f in [ResultFormat::Xml, ResultFormat::Csv, ResultFormat::Tsv] {
+            assert!(r.serialize(f).is_err(), "{f:?}");
         }
         let g = SparqlResults::Graph(vec![]);
-        assert!(matches!(g.clone(), SparqlResults::Graph(t) if t.is_empty()));
+        assert!(g.serialize(ResultFormat::Json).is_err(), "a graph is not a results document");
     }
 
     #[test]
