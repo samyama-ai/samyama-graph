@@ -6806,6 +6806,30 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
             node(3),
             lmap(&[("resourceProperty", pstr("w")), ("maxResource", PropertyValue::Float(10.0))]),
         ],
+        // The optimisation templates (OPT-06, #1770), each over the path's
+        // `V` nodes and their `w`-weighted relationships.
+        "or.facilitylocation" => vec![lmap(&[
+            ("facilityLabel", pstr("V")),
+            ("customerLabel", pstr("V")),
+            ("p", pint(1)),
+            ("distanceProperty", pstr("w")),
+        ])],
+        "or.setcover" => vec![lmap(&[("setLabel", pstr("V")), ("elementLabel", pstr("V"))])],
+        "or.maxcoverage" => {
+            vec![lmap(&[("setLabel", pstr("V")), ("elementLabel", pstr("V")), ("budget", pint(1))])]
+        }
+        "or.assignment" => vec![lmap(&[
+            ("workerLabel", pstr("V")),
+            ("taskLabel", pstr("V")),
+            ("costProperty", pstr("w")),
+        ])],
+        // One unit from the path's first node to its last.
+        "or.mincostflow" => {
+            let mut store = path;
+            store.set_node_property(TENANT, NodeId::new(ids[0] as u64), "supply", 1i64).unwrap();
+            store.set_node_property(TENANT, NodeId::new(ids[3] as u64), "supply", -1i64).unwrap();
+            return (store, vec![lmap(&[("supplyProperty", pstr("supply")), ("costProperty", pstr("w"))])]);
+        }
         // A path has no cycle and pairs it cannot reach; a triangle has both.
         "wienerindex" | "cycledetection" => return (triangle().0, vec![]),
         // The smallest graph with a non-empty 3-truss.

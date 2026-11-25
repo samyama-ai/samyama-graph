@@ -202,6 +202,39 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
         // The path and its totals, then the result envelope (OPT-09, #2265).
         &["path", "cost", "resource", "objective", "feasible", "gap", "iterations", "total_time_ms"],
     ),
+    // Five more graph-native templates (OPT-06, #1770), each a read that
+    // returns one row: its answer and the result envelope. `gap` is 0 when
+    // the answer is proven optimal and null when it is the best found.
+    read(
+        "algo.or.facilityLocation",
+        &["algo.or.pMedian"],
+        Optimization,
+        &["facilities", "assignments", "unserved", "objective", "feasible", "gap", "iterations", "total_time_ms"],
+    ),
+    read(
+        "algo.or.setCover",
+        &[],
+        Optimization,
+        &["chosen", "cost", "uncoverable", "objective", "feasible", "gap", "iterations", "total_time_ms"],
+    ),
+    read(
+        "algo.or.maxCoverage",
+        &[],
+        Optimization,
+        &["chosen", "covered", "cost", "objective", "feasible", "gap", "iterations", "total_time_ms"],
+    ),
+    read(
+        "algo.or.assignment",
+        &[],
+        Optimization,
+        &["assignments", "cost", "objective", "feasible", "gap", "iterations", "total_time_ms"],
+    ),
+    read(
+        "algo.or.minCostFlow",
+        &[],
+        Optimization,
+        &["flows", "shipped", "cost", "objective", "feasible", "gap", "iterations", "total_time_ms"],
+    ),
 ];
 
 /// How an argument is passed: by position, or as a key of the config map.
@@ -295,6 +328,11 @@ const fn key(name: &'static str, ty: ParamType, default: ParamDefault) -> Param 
 }
 
 /// An optional config-map key that is simply not applied when left out.
+/// A config-map key with no default, required or not.
+const fn cfg(name: &'static str, ty: ParamType, required: bool) -> Param {
+    Param { name, kind: ParamKind::Config, ty, required, default: None, also: None, bound: None }
+}
+
 const fn opt(name: &'static str, ty: ParamType) -> Param {
     Param { name, kind: ParamKind::Config, ty, required: false, default: None, also: None, bound: None }
 }
@@ -485,6 +523,41 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         key("k", T::Integer, D::Integer(2)),
         key("seed", T::Integer, D::Integer(42)),
     ]),
+    ("algo.or.facilityLocation", &[
+        cfg("facilityLabel", T::String, true),
+        cfg("customerLabel", T::String, true),
+        cfg("p", T::Integer, true),
+        opt("distanceProperty", T::String),
+        opt("demandProperty", T::String),
+        EDGE_TYPE,
+    ]),
+    ("algo.or.setCover", &[
+        cfg("setLabel", T::String, true),
+        cfg("elementLabel", T::String, true),
+        opt("costProperty", T::String),
+        EDGE_TYPE,
+    ]),
+    ("algo.or.maxCoverage", &[
+        cfg("setLabel", T::String, true),
+        cfg("elementLabel", T::String, true),
+        cfg("budget", T::Float, true),
+        opt("costProperty", T::String),
+        opt("weightProperty", T::String),
+        EDGE_TYPE,
+    ]),
+    ("algo.or.assignment", &[
+        cfg("workerLabel", T::String, true),
+        cfg("taskLabel", T::String, true),
+        opt("costProperty", T::String),
+        EDGE_TYPE,
+    ]),
+    ("algo.or.minCostFlow", &[
+        cfg("supplyProperty", T::String, true),
+        opt("capacityProperty", T::String),
+        opt("costProperty", T::String),
+        LABEL,
+        EDGE_TYPE,
+    ]),
     ("algo.or.constrainedShortestPath", &[
         SOURCE,
         TARGET,
@@ -604,6 +677,11 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.node2vec", "node2vec embeddings from biased random walks, embedded by random projection of co-occurrence counts."),
     ("algo.or.solve", "Optimises a numeric property on each node of a label with a metaheuristic solver (Jaya by default), each value within the bounds, minimising the sum of value times its cost property."),
     ("algo.negativeSampling", "Node pairs that are not edges, for training link prediction (random, degree-matched or k-hop)."),
+    ("algo.or.facilityLocation", "Opens p of the facility nodes so that the demand-weighted shortest-path distance from each customer node to its nearest open facility is least (p-median)."),
+    ("algo.or.setCover", "The cheapest set nodes that together reach every element node: the fewest fixes that remediate every finding."),
+    ("algo.or.maxCoverage", "The set nodes, within a total cost budget, that reach the most element weight."),
+    ("algo.or.assignment", "Pairs worker nodes with task nodes along the relationships between them, as many pairs as possible at least total cost (Hungarian algorithm)."),
+    ("algo.or.minCostFlow", "Moves every node's supply to the nodes with demand along relationships within their capacities, at least total cost."),
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
     ("algo.split", "Assigns each node to train, validation or test so that related nodes (a component, a community, a source, or a time window) land in the same split."),
     ("algo.splitLeakage", "The pairs of related nodes that a split put in different splits, each with the reason they count as a leak."),
