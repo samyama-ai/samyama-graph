@@ -1179,7 +1179,21 @@ paths:
     post:
       operationId: exportSnapshot
       summary: Export a tenant as a portable .sgsnap snapshot
+      parameters:
+        - name: version
+          in: query
+          required: false
+          description: >
+            The .sgsnap version to write. 2 (the default) is gzip-compressed JSON
+            lines; 3 is a tar archive of Parquet files, one per label and per
+            edge type, plus a JSON manifest. Import reads either.
+          schema:
+            type: integer
+            enum: [2, 3]
+            default: 2
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '200':
           description: The snapshot bytes
           content:
