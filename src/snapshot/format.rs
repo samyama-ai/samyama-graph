@@ -1,8 +1,12 @@
 //! Snapshot format types for `.sgsnap` files.
 //!
-//! Format: gzip-compressed JSON-lines (one JSON object per line).
+//! Format (v1, v2): gzip-compressed JSON-lines (one JSON object per line).
 //! Line 0 is the header, then the index catalog (`"t":"i"`, #1506) and any
 //! hierarchy declarations (`"t":"h"`), then nodes, then edges.
+//!
+//! v3 (#1099, opt-in) carries the same header, catalog and declarations in a
+//! `manifest.json` and the nodes and edges as Parquet, one file per label and
+//! per edge type, in a single tar archive. See [`super::v3`].
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -11,7 +15,7 @@ use std::collections::HashMap;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SnapshotHeader {
     pub format: String,           // Always "sgsnap"
-    pub version: u32,             // Format version: 1 (legacy), 2 (with CSR + ColumnStore)
+    pub version: u32,             // Format version: 1 (legacy), 2 (with CSR + ColumnStore), 3 (Parquet, #1099)
     pub tenant: String,           // Tenant ID that was exported
     pub node_count: u64,
     pub edge_count: u64,

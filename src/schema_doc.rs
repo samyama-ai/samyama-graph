@@ -226,17 +226,25 @@ pub fn derive_from_path(path: &std::path::Path) -> Result<Schema, String> {
     use std::io::{BufReader, Read};
 
     let mut probe = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let mut magic = [0u8; 2];
-    probe
-        .read_exact(&mut magic)
+    let mut head = Vec::with_capacity(512);
+    (&mut probe)
+        .take(512)
+        .read_to_end(&mut head)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    let gzipped = magic == [0x1f, 0x8b];
+    if head.len() < 2 {
+        return Err(format!("{}: failed to fill whole buffer", path.display()));
+    }
+    let gzipped = head[..2] == [0x1f, 0x8b];
+    let parquet = crate::snapshot::v3::looks_like_v3(&head);
 
     derive(|| {
         let f = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
         // Boxed so both arms have one type; the cost is one virtual call per
         // read of a 64 KiB buffer.
-        let r: Box<dyn std::io::Read> = if gzipped {
+        let r: Box<dyn std::io::Read> = if parquet {
+            // v3 (#1099): read as the JSON lines a v2 snapshot holds.
+            crate::snapshot::open_lines(f).map_err(|e| format!("{}: {e}", path.display()))?
+        } else if gzipped {
             Box::new(flate2::read::GzDecoder::new(f))
         } else {
             Box::new(f)
