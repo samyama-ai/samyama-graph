@@ -296,6 +296,47 @@ fn parse_list(answer: &str) -> Vec<String> {
 pub struct EnrichmentWorker {
     client: NLQClient,
     model: String,
+    /// What the calls made so far cost, for the request's reply (#1732).
+    spent: std::sync::Mutex<Spent>,
+}
+
+/// The model calls an enrichment made: how many, their tokens and their time
+/// (#1732, AI-15).
+///
+/// A token total is `None` when any call left its count unknown -- a provider
+/// that reports none, or a call that failed after the model may have answered
+/// -- because a partial sum would read as an exact, smaller number.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spent {
+    pub calls: u64,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub latency: std::time::Duration,
+}
+
+impl Default for Spent {
+    fn default() -> Self {
+        Spent { calls: 0, prompt_tokens: Some(0), completion_tokens: Some(0), latency: std::time::Duration::ZERO }
+    }
+}
+
+impl Spent {
+    fn add(&mut self, usage: Option<&crate::nlq::client::TokenUsage>, latency: std::time::Duration) {
+        self.calls += 1;
+        self.latency += latency;
+        let sum = |acc: Option<u64>, n: Option<u64>| acc.zip(n).map(|(a, b)| a + b);
+        self.prompt_tokens = sum(self.prompt_tokens, usage.and_then(|u| u.prompt_tokens));
+        self.completion_tokens = sum(self.completion_tokens, usage.and_then(|u| u.completion_tokens));
+    }
+
+    /// The totals as the token counts a provider reports.
+    pub fn usage(&self) -> crate::nlq::client::TokenUsage {
+        crate::nlq::client::TokenUsage {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            total_tokens: self.prompt_tokens.zip(self.completion_tokens).map(|(p, c)| p + c),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -310,7 +351,26 @@ struct RelationshipEnrichmentOutput {
 
 impl EnrichmentWorker {
     pub fn new(client: NLQClient, model: String) -> Self {
-        Self { client, model }
+        Self { client, model, spent: std::sync::Mutex::new(Spent::default()) }
+    }
+
+    /// The model this worker calls.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// What this worker's calls have cost so far.
+    pub fn spent(&self) -> Spent {
+        *self.spent.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records one call: its usage when it answered, unknown when it failed.
+    fn record<T>(&self, call: &Result<crate::agent::signature::SignatureOutcome<T>, impl std::fmt::Debug>, started: std::time::Instant) {
+        let mut spent = self.spent.lock().unwrap_or_else(|e| e.into_inner());
+        match call {
+            Ok(g) => spent.add(Some(&g.usage), g.latency),
+            Err(_) => spent.add(None, started.elapsed()),
+        }
     }
 
     /// Fill one gap from the LLM. Returns `None` when the model declines (`UNKNOWN`) or returns
@@ -328,14 +388,16 @@ impl EnrichmentWorker {
                 demos: vec![],
                 invariants: vec![],
             };
-            let generated = SignatureRunner::default()
+            let started = std::time::Instant::now();
+            let call = SignatureRunner::default()
                 .invoke_without_store::<_, RelationshipEnrichmentOutput>(
                     &self.client,
                     &signature,
                     &serde_json::json!({"prompt": prompt}),
                 )
-                .await
-                .ok()?;
+                .await;
+            self.record(&call, started);
+            let generated = call.ok()?;
             let targets: Vec<String> = generated
                 .output
                 .targets
@@ -368,14 +430,16 @@ impl EnrichmentWorker {
             demos: vec![],
             invariants: vec![],
         };
-        let generated = SignatureRunner::default()
+        let started = std::time::Instant::now();
+        let call = SignatureRunner::default()
             .invoke_without_store::<_, ScalarEnrichmentOutput>(
                 &self.client,
                 &signature,
                 &serde_json::json!({"prompt": prompt}),
             )
-            .await
-            .ok()?;
+            .await;
+        self.record(&call, started);
+        let generated = call.ok()?;
         let value = generated.output.value.trim();
         if value.is_empty() || value.eq_ignore_ascii_case("UNKNOWN") {
             return None; // honest-decline

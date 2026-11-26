@@ -2714,6 +2714,11 @@ async fn a_stream_that_fails_after_its_first_chunk_ends_with_an_error_trailer() 
 
 /// A state whose default tenant asks a stub OpenAI at `base_url`.
 fn state_asking(base_url: &str) -> AppState {
+    state_asking_model(base_url, "stub")
+}
+
+/// `state_asking`, for a given model name.
+fn state_asking_model(base_url: &str, model: &str) -> AppState {
     let tenants = crate::persistence::TenantManager::new();
     tenants
         .update_nlq_config(
@@ -2721,7 +2726,7 @@ fn state_asking(base_url: &str) -> AppState {
             Some(crate::persistence::tenant::NLQConfig {
                 enabled: true,
                 provider: crate::persistence::tenant::LLMProvider::OpenAI,
-                model: "stub".to_string(),
+                model: model.to_string(),
                 api_key: Some("stub-key".to_string()),
                 api_base_url: Some(base_url.to_string()),
                 system_prompt: None,
@@ -2759,9 +2764,33 @@ async fn nlq_returns_the_tokens_and_latency_of_its_model_call() {
     let ms = j["llm_latency_ms"].as_f64().unwrap();
     assert!(ms > 0.0 && ms.is_finite(), "{ms}");
     assert!(
-        j.get("cost_usd").is_none(),
-        "no price is known, so none is made up"
+        j["cost_usd"].is_null(),
+        "no price is known for `stub`, so none is made up: {j}"
     );
+    assert_eq!(j["model"], "stub");
+}
+
+#[tokio::test]
+async fn nlq_prices_a_call_from_nlq_prices_for_the_model_that_ran() {
+    // AI-15 (#1732): tokens, latency and dollars per call. The price names a
+    // model no other test uses, so the tests that assert a null cost for
+    // `stub` cannot see it while this one runs beside them.
+    std::env::set_var("NLQ_PRICES", "other=9/9, stub-priced=2.50/10.00");
+    let srv = crate::nlq::test_http::MockHttp::serve(vec![(
+        200,
+        json!({
+            "choices": [ { "message": { "content": r#"{"cypher":"MATCH (n) RETURN n"}"# } } ],
+            "usage": { "prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500 }
+        })
+        .to_string(),
+    )]);
+    let j = post_json(routes(state_asking_model(&srv.base_url, "stub-priced")), "/api/nlq", json!({ "question": "all" }))
+        .await
+        .json();
+    std::env::remove_var("NLQ_PRICES");
+    let cost = j["cost_usd"].as_f64().unwrap_or_else(|| panic!("priced: {j}"));
+    // 1000 x $2.50/M + 500 x $10.00/M
+    assert!((cost - 0.0075).abs() < 1e-12, "{cost}");
 }
 
 #[tokio::test]
@@ -2819,7 +2848,9 @@ async fn the_plan_body_fields_force_a_plan_or_are_refused() {
     let forced = plan_text(&r);
     assert!(forced.contains("Chosen plan: #2, forced by CYPHER plan=N"), "{forced}");
     let r = post_json(routes(st.clone()), "/api/query", json!({ "query": chain })).await;
-    assert!(!plan_text(&r).contains("Candidates evaluated"), "{}", r.text());
+    // Without the fields nothing is forced. (The default plan is cost-based
+    // since #1729, so it does list candidates; it just picks its own.)
+    assert!(!plan_text(&r).contains("forced by CYPHER plan=N"), "{}", r.text());
 
     // The probe's own statement has one node, so one plan: refused with the
     // count rather than answered with plan 1.

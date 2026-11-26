@@ -3952,9 +3952,23 @@ pub async fn enrich_handler(
         })
         .await;
 
+    // What the model calls cost (AI-15, #1732): every call this request made,
+    // summed. A token total is null when any call left its count unknown, and
+    // `cost_usd` is null when the model has no price in `NLQ_PRICES`.
+    let spent = worker.spent();
+    let usage = spent.usage();
     let mut response = (
         StatusCode::OK,
-        Json(json!({ "gaps": gaps.len(), "filled": filled, "declined": declined })),
+        Json(json!({
+            "gaps": gaps.len(),
+            "filled": filled,
+            "declined": declined,
+            "llm_calls": spent.calls,
+            "usage": usage,
+            "llm_latency_ms": spent.latency.as_secs_f64() * MILLIS_PER_SECOND,
+            "cost_usd": crate::nlq::pricing::cost_usd(&usage, worker.model()),
+            "model": worker.model(),
+        })),
     )
     .into_response();
     if let (Some(before), Some(after)) = (before, after) {
@@ -4232,6 +4246,7 @@ pub async fn nlq_handler(
         }
     };
 
+    let model = config.model.clone();
     let pipeline = match NLQPipeline::new(config) {
         Ok(p) => p,
         Err(e) => {
@@ -4251,20 +4266,31 @@ pub async fn nlq_handler(
 
     match pipeline.translate(&payload.question, &schema).await {
         // What the call cost, so a caller can account for it per access
-        // method (COST-07, #1790). The provider's token counts used to be
-        // dropped. There is no `cost_usd`: the engine holds no price for any
-        // model, and a made-up one would be worse than none.
-        Ok(t) => (
-            StatusCode::OK,
-            Json(json!({
-                "cypher": t.cypher,
-                "usage": t.usage,
-                "llm_latency_ms": t.llm_latency.as_secs_f64() * MILLIS_PER_SECOND,
-                // From the translation cache: no model call, no tokens (AI-13).
-                "cached": t.cached,
-            })),
-        )
-            .into_response(),
+        // method (COST-07 #1790, AI-15 #1732): tokens, latency and dollars.
+        // `cost_usd` is priced from `NLQ_PRICES` for the model that ran, and is
+        // null when that model has no listed price or the provider reported no
+        // token counts -- never a guess. A cached translation made no call, so
+        // it cost nothing.
+        Ok(t) => {
+            let cost_usd = if t.cached {
+                Some(0.0)
+            } else {
+                crate::nlq::pricing::cost_usd(&t.usage, &model)
+            };
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "cypher": t.cypher,
+                    "usage": t.usage,
+                    "llm_latency_ms": t.llm_latency.as_secs_f64() * MILLIS_PER_SECOND,
+                    "cost_usd": cost_usd,
+                    "model": model,
+                    // From the translation cache: no model call, no tokens (AI-13).
+                    "cached": t.cached,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),

@@ -336,6 +336,68 @@ What it refuses:
 - a `graph` that names no projection, or is not a non-empty string;
 - a `graph` an algorithm never takes a view from, rather than ignoring it.
 
+## Incremental updates
+
+`incremental: true` keeps an algorithm's result with the graph between calls
+and updates it from what was added since, instead of computing it again from
+the whole graph (ALGO-14):
+
+```cypher
+CALL algo.pageRank({incremental: true}) YIELD node, score
+
+CALL algo.wcc({incremental: true}) YIELD node, componentId
+
+CALL algo.degree({incremental: true}) YIELD node, score
+```
+
+The first call builds the result as a plain call does and keeps it. A later
+call reads the nodes and relationships created since and applies just those,
+so one new relationship costs about what it changes rather than a full run.
+`label` and `edgeType` work as they do without the key; each combination of
+them -- and, for PageRank, each `damping` -- keeps its own result.
+
+What it promises against a plain call on the same graph:
+
+| Algorithm | Same answer? |
+|---|---|
+| `algo.degree` | Exactly the same scores. |
+| `algo.wcc` | The same components. The first call's `componentId`s are the plain call's; after that an untouched component keeps its id, and two components that merge take one of their ids, which a plain call may number differently. Compare which nodes share an id, not the ids. |
+| `algo.pageRank` | The same fixed point, to within an L1 distance of `2 * 1e-4 / (1 - damping)` (1.3e-3 at 0.85) on a graph with no dangling nodes. A plain call stops after `iterations` (20), which leaves more error than that; `iterations: 1000` is the plain call to compare against. |
+
+When it computes from scratch instead -- still the right answer, at a plain
+call's cost:
+
+- **anything was deleted** -- a node or a relationship -- **or a node gained or
+  lost a label**, since the last call. Deletions are not applied as updates: a
+  removed relationship can split a component or move PageRank mass anywhere;
+- more nodes and relationships were added since the last call than the graph's
+  log of additions keeps -- between half a million and a million, depending on
+  when it last made room (`MAX_RECORDED_ADDITIONS`);
+- after the update, the result's node count (or, with no filter, its
+  relationship count) differs from the graph's. Every write is meant to reach
+  the update; this check turns one that did not into a recompute rather than
+  a wrong answer.
+
+What it keeps, and where:
+
+- with the graph, in memory, per tenant. A restart forgets it, as it forgets
+  projections;
+- at most 8 results per graph; the least recently used goes first. A PageRank
+  result holds a copy of the graph's adjacency, so this bounds the memory it
+  can hold to a few times the graph's own relationship arrays.
+
+What it refuses:
+
+- `incremental` on any other algorithm (`unknown config key`). Closeness,
+  betweenness and the like depend on paths through the whole graph, which one
+  new relationship can change anywhere;
+- an `incremental` that is not `true` or `false`;
+- `incremental: true` with `graph`: a projection is a snapshot, and the
+  incremental result follows the live graph;
+- `incremental: true` with `iterations` on PageRank: it runs until every
+  residual is small, not for a number of iterations;
+- a `damping` that is not above 0 and below 1.
+
 ## Embeddings
 
 **`gds.fastRP` and `gds.node2vec` are the one exception to "`gds.*` is the
@@ -422,7 +484,7 @@ ratio, and placing them largest first keeps the overshoot to one group per split
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
 |---|---|---|---|---|---|---|---|
 | PCA | pca | No edges: it reads numeric node properties | Node properties, not edge weights; a non-numeric or missing value is the caller's to handle | Not applicable | Not applicable: there is no graph | Components in eigenvalue-descending order; equal eigenvalues give an arbitrary but reproducible basis | Centred by default, scaled on request. **Component sign is not fixed** **(differs)**. Deterministic: a fixed start vector and a seeded RNG |
-| Optimisation solvers | or.solve | Not applicable | Not applicable | Not applicable | Not applicable | Solver-specific; every solver is seed-reproducible (OPT-08) | Solver-specific. Every row carries `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and `total_time_ms` (OPT-09), multi-objective rows included; `fitness` includes the constraint penalty, `objective` does not |
+| Optimisation solvers | or.solve | Not applicable | Not applicable | Not applicable | Not applicable | Solver-specific; every solver is seed-reproducible (OPT-08) | Solver-specific. Every row carries `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and `total_time_ms` (OPT-09), multi-objective rows included, and `evaluations` and `stopped_by` (`iterations`, `time_budget` or `evaluation_budget`) for the optional `timeBudgetMs` and `maxEvaluations` limits (OPT-11); `fitness` includes the constraint penalty, `objective` does not |
 
 ## Where a convention differs from the obvious one
 
