@@ -41,6 +41,9 @@
   "POST /api/query/export": [
     "ST202"
   ],
+  "POST /api/retract": [
+    "ST202"
+  ],
   "POST /api/sample": [
     "ST202"
   ],
