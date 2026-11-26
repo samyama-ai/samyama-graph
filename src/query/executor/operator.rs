@@ -125,6 +125,21 @@ fn check_deadline() -> ExecutionResult<()> {
     })
 }
 
+/// Rows an operator that holds its whole input -- a sort, an aggregation, a
+/// `WITH` barrier -- pulls from that input per batch, with the deadline
+/// checked between batches (#2273).
+///
+/// It was 65,536, and the deadline was looked at every ten batches. A batch is
+/// built in full before its consumer sees it, so a query under a time limit
+/// built 65,536 expanded rows -- the whole of a 25 MB peak for a three-hop
+/// `count`, and most of a 59 MB sort -- before anything could stop it: bounded
+/// in time, not in memory. At 4,096 rows a batch is a few hundred
+/// microseconds of work in release, so an expired deadline stops the query
+/// with one batch built rather than its full intermediate. A smaller batch
+/// costs one virtual call and one allocation per 4,096 rows, and stays above
+/// the 1,024 and 256 rows at which a scan and a filter go parallel.
+const MATERIALIZE_BATCH_ROWS: usize = 4096;
+
 /// Stops a long algorithm at the query deadline (ALGO-12, #1693).
 ///
 /// An algorithm runs inside one call, so without this the deadline was only
@@ -12428,7 +12443,8 @@ impl PhysicalOperator for AggregateOperator {
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             let mut rows = Vec::new();
-            while let Some(batch) = self.input.next_batch_mut(store, tenant_id, 65536)? {
+            while let Some(batch) = self.input.next_batch_mut(store, tenant_id, MATERIALIZE_BATCH_ROWS)? {
+                check_deadline()?;
                 rows.extend(batch.records);
             }
             self.input = Box::new(MaterializedOperator::new(rows));
@@ -12666,13 +12682,8 @@ impl AggregateOperator {
         let mut groups: rustc_hash::FxHashMap<IdentityKey, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::default();
 
-        let batch_size = 65536;
-        let mut batch_count = 0u64;
-        while let Some(batch) = self.input.next_batch(store, batch_size)? {
-            batch_count += 1;
-            if batch_count % 10 == 0 {
-                check_deadline()?;
-            }
+        while let Some(batch) = self.input.next_batch(store, MATERIALIZE_BATCH_ROWS)? {
+            check_deadline()?;
             for record in batch.records {
                 let key = IdentityKey::of(record.get(var));
                 let states = groups.entry(key).or_insert_with(|| {
@@ -12774,11 +12785,8 @@ impl AggregateOperator {
         // Probing first means the allocation happens once per group.
         let mut scratch: Vec<Value> = Vec::with_capacity(self.group_by.len());
 
-        let batch_size = 65536;
-        let mut batch_count = 0u64;
-        while let Some(batch) = self.input.next_batch(store, batch_size)? {
-            batch_count += 1;
-            if batch_count % 10 == 0 { check_deadline()?; }
+        while let Some(batch) = self.input.next_batch(store, MATERIALIZE_BATCH_ROWS)? {
+            check_deadline()?;
             for record in batch.records {
                 scratch.clear();
                 for reader in key_readers.iter_mut() {
@@ -12837,11 +12845,8 @@ impl AggregateOperator {
 
         let all_simple_count = Self::all_simple_count(&self.aggregates);
 
-        let batch_size = 65536;
-        let mut batch_count = 0u64;
-        while let Some(batch) = self.input.next_batch(store, batch_size)? {
-            batch_count += 1;
-            if batch_count % 10 == 0 { check_deadline()?; }
+        while let Some(batch) = self.input.next_batch(store, MATERIALIZE_BATCH_ROWS)? {
+            check_deadline()?;
             for record in batch.records {
                 let key = key_reader.read(&record, store)?;
 
@@ -12894,11 +12899,8 @@ impl AggregateOperator {
         let mut readers: Vec<RowReader> =
             self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
 
-        let batch_size = 65536;
-        let mut batch_count = 0u64;
-        while let Some(batch) = self.input.next_batch(store, batch_size)? {
-            batch_count += 1;
-            if batch_count % 10 == 0 { check_deadline()?; }
+        while let Some(batch) = self.input.next_batch(store, MATERIALIZE_BATCH_ROWS)? {
+            check_deadline()?;
 
             if all_simple_count {
                 // Ultra-fast: just count rows
@@ -14631,7 +14633,7 @@ impl SortOperator {
         // row and sort the resulting keys, rather than re-evaluating both
         // sides inside the comparator on every one of the ~n·log₂(n)
         // comparisons (#518).
-        let batch_size = 65536;
+        let batch_size = MATERIALIZE_BATCH_ROWS;
         let bound = self.limit_hint;
 
         // With a bound, the buffer is trimmed back to k whenever it grows
@@ -14684,6 +14686,7 @@ impl SortOperator {
             let mut keys: Vec<SortKey<'_>> = Vec::new();
             let mut rows: Vec<Record> = Vec::new();
             while let Some(batch) = self.input.next_batch(store, batch_size)? {
+                check_deadline()?;
                 keys.reserve(batch.records.len());
                 rows.reserve(batch.records.len());
                 let mut known = known_values(&mut self.input, batch.records.len());
@@ -14693,6 +14696,9 @@ impl SortOperator {
                     rows.push(record);
                 }
             }
+            // Once more before ordering: the sort and the reordered copy of the
+            // rows are the last allocations of this operator.
+            check_deadline()?;
             let sort_items = &self.sort_items;
             // With an early-stopping consumer above -- `DISTINCT ... ORDER BY ...
             // LIMIT k`, whose limit cannot pass the Distinct (#522) -- order only
@@ -14740,6 +14746,7 @@ impl SortOperator {
 
         let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::new();
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
+            check_deadline()?;
             keyed.reserve(batch.records.len());
             let mut known = known_values(&mut self.input, batch.records.len());
             for record in batch.records {
@@ -26435,8 +26442,8 @@ impl WithBarrierOperator {
             // Aggregation path: group by non-aggregate items
             let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
 
-            let batch_size = 65536;
-            while let Some(batch) = self.input.next_batch(store, batch_size)? {
+            while let Some(batch) = self.input.next_batch(store, MATERIALIZE_BATCH_ROWS)? {
+                check_deadline()?;
                 for record in batch.records {
                     let mut key = Vec::new();
                     for (expr, _) in &self.group_by {
@@ -26519,8 +26526,8 @@ impl WithBarrierOperator {
             };
 
             let mut records = Vec::new();
-            let batch_size = 65536;
-            'outer: while let Some(batch) = self.input.next_batch(store, batch_size)? {
+            'outer: while let Some(batch) = self.input.next_batch(store, MATERIALIZE_BATCH_ROWS)? {
+                check_deadline()?;
                 for record in batch.records {
                     let mut new_record = Record::new();
                     for (expr, alias) in &self.items {
@@ -26657,7 +26664,8 @@ impl PhysicalOperator for WithBarrierOperator {
     fn next_mut(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<Option<Record>> {
         if !self.executed {
             let mut rows = Vec::new();
-            while let Some(batch) = self.input.next_batch_mut(store, tenant_id, 65536)? {
+            while let Some(batch) = self.input.next_batch_mut(store, tenant_id, MATERIALIZE_BATCH_ROWS)? {
+                check_deadline()?;
                 rows.extend(batch.records);
             }
             self.input = Box::new(MaterializedOperator::new(rows));
