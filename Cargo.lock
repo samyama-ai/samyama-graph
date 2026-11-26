@@ -4225,9 +4225,12 @@ dependencies = [
 name = "samyama-sdk"
 version = "1.16.0"
 dependencies = [
+ "arrow",
  "async-trait",
  "axum",
+ "bytes",
  "ndarray",
+ "parquet",
  "reqwest",
  "samyama",
  "samyama-graph-algorithms",
