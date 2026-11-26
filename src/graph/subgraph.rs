@@ -115,10 +115,15 @@ pub fn compile_predicate(label: &str, text: &str) -> Result<Expression, String> 
     // A statement with nothing else in it, so the predicate's text cannot
     // close the expression and smuggle in a clause: anything beyond the one
     // RETURN item makes the parsed query differ from the reference below.
+    //
+    // Parsed without the semantic checks: a bare `status` is a variable no
+    // clause binds, which `validate` refuses. It is a property here, and the
+    // rewritten expression is validated below, once it reads the node.
     let wrapped = format!("RETURN ({text}) AS __p");
-    let mut parsed = crate::query::parse_query(&wrapped).map_err(|e| bad(&e.to_string()))?;
-    let mut reference =
-        crate::query::parse_query("RETURN 1 AS __p").map_err(|e| bad(&e.to_string()))?;
+    let mut parsed =
+        crate::query::parser::parse_query_unvalidated(&wrapped).map_err(|e| bad(&e.to_string()))?;
+    let mut reference = crate::query::parser::parse_query_unvalidated("RETURN 1 AS __p")
+        .map_err(|e| bad(&e.to_string()))?;
     let ret = parsed
         .return_clause
         .take()
@@ -137,7 +142,21 @@ pub fn compile_predicate(label: &str, text: &str) -> Result<Expression, String> 
         .next()
         .map(|i| i.expression)
         .ok_or_else(|| bad("not an expression"))?;
-    rewrite(expr).map_err(|why| bad(&why))
+    let expr = rewrite(expr).map_err(|why| bad(&why))?;
+
+    // The checks skipped above -- unknown functions, misplaced aggregates --
+    // run on the rewritten predicate, in a query that binds the node.
+    let mut check = crate::query::parse_query(&format!("MATCH ({NODE_VAR}) RETURN 1 AS __p"))
+        .map_err(|e| bad(&e.to_string()))?;
+    if let Some(item) = check
+        .return_clause
+        .as_mut()
+        .and_then(|r| r.items.first_mut())
+    {
+        item.expression = expr.clone();
+    }
+    crate::query::validate::validate(&check).map_err(|e| bad(&e.to_string()))?;
+    Ok(expr)
 }
 
 /// Rewrite property reads onto the node variable, refusing anything that
