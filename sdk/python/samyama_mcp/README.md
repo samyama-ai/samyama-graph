@@ -63,7 +63,7 @@ SamyamaMCPServer(client, graph="legal", server_name="Samyama Legal KG").run()
 | `NodeToolGenerator` | `include_node_tools` | `search_{label}`, `get_{label}_by_{prop}`, `count_{label}` | `count_case`, `search_judge`, `get_case_by_id` |
 | `EdgeToolGenerator` | `include_edge_tools` | `find_{rel}_connections`, `traverse_{rel}` | `find_decided_connections`, `traverse_cites` |
 | `AlgorithmToolGenerator` | `include_algorithm_tools` | `pagerank`, `communities`, `shortest_path`, … | `pagerank(...)` |
-| `VectorToolGenerator` | `include_vector_tools` | `find_similar_{label}` (per vector index) | `find_similar_case(...)` |
+| `VectorToolGenerator` | `include_vector_tools` | `find_similar_{label}` (embedded only), `retrieve_evidence_{label}` (per vector index) | `find_similar_case(...)`, `retrieve_evidence_case(...)` |
 
 So a legal graph with `Case/Judge/Party/Act/Topic` nodes and `DECIDED/CITES/PARTY_IN/ABOUT` edges
 yields `count_case`, `search_judge`, `find_decided_connections`, `traverse_cites`, `cypher_query`, … —
