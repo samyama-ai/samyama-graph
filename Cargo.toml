@@ -181,6 +181,7 @@ reqwest = { version = "0.13.1", features = ["json"] }
 
 # GPU acceleration (optional; pulls the wgpu/cudarc dep tree only under --features gpu)
 samyama-gpu = { path = "crates/samyama-gpu", version = "1.16.0", optional = true }
+probe = "0.5.2"
 
 [features]
 # mimalloc is the server's and the benchmarks' global allocator (ADR-038). A
@@ -293,6 +294,10 @@ name = "memory_footprint"
 harness = false
 
 [[bench]]
+name = "query_memory"
+harness = false
+
+[[bench]]
 name = "prop_scaling"
 harness = false
 
@@ -323,6 +328,12 @@ harness = false
 # arithmetic is in benches/vector_cost_common, tested by tests/vector_cost_profile.rs.
 [[bench]]
 name = "vector_cost_profile"
+harness = false
+
+# Recall stability under insert, delete and update (#1986). Its shared code
+# is in benches/churn_common and is tested by tests/vector_churn_harness.rs.
+[[bench]]
+name = "vector_churn_benchmark"
 harness = false
 
 [[bench]]

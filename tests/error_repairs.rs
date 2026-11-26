@@ -7,7 +7,7 @@
 
 use samyama::compat::Refusal;
 use samyama::graph::GraphStore;
-use samyama::query::executor::planner::KNOWN_DB_PROCEDURES;
+use samyama::query::executor::planner::{KNOWN_DB_PROCEDURES, KNOWN_OTHER_PROCEDURES};
 use samyama::query::QueryEngine;
 
 const TENANT: &str = "default";
@@ -179,7 +179,7 @@ fn wrong_arity_shows_how_to_call_it() {
 fn every_listed_procedure_is_one_the_planner_dispatches() {
     // The list is what "did you mean" offers, so each must be real: whatever
     // else a call to it says (missing arguments, say), it is not "unknown".
-    for name in KNOWN_DB_PROCEDURES {
+    for name in KNOWN_DB_PROCEDURES.iter().chain(KNOWN_OTHER_PROCEDURES) {
         let mut store = GraphStore::new();
         let result = QueryEngine::new().execute_mut(&format!("CALL {name}()"), &mut store, TENANT);
         if let Err(e) = result {

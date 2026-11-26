@@ -2742,7 +2742,9 @@ async fn the_plan_body_fields_force_a_plan_or_are_refused() {
     let forced = plan_text(&r);
     assert!(forced.contains("Chosen plan: #2, forced by CYPHER plan=N"), "{forced}");
     let r = post_json(routes(st.clone()), "/api/query", json!({ "query": chain })).await;
-    assert!(!plan_text(&r).contains("Candidates evaluated"), "{}", r.text());
+    // Without the fields nothing is forced. (The default plan is cost-based
+    // since #1729, so it does list candidates; it just picks its own.)
+    assert!(!plan_text(&r).contains("forced by CYPHER plan=N"), "{}", r.text());
 
     // The probe's own statement has one node, so one plan: refused with the
     // count rather than answered with plan 1.
