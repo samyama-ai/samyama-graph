@@ -268,13 +268,16 @@ impl CommandHandler {
         if read_only && is_write {
             return RespValue::Error("ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY".to_string());
         }
-        let result = if is_write {
-            self.query_engine
-                .execute_mut_with_params_within(&query_str, store, &graph_name, &params, time_limit)
-        } else {
-            self.query_engine
-                .execute_with_params_within(&query_str, store, &params, time_limit)
-        };
+        // The caller's GraphRAG retrieval rules, for this statement (#2233).
+        let result = crate::query::executor::rag_policy::with(crate::auth::rag_policy_of(auth), || {
+            if is_write {
+                self.query_engine
+                    .execute_mut_with_params_within(&query_str, store, &graph_name, &params, time_limit)
+            } else {
+                self.query_engine
+                    .execute_with_params_within(&query_str, store, &params, time_limit)
+            }
+        });
         match result {
             Ok(batch) => self.format_query_result(batch),
             Err(e) => RespValue::Error(format!("ERR {}", e)),
@@ -413,13 +416,15 @@ impl CommandHandler {
 
             // Set current tenant for indexing events
             // In a more complex architecture, the store_guard would be isolated
-            let res = self.query_engine.execute_mut_with_params_within(
-                &query_str,
-                &mut *store_guard,
-                &graph_name,
-                &params,
-                time_limit,
-            );
+            let res = crate::query::executor::rag_policy::with(crate::auth::rag_policy_of(auth), || {
+                self.query_engine.execute_mut_with_params_within(
+                    &query_str,
+                    &mut *store_guard,
+                    &graph_name,
+                    &params,
+                    time_limit,
+                )
+            });
 
             // Persist on the outcome of the *store*, not of the statement. A
             // statement that fails is now undone along with what it journalled
@@ -465,9 +470,10 @@ impl CommandHandler {
                 use tracing::Instrument;
                 crate::store_lock::read(store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
             };
-            let res = self
-                .query_engine
-                .execute_with_params_within(&query_str, &*store_guard, &params, time_limit);
+            let res = crate::query::executor::rag_policy::with(crate::auth::rag_policy_of(auth), || {
+                self.query_engine
+                    .execute_with_params_within(&query_str, &*store_guard, &params, time_limit)
+            });
             drop(store_guard);
             res
         };

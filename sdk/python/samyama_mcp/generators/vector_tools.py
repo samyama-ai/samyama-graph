@@ -99,11 +99,11 @@ class VectorToolGenerator(ToolGenerator):
                 cypher = (
                     f"CALL ai.rag.retrieve('{label}', '{prop}', "
                     f"[{', '.join(repr(x) for x in vec)}], {safe_k}, {hops}) "
-                    "YIELD node, seed, score, hops, path, source "
-                    "RETURN id(node) AS node_id, labels(node) AS labels, "
-                    "id(seed) AS seed_id, score, hops, source, "
-                    "[r IN relationships(path) | "
-                    "[id(startNode(r)), type(r), id(endNode(r))]] AS hop_sequence"
+                    # The id columns, not node/seed/path: those are closed
+                    # to a principal whose retrieval rules withhold
+                    # properties (#2233), and the envelope needs no more.
+                    "YIELD node_id, labels, seed_id, score, hops, source, hop_sequence "
+                    "RETURN node_id, labels, seed_id, score, hops, source, hop_sequence"
                 )
                 result = client.query_readonly(cypher, graph)
                 return self._json(envelope(result.columns, result.records))

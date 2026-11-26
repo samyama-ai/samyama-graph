@@ -321,9 +321,8 @@ pub async fn export_handler(
             }
         }
         let _seeded = payload.seed.map(crate::query::executor::operator::statement_rng::seed);
-        let batch = state
-            .engine
-            .execute(&payload.query, &*store_guard)
+        let rag = crate::auth::rag_policy_of(subject.as_ref().map(|Extension(Subject(u))| u));
+        let batch = crate::query::executor::rag_policy::with(rag, || state.engine.execute(&payload.query, &*store_guard))
             .map(|mut b| {
                 crate::export::resolve_nodes(&mut b, &*store_guard);
                 b
@@ -693,6 +692,9 @@ async fn run_query(
             return (StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": e }))).into_response();
         }
     }
+    // The caller's GraphRAG retrieval rules (#2233), applied around every
+    // execution below, on the thread that runs it.
+    let rag = crate::auth::rag_policy_of(subject.as_ref().map(|Extension(Subject(u))| u));
 
     // OSS serves exactly one graph. The `graph` argument used to be accepted and then
     // ignored: every read and write landed in the same store, so two datasets loaded into
@@ -736,11 +738,11 @@ async fn run_query(
     // that does not send `Accept: application/x-ndjson` gets the buffered JSON
     // envelope it always got. See `stream_query` for what the stream promises.
     if accepts_ndjson(&headers) {
-        return stream_query(&state, payload, params).await;
+        return stream_query(&state, payload, params, rag).await;
     }
 
     if let Some(tx) = payload.tx.as_deref() {
-        return query_in_transaction(&state, tx, &payload, &params).await;
+        return query_in_transaction(&state, tx, &payload, &params, rag).await;
     }
 
     // Asked of the parser, not of the query text. Two string matchers used to
@@ -785,13 +787,15 @@ async fn run_query(
             .mutate(&payload.graph, |store| {
                 stats.lock_wait_ms = ms(asked.elapsed());
                 let started = std::time::Instant::now();
-                let result = state.engine.execute_mut_with_params_within(
-                    &payload.query,
-                    store,
-                    &payload.graph,
-                    &params,
-                    time_limit,
-                );
+                let result = crate::query::executor::rag_policy::with(rag.clone(), || {
+                    state.engine.execute_mut_with_params_within(
+                        &payload.query,
+                        store,
+                        &payload.graph,
+                        &params,
+                        time_limit,
+                    )
+                });
                 stats.elapsed_ms = ms(started.elapsed());
                 let props = result
                     .as_ref()
@@ -818,7 +822,7 @@ async fn run_query(
         // the key carries the dialect. Bypassing is the conservative half of that:
         // a slower answer rather than a Cypher answer to a GQL question.
         let use_cache = use_cache && requested_dialect(&payload) == crate::query::Dialect::Cypher;
-        let result = if use_cache {
+        let result = crate::query::executor::rag_policy::with(rag.clone(), || if use_cache {
             match state.engine.execute_cached_with_params_within(
                 &payload.query,
                 &*store_guard,
@@ -839,7 +843,7 @@ async fn run_query(
                 time_limit,
                 requested_dialect(&payload),
             )
-        };
+        });
         stats.elapsed_ms = ms(started.elapsed());
         // Read while the guard is still held: taken afterwards it could name a
         // version this result was not computed against, which is worse than
@@ -946,6 +950,7 @@ async fn stream_query(
     state: &AppState,
     payload: QueryRequest,
     params: crate::query::BoundParams,
+    rag: std::sync::Arc<crate::query::executor::rag_policy::RagPolicy>,
 ) -> axum::response::Response {
     let refuse = |why: &str| {
         (
@@ -1022,7 +1027,8 @@ async fn stream_query(
 
         let mut started = false;
         let mut sent_rows = 0usize;
-        let outcome = engine.execute_streaming_with_params_within(
+        // On this blocking thread, where the statement runs (#2233).
+        let outcome = crate::query::executor::rag_policy::with(rag, || engine.execute_streaming_with_params_within(
             &query,
             &guard,
             &params,
@@ -1048,7 +1054,7 @@ async fn stream_query(
                 Ok(())
             },
             time_limit,
-        );
+        ));
         let notifications = crate::query::executor::operator::notifications::take();
         // The last row has been handed over: nothing the trailer says needs
         // the store, so writers may go before the consumer reads it.
@@ -1122,6 +1128,7 @@ async fn query_in_transaction(
     tx: &str,
     payload: &QueryRequest,
     params: &crate::query::BoundParams,
+    rag: std::sync::Arc<crate::query::executor::rag_policy::RagPolicy>,
 ) -> axum::response::Response {
     let mut sessions = state.transactions.lock().await;
     let past_deadline = match sessions.get_mut(tx) {
@@ -1142,7 +1149,7 @@ async fn query_in_transaction(
         .unwrap_or(false);
     let time_limit = state.query_time_limit(&payload.graph);
     let started = std::time::Instant::now();
-    let result = if is_write {
+    let result = crate::query::executor::rag_policy::with(rag, || if is_write {
         state.engine.execute_mut_with_params_within(
             &payload.query,
             store,
@@ -1154,7 +1161,7 @@ async fn query_in_transaction(
         state
             .engine
             .execute_with_params_within(&payload.query, store, params, time_limit)
-    };
+    });
     let stats = QueryStats { elapsed_ms: ms(started.elapsed()), is_write, ..QueryStats::default() };
     let props = result
         .as_ref()

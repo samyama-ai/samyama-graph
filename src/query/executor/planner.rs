@@ -939,7 +939,7 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
 /// Named procedures outside `db.*`, offered as "did you mean" beside
 /// [`KNOWN_DB_PROCEDURES`] but not listed among the schema procedures when
 /// nothing is close (#2098).
-pub const KNOWN_OTHER_PROCEDURES: &[&str] = &["ai.rag.retrieve"];
+pub const KNOWN_OTHER_PROCEDURES: &[&str] = &["ai.rag.retrieve", "ai.rag.withheld"];
 
 /// The refusal for a procedure name nothing dispatches: a likely intended
 /// name when there is one, and otherwise where the procedures are.
@@ -4162,23 +4162,26 @@ impl QueryPlanner {
             )?));
         }
 
-        if call_clause.procedure_name == super::rag_ops::NAME {
+        if call_clause.procedure_name == super::rag_ops::NAME
+            || call_clause.procedure_name == super::rag_ops::WITHHELD_NAME
+        {
             // (label, property, queryVector, k, hops) (#2098). The first four
             // are `db.index.vector.queryNodes`' own, planned by it, so the two
             // read their arguments the same way and refuse the same mistakes.
+            // `ai.rag.withheld` is the same retrieval reporting only what the
+            // caller's policy left out (#2233).
+            let name = call_clause.procedure_name.as_str();
             let args = &call_clause.arguments;
             if args.len() != 5 {
                 return Err(ExecutionError::PlanningError(format!(
-                    "{} takes (label, property, queryVector, k, hops)",
-                    super::rag_ops::NAME
+                    "{name} takes (label, property, queryVector, k, hops)"
                 )));
             }
             let hops = match super::operator::eval_expression(&args[4], &super::Record::new(), store) {
                 Ok(super::Value::Property(PropertyValue::Integer(h))) if h >= 0 => h as usize,
                 _ => {
                     return Err(ExecutionError::PlanningError(format!(
-                        "{}: hops must be a non-negative integer",
-                        super::rag_ops::NAME
+                        "{name}: hops must be a non-negative integer"
                     )))
                 }
             };
@@ -4196,6 +4199,9 @@ impl QueryPlanner {
                 .iter()
                 .map(|item| (item.name.clone(), item.alias.clone()))
                 .collect();
+            if name == super::rag_ops::WITHHELD_NAME {
+                return Ok(Box::new(super::rag_ops::RagRetrieveOperator::withheld(search, hops, &yields)?));
+            }
             return Ok(Box::new(super::rag_ops::RagRetrieveOperator::new(search, hops, &yields)?));
         }
 
