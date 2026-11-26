@@ -74,9 +74,7 @@ pub async fn create_subgraph_handler(
     if let Some(refusal) = state.writes_refused() {
         return error(StatusCode::SERVICE_UNAVAILABLE, refusal);
     }
-    let exists = state
-        .store
-        .read()
+    let exists = crate::store_lock::read(&state.store)
         .await
         .subgraph(&definition.name)
         .is_some();
