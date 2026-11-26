@@ -1364,6 +1364,10 @@ pub struct GraphStore {
     /// catalog; see [`crate::graph::retention`].
     retention: crate::graph::retention::RetentionRules,
 
+    /// Named subgraphs, by name (#337). Persisted through the index catalog;
+    /// see [`crate::graph::subgraph`].
+    subgraphs: std::collections::BTreeMap<String, Arc<crate::graph::subgraph::SubgraphScope>>,
+
     /// Columnar storage for node properties
     pub node_columns: ColumnStore,
 
@@ -1520,6 +1524,7 @@ impl GraphStore {
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
             features: Arc::new(crate::graph::feature::FeatureRegistry::new()),
             retention: Default::default(),
+            subgraphs: Default::default(),
             node_columns: ColumnStore::new(),
             edge_columns: ColumnStore::new(),
             index_sender: None,
@@ -6663,6 +6668,7 @@ NodeDeleted { id, .. } => {
         // Materialized feature values name nodes `clear` just removed.
         self.features = Arc::new(crate::graph::feature::FeatureRegistry::new());
         self.retention.clear();
+        self.subgraphs.clear();
         self.node_columns = ColumnStore::new();
         self.edge_columns = ColumnStore::new();
         self.next_node_id = 1;
@@ -6824,6 +6830,45 @@ NodeDeleted { id, .. } => {
         old
     }
 
+    /// Define a named subgraph (#337). Refuses a name already in use: a
+    /// definition is replaced by dropping it first, so a typo cannot silently
+    /// rewrite a view other callers depend on.
+    pub fn create_subgraph(
+        &mut self,
+        definition: crate::graph::subgraph::SubgraphDefinition,
+    ) -> Result<Arc<crate::graph::subgraph::SubgraphScope>, String> {
+        let scope = Arc::new(crate::graph::subgraph::SubgraphScope::compile(definition)?);
+        if self.subgraphs.contains_key(scope.name()) {
+            return Err(format!("subgraph '{}' already exists; drop it first to redefine it", scope.name()));
+        }
+        self.subgraphs.insert(scope.name().to_string(), Arc::clone(&scope));
+        // A cached scoped answer must not outlive the definition it used.
+        self.bump_epoch();
+        self.mark_index_catalog_changed();
+        Ok(scope)
+    }
+
+    /// Remove a named subgraph. The data it viewed is untouched. Returns the
+    /// definition, or `None` if there was none by that name.
+    pub fn drop_subgraph(&mut self, name: &str) -> Option<Arc<crate::graph::subgraph::SubgraphScope>> {
+        let old = self.subgraphs.remove(name);
+        if old.is_some() {
+            self.bump_epoch();
+            self.mark_index_catalog_changed();
+        }
+        old
+    }
+
+    /// The named subgraph called `name`, if there is one.
+    pub fn subgraph(&self, name: &str) -> Option<Arc<crate::graph::subgraph::SubgraphScope>> {
+        self.subgraphs.get(name).cloned()
+    }
+
+    /// Every named subgraph, by name.
+    pub fn subgraphs(&self) -> impl Iterator<Item = &Arc<crate::graph::subgraph::SubgraphScope>> {
+        self.subgraphs.values()
+    }
+
     /// Every label's retention rule, by label.
     pub fn retention_rules(&self) -> &crate::graph::retention::RetentionRules {
         &self.retention
@@ -6883,6 +6928,15 @@ NodeDeleted { id, .. } => {
             max_age_ms: rule.max_age_ms,
             max_records: rule.max_records,
         }));
+        definitions.extend(self.subgraphs.values().map(|scope| {
+            let d = scope.definition();
+            IndexDefinition::Subgraph {
+                name: d.name.clone(),
+                labels: d.labels.clone(),
+                edge_types: d.edge_types.clone(),
+                predicates: d.predicates.iter().map(|(l, p)| (l.clone(), p.clone())).collect(),
+            }
+        }));
         // Sorted so two runs of the same DDL produce byte-identical records and
         // a diff of the catalog is a diff of the indexes, not of hash order.
         definitions.sort_by_key(|d| match d {
@@ -6912,6 +6966,9 @@ NodeDeleted { id, .. } => {
             }
             IndexDefinition::Retention { label, .. } => {
                 (7u8, label.clone(), String::new(), String::new())
+            }
+            IndexDefinition::Subgraph { name, .. } => {
+                (8u8, name.clone(), String::new(), String::new())
             }
         });
         IndexCatalog { definitions }
@@ -7134,6 +7191,26 @@ NodeDeleted { id, .. } => {
                             max_records: *max_records,
                         },
                     );
+                }
+                IndexDefinition::Subgraph { name, labels, edge_types, predicates } => {
+                    let definition = crate::graph::subgraph::SubgraphDefinition {
+                        name: name.clone(),
+                        labels: labels.clone(),
+                        edge_types: edge_types.clone(),
+                        predicates: predicates.iter().cloned().collect(),
+                    };
+                    match crate::graph::subgraph::SubgraphScope::compile(definition) {
+                        Ok(scope) => {
+                            self.subgraphs.insert(name.clone(), Arc::new(scope));
+                        }
+                        Err(e) => {
+                            // Accepted when it was created, so this is a rule
+                            // tightened since. Dropped with a warning rather
+                            // than failing the boot over a view.
+                            tracing::warn!("could not restore subgraph '{name}': {e}");
+                            report.failed += 1;
+                        }
+                    }
                 }
                 IndexDefinition::VectorParams { label, property, m, ef_construction, ef } => {
                     vector_params.push((

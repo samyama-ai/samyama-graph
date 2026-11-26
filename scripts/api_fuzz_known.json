@@ -56,6 +56,9 @@
   "POST /api/structure/cues": [
     "ST202"
   ],
+  "POST /api/subgraphs": [
+    "ST202"
+  ],
   "POST /api/tenants": [
     "ST202"
   ],

@@ -1584,6 +1584,7 @@ fn index_catalog_lists_every_kind_in_a_stable_order() {
             IndexDefinition::VectorParams { .. } => 5,
             IndexDefinition::VectorKind { .. } => 6,
             IndexDefinition::Retention { .. } => 7,
+            IndexDefinition::Subgraph { .. } => 8,
         })
         .collect();
     let mut sorted = kinds.clone();
