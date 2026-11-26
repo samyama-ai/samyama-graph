@@ -1114,12 +1114,31 @@ impl VectorIndex {
     /// The graph search behind [`search_ef`](Self::search_ef) and
     /// [`search_inline_where`](Self::search_inline_where); `keep`, when
     /// given, joins the liveness test inside the walk.
+    ///
+    /// Fires `vector__hnsw_search` (#2219) for both: the width the search
+    /// used (0 for an exact scan) and the distances it computed, when that is
+    /// known.
     fn search_graph(
         &self,
         query: &[f32],
         k: usize,
         ef: Option<usize>,
         keep: Option<&dyn Fn(NodeId) -> bool>,
+    ) -> VectorResult<Vec<(NodeId, f32)>> {
+        let started = std::time::Instant::now();
+        let mut walked = (0usize, None);
+        let out = self.search_graph_walked(query, k, ef, keep, &mut walked);
+        crate::usdt::vector_search(k, walked.0, walked.1, started);
+        out
+    }
+
+    fn search_graph_walked(
+        &self,
+        query: &[f32],
+        k: usize,
+        ef: Option<usize>,
+        keep: Option<&dyn Fn(NodeId) -> bool>,
+        walked: &mut (usize, Option<usize>),
     ) -> VectorResult<Vec<(NodeId, f32)>> {
         let pass = |id: NodeId| keep.is_none_or(|keep| keep(id));
         if query.len() != self.dimensions {
@@ -1141,6 +1160,7 @@ impl VectorIndex {
         // searching a malformed graph.
         let n = self.len();
         if n == 0 {
+            *walked = (0, Some(0));
             return Ok(Vec::new());
         }
         // Below this size, search exactly. HNSW is an approximation that earns its keep at
@@ -1150,6 +1170,7 @@ impl VectorIndex {
         // vectors costs microseconds and is always right, so there is nothing to trade.
         const EXACT_SEARCH_MAX: usize = 128;
         if n <= EXACT_SEARCH_MAX {
+            *walked = (0, Some(n));
             return Ok(self.report(self.brute_force_where(query, k.min(n), &pass)));
         }
 
@@ -1172,8 +1193,10 @@ impl VectorIndex {
         if self.superseded > 0
             && ef_search.saturating_mul(self.params.m).saturating_mul(2) >= n
         {
+            *walked = (0, Some(n));
             return Ok(self.report(self.brute_force_where(query, want, &pass)));
         }
+        *walked = (ef_search, None);
         let live = |id: &usize| self.is_current(*id);
         // The predicate joins the liveness test inside the walk (#1999), so
         // the beam keeps only current entries that pass.
@@ -1213,6 +1236,7 @@ impl VectorIndex {
                     "[vector] HNSW search panicked on {}-vector index; using exact brute-force fallback",
                     n
                 );
+                *walked = (0, Some(n));
                 return Ok(self.report(self.brute_force_where(query, k.min(n), &pass)));
             }
         };

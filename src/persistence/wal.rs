@@ -256,6 +256,8 @@ pub struct Wal {
     sequence: u64,
     /// Sync mode (flush after every write)
     sync_mode: bool,
+    /// Bytes appended since the last `sync`, for the `wal__fsync_start` probe.
+    unsynced_bytes: u64,
 }
 
 impl Wal {
@@ -276,6 +278,7 @@ impl Wal {
             current_file: None,
             sequence,
             sync_mode: Self::sync_mode_from_env(),
+            unsynced_bytes: 0,
         })
     }
 
@@ -365,6 +368,7 @@ impl Wal {
             file.write_all(&(data.len() as u32 | FORMAT_FLAG).to_le_bytes())?;
             // Write data
             file.write_all(&data)?;
+            self.unsynced_bytes += 4 + data.len() as u64;
         }
 
         Ok(sequence)
@@ -386,10 +390,15 @@ impl Wal {
         WAL_SYNCS.with(|c| c.set(c.get() + 1));
         if self.sync_mode {
             if let Some(ref mut file) = self.current_file {
+                // The probes bracket the barrier and nothing else: the bytes it
+                // makes durable, then how long the disk took (#2219).
+                let started = crate::usdt::wal_fsync_start(self.unsynced_bytes);
                 file.flush()?;
                 file.get_ref().sync_data()?;
+                crate::usdt::wal_fsync_done(started);
             }
         }
+        self.unsynced_bytes = 0;
         Ok(())
     }
 
@@ -592,6 +601,21 @@ impl Wal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sync_reports_the_bytes_appended_since_the_last_one() {
+        // `wal__fsync_start(bytes)` (#2219): what the barrier makes durable.
+        let dir = tempfile::tempdir().unwrap();
+        let mut wal = Wal::new(dir.path()).unwrap();
+        assert_eq!(wal.unsynced_bytes, 0);
+        wal.append_unsynced(WalEntry::Checkpoint { sequence: 1, timestamp: 0 }).unwrap();
+        let one = wal.unsynced_bytes;
+        assert!(one > 4, "length prefix plus a record: {one}");
+        wal.append_unsynced(WalEntry::Checkpoint { sequence: 2, timestamp: 0 }).unwrap();
+        assert_eq!(wal.unsynced_bytes, 2 * one, "two records of the same size");
+        wal.sync().unwrap();
+        assert_eq!(wal.unsynced_bytes, 0, "a sync starts the count again");
+    }
     use tempfile::TempDir;
 
     #[test]
