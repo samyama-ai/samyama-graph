@@ -201,7 +201,8 @@ async fn a_rolled_back_transaction_emits_nothing_and_a_committed_one_emits_once(
     .await;
     post(&s.app, &format!("/api/tx/{tx}/commit"), json!({})).await;
     let ev = all_after(&s.app, before as u64).await;
-    assert_eq!(ops(&ev), ["property_set", "node_created"], "{ev:#?}");
+    // In statement order: the CREATE ran before the SET.
+    assert_eq!(ops(&ev), ["node_created", "property_set"], "{ev:#?}");
     assert_eq!(
         ev[0]["tx"], ev[1]["tx"],
         "a transaction's events share its number"
@@ -215,6 +216,10 @@ async fn tenants_have_their_own_feeds_and_a_bound_credential_reads_only_its_own(
     query(&s.app, "CREATE (:InDefault)").await;
 
     // Another tenant's write, persisted the way GRAPH.QUERY persists it.
+    // A write is persisted only for a registered tenant.
+    s.pm.tenants()
+        .create_tenant("acme".into(), "acme".into(), None)
+        .unwrap();
     let mut other = GraphStore::new();
     other.enable_write_log();
     QueryEngine::new()
