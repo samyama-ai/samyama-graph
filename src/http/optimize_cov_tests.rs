@@ -119,10 +119,18 @@ async fn the_algorithm_catalogue_lists_every_solver_once() {
     let (status, json) = get_json(app(), "/optimize/algorithms").await;
     assert_eq!(status, StatusCode::OK);
     let algos = json.as_array().unwrap();
-    assert_eq!(algos.len(), 27);
+    assert_eq!(algos.len(), 28);
     let ids: std::collections::HashSet<&str> =
         algos.iter().map(|a| a["id"].as_str().unwrap()).collect();
-    assert_eq!(ids.len(), 27, "duplicate ids");
+    assert_eq!(ids.len(), 28, "duplicate ids");
+    // Exactly one exact solver, HiGHS (OPT-05, #1766); every other is a
+    // population metaheuristic.
+    let exact: Vec<&str> = algos
+        .iter()
+        .filter(|a| a["family"] == "exact")
+        .map(|a| a["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(exact, ["highs"]);
     let nsga2 = algos.iter().find(|a| a["id"] == "nsga2").unwrap();
     assert_eq!(nsga2["multi_objective"], true);
     assert_eq!(nsga2["family"], "multi-objective");
@@ -1028,6 +1036,15 @@ async fn the_catalogue_lists_both_budgets_as_optional() {
     let (_, algos) = get_json(app(), "/optimize/algorithms").await;
     for a in algos.as_array().unwrap() {
         let params = a["params"].as_array().unwrap();
+        // The exact solver runs on `/optimize/lp`, not `/optimize/solve`, and
+        // evaluates no objective it could count: its one limit is time
+        // (OPT-05, #1766).
+        if a["family"] == "exact" {
+            let names: Vec<&str> = params.iter().map(|p| p["name"].as_str().unwrap()).collect();
+            assert_eq!(names, ["time_limit_ms"], "{}", a["id"]);
+            assert!(params[0]["default"].is_null());
+            continue;
+        }
         for name in ["time_budget_ms", "max_evaluations"] {
             let p = params
                 .iter()
@@ -1098,4 +1115,70 @@ async fn a_fixed_size_benchmark_refuses_a_dim_it_cannot_honour() {
     )
     .await;
     assert_eq!(s, StatusCode::OK, "{m}");
+}
+
+
+/// `POST /optimize/lp` solves a user-supplied LP/MILP exactly (OPT-05, #1766).
+#[tokio::test]
+async fn optimize_lp_returns_the_proven_optimum_and_its_values() {
+    // max 3x + 2y, x + y <= 4, x + 3y <= 6: optimum 12 at (4, 0).
+    let (s, body) = post(
+        app(),
+        "/optimize/lp",
+        r#"{"sense":"max","objective":{"x":3,"y":2},
+            "constraints":[{"terms":{"x":1,"y":1},"op":"<=","rhs":4},
+                           {"terms":{"x":1,"y":3},"op":"<=","rhs":6}]}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let j: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(j["status"], "optimal");
+    assert!((j["objective"].as_f64().unwrap() - 12.0).abs() < 1e-6, "{j}");
+    assert!((j["values"]["x"].as_f64().unwrap() - 4.0).abs() < 1e-6, "{j}");
+    assert_eq!((j["gap"].as_f64(), &j["feasible"], &j["solver"]), (Some(0.0), &serde_json::json!(true), &serde_json::json!("HiGHS")));
+    assert!(j["total_time_ms"].as_f64().unwrap() >= 0.0);
+}
+
+#[tokio::test]
+async fn optimize_lp_reports_infeasible_as_an_answer_not_an_error() {
+    let (s, body) = post(
+        app(),
+        "/optimize/lp",
+        r#"{"objective":{"x":1},"constraints":[{"terms":{"x":1},"op":">=","rhs":5},
+                                              {"terms":{"x":1},"op":"<=","rhs":3}]}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    let j: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(j["status"] == "infeasible" || j["status"] == "infeasible_or_unbounded", "{j}");
+    assert!(j["objective"].is_null() && j["values"].is_null() && j["gap"].is_null(), "{j}");
+}
+
+#[tokio::test]
+async fn optimize_lp_refuses_a_bad_program_with_its_reason() {
+    for (body, says) in [
+        (r#"{"objective":{"x":1},"constraints":[{"terms":{"x":1},"op":"<","rhs":1}]}"#, "`op`"),
+        (r#"{"objective":{"x":1},"bounds":{"x":[3,1]}}"#, "above its upper bound"),
+        (r#"{"objectiv":{"x":1}}"#, "objectiv"),
+        (r#"{}"#, "no variables"),
+        ("not json", "invalid linear program"),
+    ] {
+        let (s, m) = post(app(), "/optimize/lp", body).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{body}: {m}");
+        assert!(m.contains(says), "{body}: {m}");
+    }
+}
+
+/// The exact solver is listed, so `/optimize/solve` is asked for it; it does
+/// not run a benchmark function under that name.
+#[tokio::test]
+async fn optimize_solve_refuses_the_exact_solver_and_names_the_route() {
+    let (s, m) = post(
+        app(),
+        "/optimize/solve",
+        r#"{"algorithm":"highs","benchmark":"sphere","population_size":4,"iterations":1}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "{m}");
+    assert!(m.contains("/optimize/lp") && m.contains("algo.or.lp"), "{m}");
 }

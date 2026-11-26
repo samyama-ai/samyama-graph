@@ -163,13 +163,19 @@ impl LinearModel {
                 return refuse(format!("variable `{}` is declared twice", v.name));
             }
             if !c.is_finite() {
-                return refuse(format!("the objective coefficient of `{}` is {c}, not a finite number", v.name));
+                return refuse(format!(
+                    "the objective coefficient of `{}` is {c}, not a finite number",
+                    v.name
+                ));
             }
             if v.lower.is_nan() || v.upper.is_nan() {
                 return refuse(format!("a bound of `{}` is not a number", v.name));
             }
             if v.lower == f64::INFINITY || v.upper == f64::NEG_INFINITY {
-                return refuse(format!("`{}` has a bound no value can meet: [{}, {}]", v.name, v.lower, v.upper));
+                return refuse(format!(
+                    "`{}` has a bound no value can meet: [{}, {}]",
+                    v.name, v.lower, v.upper
+                ));
             }
             if v.lower > v.upper {
                 return refuse(format!(
@@ -182,15 +188,23 @@ impl LinearModel {
         for (i, c) in self.constraints.iter().enumerate() {
             let label = c.name.clone().unwrap_or_else(|| format!("constraint {i}"));
             if !c.rhs.is_finite() {
-                return refuse(format!("{label}: the right-hand side is {}, not a finite number", c.rhs));
+                return refuse(format!(
+                    "{label}: the right-hand side is {}, not a finite number",
+                    c.rhs
+                ));
             }
             let mut seen = BTreeSet::new();
             for &(var, coef) in &c.terms {
                 if var >= self.variables.len() {
-                    return refuse(format!("{label}: a term names variable index {var}, which does not exist"));
+                    return refuse(format!(
+                        "{label}: a term names variable index {var}, which does not exist"
+                    ));
                 }
                 if !seen.insert(var) {
-                    return refuse(format!("{label}: `{}` appears twice", self.variables[var].name));
+                    return refuse(format!(
+                        "{label}: `{}` appears twice",
+                        self.variables[var].name
+                    ));
                 }
                 if !coef.is_finite() {
                     return refuse(format!(
@@ -202,7 +216,9 @@ impl LinearModel {
             nonzeros += c.terms.len();
         }
         if nonzeros > MAX_NONZEROS {
-            return refuse(format!("the constraints have {nonzeros} coefficients; the limit is {MAX_NONZEROS}"));
+            return refuse(format!(
+                "the constraints have {nonzeros} coefficients; the limit is {MAX_NONZEROS}"
+            ));
         }
         Ok(())
     }
@@ -280,7 +296,10 @@ pub struct SolveOptions {
 /// The model is validated first and a bad one is refused with the reason.
 /// HiGHS runs single-threaded and silent: a query does not take every core
 /// or write to the server's stdout.
-pub fn solve(model: &LinearModel, options: SolveOptions) -> Result<LinearSolution, LinearModelError> {
+pub fn solve(
+    model: &LinearModel,
+    options: SolveOptions,
+) -> Result<LinearSolution, LinearModelError> {
     use highs::{HighsModelStatus as H, RowProblem, Sense as HSense};
 
     model.validate()?;
@@ -333,10 +352,14 @@ pub fn solve(model: &LinearModel, options: SolveOptions) -> Result<LinearSolutio
     // A point is reported only where it means something: at the optimum, or
     // as the best found when a limit stopped the search. An unbounded model's
     // last iterate is not an answer.
-    let report_point = has_point && matches!(status, LinearStatus::Optimal | LinearStatus::TimeLimit);
+    let report_point =
+        has_point && matches!(status, LinearStatus::Optimal | LinearStatus::TimeLimit);
     let values = report_point.then(|| solved.get_solution().columns().to_vec());
     let objective = values.as_ref().map(|x| {
-        x.iter().zip(&model.objective).map(|(v, c)| v * c).sum::<f64>()
+        x.iter()
+            .zip(&model.objective)
+            .map(|(v, c)| v * c)
+            .sum::<f64>()
     });
     let feasible = match status {
         LinearStatus::Optimal => Some(true),
@@ -415,8 +438,9 @@ impl LinearProgramSpec {
     pub fn to_model(&self) -> Result<(LinearModel, SolveOptions), LinearModelError> {
         let sense = match &self.sense {
             None => Sense::Min,
-            Some(s) => Sense::parse(s)
-                .ok_or_else(|| LinearModelError(format!("`sense` must be `min` or `max`, got `{s}`")))?,
+            Some(s) => Sense::parse(s).ok_or_else(|| {
+                LinearModelError(format!("`sense` must be `min` or `max`, got `{s}`"))
+            })?,
         };
         let mut names: BTreeSet<&str> = BTreeSet::new();
         names.extend(self.objective.keys().map(String::as_str));
@@ -433,9 +457,16 @@ impl LinearProgramSpec {
             .map(|&name| {
                 let (lower, upper) = match self.bounds.get(name) {
                     None => (0.0, f64::INFINITY),
-                    Some((lo, hi)) => (lo.unwrap_or(f64::NEG_INFINITY), hi.unwrap_or(f64::INFINITY)),
+                    Some((lo, hi)) => {
+                        (lo.unwrap_or(f64::NEG_INFINITY), hi.unwrap_or(f64::INFINITY))
+                    }
                 };
-                Variable { name: name.to_string(), lower, upper, integer: integer.contains(name) }
+                Variable {
+                    name: name.to_string(),
+                    lower,
+                    upper,
+                    integer: integer.contains(name),
+                }
             })
             .collect();
         let objective = names
@@ -456,7 +487,11 @@ impl LinearProgramSpec {
                 })?;
                 Ok(LinearConstraint {
                     name: c.name.clone(),
-                    terms: c.terms.iter().map(|(n, &coef)| (index[n.as_str()], coef)).collect(),
+                    terms: c
+                        .terms
+                        .iter()
+                        .map(|(n, &coef)| (index[n.as_str()], coef))
+                        .collect(),
                     op,
                     rhs: c.rhs,
                 })
@@ -464,11 +499,18 @@ impl LinearProgramSpec {
             .collect::<Result<Vec<_>, LinearModelError>>()?;
         let options = SolveOptions {
             time_limit: match self.time_limit_ms {
-                Some(0) => return refuse("`timeLimitMs` must be at least 1; leave it out for no limit"),
+                Some(0) => {
+                    return refuse("`timeLimitMs` must be at least 1; leave it out for no limit")
+                }
                 ms => ms.map(Duration::from_millis),
             },
         };
-        let model = LinearModel { sense, variables, objective, constraints };
+        let model = LinearModel {
+            sense,
+            variables,
+            objective,
+            constraints,
+        };
         model.validate()?;
         Ok((model, options))
     }
@@ -526,9 +568,9 @@ mod tests {
         let cap = 10.0;
         let mut best = 0.0f64;
         for mask in 0..8u32 {
-            let (w, v) = (0..3).filter(|i| mask >> i & 1 == 1).fold((0.0, 0.0), |(w, v), i| {
-                (w + weights[i], v + values[i])
-            });
+            let (w, v) = (0..3)
+                .filter(|i| mask >> i & 1 == 1)
+                .fold((0.0, 0.0), |(w, v), i| (w + weights[i], v + values[i]));
             if w <= cap {
                 best = best.max(v);
             }
@@ -568,7 +610,13 @@ mod tests {
                 {"terms": {"x": 1}, "op": "<=", "rhs": 3}
             ]
         }));
-        assert!(matches!(s.status, LinearStatus::Infeasible | LinearStatus::InfeasibleOrUnbounded), "{s:?}");
+        assert!(
+            matches!(
+                s.status,
+                LinearStatus::Infeasible | LinearStatus::InfeasibleOrUnbounded
+            ),
+            "{s:?}"
+        );
         assert_eq!((s.objective, s.values.as_ref(), s.gap), (None, None, None));
         assert_ne!(s.feasible, Some(true));
     }
@@ -580,7 +628,13 @@ mod tests {
             "objective": {"x": 1},
             "constraints": [{"terms": {"x": 1, "y": -1}, "op": "<=", "rhs": 1}]
         }));
-        assert!(matches!(s.status, LinearStatus::Unbounded | LinearStatus::InfeasibleOrUnbounded), "{s:?}");
+        assert!(
+            matches!(
+                s.status,
+                LinearStatus::Unbounded | LinearStatus::InfeasibleOrUnbounded
+            ),
+            "{s:?}"
+        );
         assert_eq!((s.objective, s.values.as_ref(), s.gap), (None, None, None));
     }
 
@@ -605,30 +659,53 @@ mod tests {
     fn a_variable_left_out_of_bounds_is_non_negative() {
         let (_, s) = run(serde_json::json!({"objective": {"x": 1}}));
         assert_eq!(s.status, LinearStatus::Optimal);
-        assert!(close(s.objective.unwrap(), 0.0), "min x with x >= 0 is 0: {s:?}");
+        assert!(
+            close(s.objective.unwrap(), 0.0),
+            "min x with x >= 0 is 0: {s:?}"
+        );
     }
 
     #[test]
     fn a_bad_spec_is_refused_by_name() {
         for (json, says) in [
             (serde_json::json!({}), "no variables"),
-            (serde_json::json!({"sense": "up", "objective": {"x": 1}}), "`sense`"),
-            (serde_json::json!({"objective": {"x": 1}, "constraints": [{"terms": {"x": 1}, "op": "<", "rhs": 1}]}), "`op`"),
-            (serde_json::json!({"objective": {"x": 1}, "bounds": {"x": [5, 1]}}), "above its upper bound"),
-            (serde_json::json!({"objective": {"x": 1}, "timeLimitMs": 0}), "timeLimitMs"),
+            (
+                serde_json::json!({"sense": "up", "objective": {"x": 1}}),
+                "`sense`",
+            ),
+            (
+                serde_json::json!({"objective": {"x": 1}, "constraints": [{"terms": {"x": 1}, "op": "<", "rhs": 1}]}),
+                "`op`",
+            ),
+            (
+                serde_json::json!({"objective": {"x": 1}, "bounds": {"x": [5, 1]}}),
+                "above its upper bound",
+            ),
+            (
+                serde_json::json!({"objective": {"x": 1}, "timeLimitMs": 0}),
+                "timeLimitMs",
+            ),
         ] {
             let err = spec(json.clone()).to_model().expect_err(&json.to_string());
             assert!(err.0.contains(says), "{json}: {err}");
         }
         // An unknown key is a deserialisation error, not ignored.
-        assert!(serde_json::from_value::<LinearProgramSpec>(serde_json::json!({"objectiv": {"x": 1}})).is_err());
+        assert!(serde_json::from_value::<LinearProgramSpec>(
+            serde_json::json!({"objectiv": {"x": 1}})
+        )
+        .is_err());
     }
 
     #[test]
     fn validate_refuses_what_the_spec_cannot_express() {
         let base = LinearModel {
             sense: Sense::Min,
-            variables: vec![Variable { name: "x".into(), lower: 0.0, upper: 1.0, integer: false }],
+            variables: vec![Variable {
+                name: "x".into(),
+                lower: 0.0,
+                upper: 1.0,
+                integer: false,
+            }],
             objective: vec![1.0],
             constraints: vec![],
         };
@@ -636,10 +713,20 @@ mod tests {
         m.objective = vec![f64::NAN];
         assert!(m.validate().unwrap_err().0.contains("finite"));
         let mut m = base.clone();
-        m.constraints = vec![LinearConstraint { name: None, terms: vec![(0, 1.0), (0, 2.0)], op: ConstraintOp::Le, rhs: 1.0 }];
+        m.constraints = vec![LinearConstraint {
+            name: None,
+            terms: vec![(0, 1.0), (0, 2.0)],
+            op: ConstraintOp::Le,
+            rhs: 1.0,
+        }];
         assert!(m.validate().unwrap_err().0.contains("twice"));
         let mut m = base.clone();
-        m.constraints = vec![LinearConstraint { name: Some("c".into()), terms: vec![(3, 1.0)], op: ConstraintOp::Le, rhs: 1.0 }];
+        m.constraints = vec![LinearConstraint {
+            name: Some("c".into()),
+            terms: vec![(3, 1.0)],
+            op: ConstraintOp::Le,
+            rhs: 1.0,
+        }];
         assert!(m.validate().unwrap_err().0.contains("does not exist"));
         let mut m = base;
         m.variables[0].lower = f64::INFINITY;

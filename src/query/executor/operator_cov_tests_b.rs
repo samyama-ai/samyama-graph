@@ -6829,6 +6829,11 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
             )
         }
         "split" => vec![lmap(&[("strategy", pstr("random"))])],
+        // A one-variable program: min x, x >= 0 (OPT-05). It reads no graph.
+        "or.lp" => vec![lmap(&[(
+            "objective",
+            PropertyValue::Map([("x".to_string(), pint(1))].into_iter().collect()),
+        )])],
         // A stored split with the path cut in half: an entity leak across it.
         "splitleakage" => {
             let mut store = path;

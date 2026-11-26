@@ -679,7 +679,101 @@ paths:
           description: >
             Unknown algorithm or benchmark, a body carrying a field the
             request does not declare, or a budget of 0. The message names the
-            offending field.
+            offending field. Also the exact solver `highs`, which takes a
+            linear program on `/optimize/lp`, not a benchmark.
+  /optimize/lp:
+    post:
+      operationId: solveLinearProgram
+      summary: Solve a linear or mixed-integer program exactly (HiGHS)
+      description: >
+        Solves the program in the body with HiGHS and returns its status: a
+        proven optimum and its values, or the proof that there is none
+        (OPT-05). Synchronous. Every name in `objective`, a constraint's
+        `terms`, `bounds` or `integer` is a variable; a variable with no
+        entry in `bounds` is non-negative. The same program runs from Cypher
+        as `CALL algo.or.lp({...})`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                sense:
+                  type: string
+                  enum: [min, max, minimize, maximize, minimise, maximise]
+                  description: Default `min`.
+                objective:
+                  type: object
+                  additionalProperties: {type: number}
+                  description: Variable name to objective coefficient.
+                constraints:
+                  type: array
+                  items:
+                    type: object
+                    additionalProperties: false
+                    required: [terms, op, rhs]
+                    properties:
+                      name: {type: string}
+                      terms:
+                        type: object
+                        additionalProperties: {type: number}
+                      op:
+                        type: string
+                        enum: ['<=', '>=', '=', '==']
+                      rhs: {type: number}
+                bounds:
+                  type: object
+                  description: >
+                    Variable name to `[lower, upper]`; `null` leaves that side
+                    unbounded.
+                  additionalProperties:
+                    type: array
+                    minItems: 2
+                    maxItems: 2
+                    items:
+                      type: [number, 'null']
+                integer:
+                  type: array
+                  items: {type: string}
+                  description: Variables that must take integer values.
+                timeLimitMs:
+                  type: integer
+                  minimum: 1
+                  description: >
+                    Stop after this long. The status is then `time_limit` and
+                    the values, if any, are the best found, not proven optimal.
+      responses:
+        '200':
+          description: >
+            The solve. `status` is `optimal`, `infeasible`, `unbounded`,
+            `infeasible_or_unbounded`, `time_limit` or `not_solved`. `objective`
+            and `values` are null when there is no point to report. `gap` is 0
+            exactly when the status is `optimal`, and null otherwise; `mip_gap`
+            is HiGHS's proven relative gap for a MILP stopped by its time
+            limit.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: {type: string}
+                  objective: {type: [number, 'null']}
+                  values: {type: [object, 'null']}
+                  feasible: {type: [boolean, 'null']}
+                  gap: {type: [number, 'null']}
+                  mip_gap: {type: [number, 'null']}
+                  iterations: {type: integer}
+                  nodes: {type: integer}
+                  total_time_ms: {type: number}
+                  solver: {type: string}
+        '400':
+          description: >
+            A body that is not a linear program: a field it does not declare,
+            an unknown `sense` or `op`, an inverted bound, a coefficient that is
+            not a finite number, no variables, or `timeLimitMs` of 0. The
+            message names the problem.
   /optimize/solve/{id}/stream:
     get:
       operationId: streamSolve

@@ -174,6 +174,21 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
             ),
             json("broken JSON", "/optimize/solve", BROKEN),
         ],
+        // OPT-05 (#1766): a solved LP, an infeasible one, and the 400s.
+        ("POST", "/optimize/lp") => vec![
+            json(
+                "an LP",
+                "/optimize/lp",
+                r#"{"sense": "max", "objective": {"x": 3, "y": 2}, "constraints": [{"terms": {"x": 1, "y": 1}, "op": "<=", "rhs": 4}]}"#,
+            ),
+            json(
+                "an infeasible MILP",
+                "/optimize/lp",
+                r#"{"objective": {"x": 1}, "constraints": [{"terms": {"x": 1}, "op": ">=", "rhs": 5}], "bounds": {"x": [0, 3]}, "integer": ["x"]}"#,
+            ),
+            json("an unknown field", "/optimize/lp", r#"{"objectiv": {"x": 1}}"#),
+            json("broken JSON", "/optimize/lp", BROKEN),
+        ],
         ("GET", "/optimize/solve/{id}/stream") => {
             vec![bare("unknown id", "/optimize/solve/nope/stream")]
         }
