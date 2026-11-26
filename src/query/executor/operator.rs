@@ -14216,12 +14216,11 @@ impl SortOperator {
     ///
     /// `select_nth_unstable_by` partitions in O(n) rather than sorting, so
     /// trimming a buffer is cheaper than sorting it and is done repeatedly as
-    /// the input streams in. Rows tied with the k-th are dropped along with
-    /// the rest of the tail; Cypher does not define a tie-break for
-    /// `ORDER BY … LIMIT`, so any k of a tied set is a valid answer, but two
-    /// runs may therefore disagree about *which* — the same latitude the
-    /// unstable sort below already takes.
-    fn trim_to(keyed: &mut Vec<(SortKey<'_>, Record)>, k: usize, items: &[(Expression, bool)]) {
+    /// the input streams in. A full tie is broken by the row's input position,
+    /// as the unbounded sort breaks it, so the rows kept are exactly the first
+    /// `k` the unbounded sort would return -- whatever the batch sizes, and
+    /// however often the buffer is trimmed (#2275).
+    fn trim_to(keyed: &mut Vec<(SortKey<'_>, usize, Record)>, k: usize, items: &[(Expression, bool)]) {
         if k == 0 {
             keyed.clear();
             return;
@@ -14229,8 +14228,17 @@ impl SortOperator {
         if keyed.len() <= k {
             return;
         }
-        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items));
+        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_ranked(a, b, items));
         keyed.truncate(k);
+    }
+
+    /// The bounded sort's total order: the key, then the input position.
+    fn cmp_ranked(
+        a: &(SortKey<'_>, usize, Record),
+        b: &(SortKey<'_>, usize, Record),
+        items: &[(Expression, bool)],
+    ) -> std::cmp::Ordering {
+        Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items).then(a.1.cmp(&b.1))
     }
 
     /// The row order for a key whose every part, in every row, is a non-null
@@ -14738,29 +14746,39 @@ impl SortOperator {
             return Ok(());
         }
 
-        let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::new();
-        while let Some(batch) = self.input.next_batch(store, batch_size)? {
-            keyed.reserve(batch.records.len());
+        // Rows are fed into the top-k as they arrive, and the input is asked
+        // for batches no larger than the working size. Pulling 65,536 rows at
+        // a time held that many *projected* rows -- in the input's batch and
+        // again in the buffer -- before the first trim: a top-10 over 100,000
+        // rows peaked at 60% of sorting all of them (#2275). Now the buffer
+        // holds at most `trim_at` rows and a batch at most as many again.
+        let (Some(k), Some(trim_at)) = (bound, trim_at) else {
+            unreachable!("the unbounded sort returned above")
+        };
+        let pull = trim_at.min(batch_size);
+        let mut keyed: Vec<(SortKey<'_>, usize, Record)> = Vec::new();
+        let mut seq = 0usize;
+        while let Some(batch) = self.input.next_batch(store, pull)? {
             let mut known = known_values(&mut self.input, batch.records.len());
             for record in batch.records {
-                let k = retained_key.zip(known.next().flatten());
-                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store, k)?;
-                keyed.push((key, record));
-            }
-            if let (Some(k), Some(threshold)) = (bound, trim_at) {
-                if keyed.len() >= threshold {
+                let r = retained_key.zip(known.next().flatten());
+                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store, r)?;
+                keyed.push((key, seq, record));
+                seq += 1;
+                // Per row, not per batch, so an input that ignores the batch
+                // size still cannot grow the buffer past the working size.
+                if keyed.len() >= trim_at {
                     Self::trim_to(&mut keyed, k, &self.sort_items);
                 }
             }
         }
-        if let Some(k) = bound {
-            Self::trim_to(&mut keyed, k, &self.sort_items);
-        }
+        Self::trim_to(&mut keyed, k, &self.sort_items);
 
         let sort_items = &self.sort_items;
-        keyed.sort_by(|a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), sort_items));
+        // A total order (key, then input position), so unstable is exact.
+        keyed.sort_unstable_by(|a, b| Self::cmp_ranked(a, b, sort_items));
 
-        self.records = keyed.into_iter().map(|(_, record)| record).collect();
+        self.records = keyed.into_iter().map(|(_, _, record)| record).collect();
         self.sorted_upto = self.records.len();
         self.executed = true;
         Ok(())
