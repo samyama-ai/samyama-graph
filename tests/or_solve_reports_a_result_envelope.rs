@@ -11,8 +11,10 @@
 //!
 //! # What these tests pin
 //!
-//! - `objective`, `feasible`, `gap` and `total_time_ms` are on every row, for
-//!   every solver the engine advertises, single- and multi-objective;
+//! - `objective`, `feasible`, `gap`, `total_time_ms`, `iterations` and
+//!   `max_iterations` are on every row, for every solver the engine
+//!   advertises, single- and multi-objective (the last two on multi-objective
+//!   rows since #2265);
 //! - `feasible` is false when a constraint cannot be met, and `fitness` then
 //!   exceeds `objective` by the penalty;
 //! - `gap` is `objective - bestKnown`, and `null` when no best known value is
@@ -55,8 +57,9 @@ const BEST_KNOWN: f64 = 5.0;
 /// The prefix of the engine's refusal that lists every solver.
 const AVAILABLE_PREFIX: &str = "Available: ";
 
-/// The columns the envelope adds to every row.
-const ENVELOPE: &[&str] = &["objective", "feasible", "gap", "total_time_ms"];
+/// The columns the envelope puts on every row. `iterations` and
+/// `max_iterations` were on single-objective rows only until #2265.
+const ENVELOPE: &[&str] = &["objective", "feasible", "gap", "total_time_ms", "iterations", "max_iterations"];
 
 fn store() -> GraphStore {
     let mut s = GraphStore::new();
@@ -131,6 +134,18 @@ fn every_advertised_solver_returns_the_whole_envelope() {
                 "{algorithm}: no `{column}` column"
             );
         }
+        let int = |column: &str| match prop(&row, column) {
+            Some(PropertyValue::Integer(n)) => *n,
+            other => panic!("{algorithm}: `{column}` is an integer, got {other:?}"),
+        };
+        // The iterations the solver ran, at least one and at most the cap,
+        // and the cap as asked: a solve that stops early says so.
+        assert_eq!(int("max_iterations"), ITERATIONS as i64, "{algorithm}");
+        assert!(
+            (1..=ITERATIONS as i64).contains(&int("iterations")),
+            "{algorithm}: iterations = {}",
+            int("iterations")
+        );
         let ms = float(&row, "total_time_ms");
         assert!(
             ms.is_finite() && ms >= 0.0,

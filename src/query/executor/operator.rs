@@ -75,6 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
+use samyama_optimization::budget::{Budget, Budgeted, StopReason};
 use samyama_optimization::constraints::{Constrained, ConstraintHandling};
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, CMAESSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
@@ -3127,7 +3128,8 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "date", "date.truncate", "datetime", "datetime.fromepoch",
     "datetime.fromepochmillis", "datetime.truncate", "degrees", "distance", "duration",
     "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
-    "duration_between", "e", "elementid", "endnode", "exists", "exp", "floor",
+    "duration_between", "e", "elementid", "endnode", "exists", "exp",
+    "feature.value", "feature.vector", "floor",
     "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id",
     "isempty", "isnan", "keys", "labels", "last", "left", "length", "localdatetime",
     "localdatetime.truncate", "localtime", "localtime.truncate", "log", "log10",
@@ -3331,6 +3333,8 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("haslabels", 2),
     ("point.distance", 2),
     ("point.withinbbox", 3),
+    ("feature.value", 2),
+    ("feature.vector", 2),
     ("vector.similarity.cosine", 2),
     ("vector.similarity.euclidean", 2),
     ("vector.similarity.maxsim", 2),
@@ -4865,6 +4869,33 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             }
             let inside = p.x >= ll.x && p.x <= ur.x && p.y >= ll.y && p.y <= ur.y;
             Ok(Value::Property(PropertyValue::Boolean(inside)))
+        }
+        // A materialized feature's value for one entity (ML-13, #1768), read
+        // per row: `MATCH (c:Customer) RETURN c.name, feature.value('spend', c)`.
+        // `feature.vector(['a', 'b'], c)` is the entity's feature vector, in
+        // the order named. Both read the latest materialization; null for an
+        // entity a feature has no value for. See `feature_ops`.
+        "feature.value" | "feature.vector" => {
+            let store = store.ok_or_else(|| ExecutionError::RuntimeError(format!(
+                "{name}() requires graph context")))?;
+            let who = if lowered == "feature.value" { "feature.value" } else { "feature.vector" };
+            let names = super::feature_ops::feature_names(&args[0], who)?;
+            if who == "feature.value" && names.len() != 1 {
+                return Err(ExecutionError::bad_argument(format!(
+                    "feature.value takes one feature name; for several, call \
+                     feature.vector({names:?}, n)")));
+            }
+            let Some(id) = super::feature_ops::entity_id(&args[1]) else {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{who}: the entity must be a node or its integer id, got {:?}", args[1])));
+            };
+            let values = store.features.lookup(&names, id)
+                .map_err(|e| ExecutionError::bad_argument(e.to_string()))?;
+            if who == "feature.value" {
+                Ok(Value::Property(values.into_iter().next().flatten().unwrap_or(PropertyValue::Null)))
+            } else {
+                Ok(super::feature_ops::value_list(values))
+            }
         }
         // Neo4j 5's vector functions (#1980). The similarities are the
         // `score` of `db.index.vector.queryNodes` for the same pair, from the
@@ -18576,6 +18607,16 @@ pub(crate) fn records_bytes<'a>(records: impl Iterator<Item = &'a Record>) -> us
 }
 
 /// Algorithm operator: CALL algo.pageRank(...)
+/// The five subgraph samplers behind `algo.sample.*` (ML-03, #1720).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubgraphMethod {
+    ForestFire,
+    Snowball,
+    EgoNetwork,
+    RandomWalk,
+    Stratified,
+}
+
 pub struct AlgorithmOperator {
     /// Procedure name
     name: String,
@@ -18813,6 +18854,70 @@ impl AlgorithmOperator {
     /// `CALL algo.pageRank({graph: 'social'})`.
     pub const GRAPH_KEY: &'static str = "graph";
 
+    /// The config key that keeps an algorithm's state with the graph between
+    /// calls and updates it from what was added (ALGO-14, #1697):
+    /// `CALL algo.pageRank({incremental: true})`. Read by `algo.pageRank`,
+    /// `algo.wcc` and `algo.degree`; see `crate::algo::incremental`.
+    pub const INCREMENTAL_KEY: &'static str = "incremental";
+
+    /// Whether this call asked for `incremental: true`.
+    ///
+    /// The value must be a boolean: `incremental: 'yes'` is refused rather
+    /// than read as false and run from scratch, which would look like it
+    /// worked. A projection is refused alongside it: a projection is fixed
+    /// when it is made, and the incremental state follows the live graph, so
+    /// the two would answer about different graphs.
+    fn incremental_requested(&self) -> ExecutionResult<bool> {
+        let mut on = false;
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                match m.get(Self::INCREMENTAL_KEY) {
+                    None => {}
+                    Some(PropertyValue::Boolean(b)) => on = *b,
+                    Some(other) => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "{}: `{}` must be true or false, got {other:?}",
+                            self.name,
+                            Self::INCREMENTAL_KEY
+                        )))
+                    }
+                }
+            }
+        }
+        if on && Self::config_has_key(&self.args, Self::GRAPH_KEY) {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: `{}` follows the live graph and a graph projection is fixed when it \
+                 is made, so `{}` and `{}` cannot be given together",
+                self.name,
+                Self::INCREMENTAL_KEY,
+                Self::INCREMENTAL_KEY,
+                Self::GRAPH_KEY
+            )));
+        }
+        Ok(on)
+    }
+
+    /// The query error for a failed incremental call, worded as the plain
+    /// call's errors are: a deadline stop is still `Query timed out`.
+    fn incremental_failed(&self, e: crate::algo::incremental::IncrementalError) -> ExecutionError {
+        use crate::algo::incremental::IncrementalError as E;
+        match e {
+            E::ViewStopped(s) => ExecutionError::RuntimeError(format!(
+                "Query timed out: {} stopped building its graph view after {} of {} nodes",
+                self.name, s.done, s.total
+            )),
+            E::RunStopped(s) => ExecutionError::RuntimeError(format!(
+                "Query timed out: {} stopped after {} of {} sweeps",
+                self.name, s.done, s.total
+            )),
+            E::Damping(d) => ExecutionError::bad_argument(format!(
+                "{}: with `{}: true`, damping must be above 0 and below 1, got {d}",
+                self.name,
+                Self::INCREMENTAL_KEY
+            )),
+        }
+    }
+
     /// Algorithms that cannot run on a projection, and why. A projection keeps
     /// topology and one weight; these read more of the graph than that, or no
     /// graph view at all. Matched on the canonical name.
@@ -18827,6 +18932,9 @@ impl AlgorithmOperator {
         ("traintestsplit", "it can read node properties (time, source), which a projection does not keep"),
         ("splitleakage", "it reads the stored split from node properties, which a projection does not keep"),
         ("leakagecheck", "it reads the stored split from node properties, which a projection does not keep"),
+        ("sample.stratified", "it groups nodes by their labels, which a projection does not keep"),
+        ("stratifiedsample", "it groups nodes by their labels, which a projection does not keep"),
+        ("stratifiedsampling", "it groups nodes by their labels, which a projection does not keep"),
         ("or.constrainedshortestpath", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
         ("or.shortestpathwithconstraints", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
     ];
@@ -19210,7 +19318,17 @@ impl AlgorithmOperator {
     }
 
     fn execute_pagerank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "pageRank", &["damping", "iterations"])?;
+        Self::reject_unknown_config_keys(&self.args, "pageRank", &["damping", "incremental", "iterations"])?;
+        let incremental = self.incremental_requested()?;
+        if incremental && Self::config_has_key(&self.args, "iterations") {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: `iterations` has no meaning with `{}: true`, which updates its scores \
+                 until every residual is below {} rather than for a number of iterations",
+                self.name,
+                Self::INCREMENTAL_KEY,
+                crate::algo::RESIDUAL_TOLERANCE
+            )));
+        }
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
         let mut edge_type = None;
@@ -19239,11 +19357,32 @@ impl AlgorithmOperator {
             }
         }
 
+        if incremental {
+            let (scores, _) = crate::algo::incremental::page_rank(
+                store,
+                label.as_deref(),
+                edge_type.as_deref(),
+                config.damping_factor,
+                &DeadlineProgress,
+                &DeadlineProgress,
+            )
+            .map_err(|e| self.incremental_failed(e))?;
+            return self.push_pagerank_rows(store, scores);
+        }
+
         // Build view and run
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         let scores = crate::algo::page_rank_with(&view, config, &DeadlineProgress)
             .map_err(|stopped| algorithm_timed_out("algo.pageRank", stopped))?;
+        self.push_pagerank_rows(store, scores)
+    }
 
+    /// One `(node, score)` row per scored node, highest score first.
+    fn push_pagerank_rows(
+        &mut self,
+        store: &GraphStore,
+        scores: impl IntoIterator<Item = (u64, f64)>,
+    ) -> ExecutionResult<()> {
         // Convert to records. One per node, with a copy of the node, so on a
         // large graph this is not free either: checked like the iterations.
         for (i, (algo_id, score)) in scores.into_iter().enumerate() {
@@ -19329,7 +19468,7 @@ impl AlgorithmOperator {
         // and reported success -- the silent drop `reject_unknown_config_keys`
         // exists to refuse. The filters are read from the map as well as
         // positionally, as the centrality procedures read them.
-        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label"])?;
+        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "incremental", "label"])?;
         // Arguments: (label?, edge_type?) or ({label, edgeType})
         let mut label = None;
         let mut edge_type = None;
@@ -19355,13 +19494,26 @@ impl AlgorithmOperator {
             }
         }
 
+        if self.incremental_requested()? {
+            let (components, _) =
+                crate::algo::incremental::wcc(store, label.as_deref(), edge_type.as_deref(), &DeadlineProgress)
+                    .map_err(|e| self.incremental_failed(e))?;
+            return self.push_component_rows(store, components);
+        }
+
         // Build view and run WCC
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         let result = crate::algo::weakly_connected_components(&view);
+        self.push_component_rows(store, result.node_component)
+    }
 
-        // Convert to records
-        // For WCC, we return (node, componentId)
-        for (node_id, component_id) in result.node_component {
+    /// One `(node, componentId)` row per node, by component then node id.
+    fn push_component_rows(
+        &mut self,
+        store: &GraphStore,
+        components: impl IntoIterator<Item = (u64, usize)>,
+    ) -> ExecutionResult<()> {
+        for (node_id, component_id) in components {
             let nid = NodeId::new(node_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(nid) {
@@ -19653,7 +19805,15 @@ impl AlgorithmOperator {
         store: &GraphStore,
         which: Centrality,
     ) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "undirected"])?;
+        // Only degree has an incremental form: the others' scores depend on
+        // paths through the whole graph, which one new relationship can change
+        // anywhere.
+        let keys: &[&str] = match which {
+            Centrality::Degree => &["edgeType", "incremental", "label", "undirected"],
+            _ => &["edgeType", "label", "undirected"],
+        };
+        Self::reject_unknown_config_keys(&self.args, &self.name, keys)?;
+        let incremental = self.incremental_requested()?;
         let (mut label, mut edge_type, mut undirected) = (None, None, None);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19674,6 +19834,17 @@ impl AlgorithmOperator {
             if let Some(Expression::Literal(PropertyValue::String(s))) = self.args.first() {
                 label = Some(s.clone());
             }
+        }
+        if incremental {
+            // `undirected` is accepted and, as in the plain call, changes
+            // nothing: degree is in plus out either way.
+            let (mut scores, _) =
+                crate::algo::incremental::degree(store, label.as_deref(), edge_type.as_deref(), &DeadlineProgress)
+                    .map_err(|e| self.incremental_failed(e))?;
+            // `ranked`'s order: score descending, then node id.
+            scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+            self.push_centrality_rows(store, scores);
+            return Ok(());
         }
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         // Undirected by default: centrality on a social or dependency graph is
@@ -19705,7 +19876,13 @@ impl AlgorithmOperator {
                 })?
             }
         };
-        for (node_id, score) in crate::algo::ranked(&view, &scores) {
+        self.push_centrality_rows(store, crate::algo::ranked(&view, &scores));
+        Ok(())
+    }
+
+    /// One `(node, score)` row per entry, in the order given.
+    fn push_centrality_rows(&mut self, store: &GraphStore, ranked: Vec<(u64, f64)>) {
+        for (node_id, score) in ranked {
             let mut record = Record::new();
             let nid = NodeId::new(node_id);
             match store.get_node(nid) {
@@ -19715,7 +19892,6 @@ impl AlgorithmOperator {
             record.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
             self.results.push(record);
         }
-        Ok(())
     }
 
     /// `algo.jaccard({limit: 10})` and friends.
@@ -20715,6 +20891,356 @@ impl AlgorithmOperator {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", id);
             rec.bind("step".to_string(), Value::Property(PropertyValue::Integer(i as i64)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.sample.neighbors(seeds, {fanout, direction, weightProperty,
+    /// batchSize, seed})` yielding `batch, hop, node, neighbour`: GNN-style
+    /// neighbour sampling, one minibatch at a time (ML-02, #1717). See
+    /// `samyama_graph_algorithms::neighbour_sampling` for the rules every
+    /// sample keeps.
+    ///
+    /// `seeds` is a node id or a list of them. `fanout` is required: one
+    /// entry per hop, each at least 1, or -1 for every neighbour. Sampling is
+    /// uniform unless `weightProperty` names a weight. Each option is refused,
+    /// not clamped, when it is out of range: a training set drawn from a
+    /// silently substituted fanout is not the one the caller asked for.
+    fn execute_neighbour_sampling(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const WHAT: &str = "algo.sample.neighbors()";
+        const DEFAULT_SEED: u64 = 42;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "sample.neighbors",
+            &["batchSize", "direction", "edgeType", "fanout", "label", "seed", "weightProperty"],
+        )?;
+        let bad = |msg: String| ExecutionError::bad_argument(format!("{WHAT}: {msg}"));
+
+        let seed_ids: Vec<i64> = match self.args.first() {
+            Some(Expression::Literal(PropertyValue::Integer(n))) => vec![*n],
+            Some(Expression::Literal(PropertyValue::Array(items))) => items
+                .iter()
+                .map(|v| match v {
+                    PropertyValue::Integer(n) => Ok(*n),
+                    other => Err(bad(format!("every seed must be a node id, got {other:?}"))),
+                })
+                .collect::<ExecutionResult<_>>()?,
+            _ => {
+                return Err(bad(
+                    "the first argument must be a node id or a list of node ids, \
+                     e.g. algo.sample.neighbors([1, 2], {fanout: [10, 5]})"
+                        .to_string(),
+                ))
+            }
+        };
+        if seed_ids.is_empty() {
+            return Err(bad("the list of seed nodes is empty".to_string()));
+        }
+
+        let (mut fanout, mut direction, mut weight, mut batch_size, mut seed) =
+            (None, crate::algo::SampleDirection::Out, None, None, DEFAULT_SEED);
+        let (mut label, mut edge_type) = (None, None);
+        for arg in &self.args {
+            let Expression::Literal(PropertyValue::Map(m)) = arg else { continue };
+            for (key, value) in m {
+                match (key.as_str(), value) {
+                    ("fanout", PropertyValue::Array(hops)) => {
+                        let mut parsed = Vec::with_capacity(hops.len());
+                        for (i, h) in hops.iter().enumerate() {
+                            parsed.push(match h {
+                                PropertyValue::Integer(-1) => crate::algo::Fanout::All,
+                                PropertyValue::Integer(n) if *n >= 1 => crate::algo::Fanout::AtMost(*n as usize),
+                                other => {
+                                    return Err(bad(format!(
+                                        "`fanout` entry {i} is {other:?}; each hop's fanout is a \
+                                         whole number of at least 1, or -1 for every neighbour"
+                                    )))
+                                }
+                            });
+                        }
+                        fanout = Some(parsed);
+                    }
+                    ("fanout", other) => {
+                        return Err(bad(format!(
+                            "`fanout` must be a list with one entry per hop, e.g. [10, 5]; got {other:?}"
+                        )))
+                    }
+                    ("direction", PropertyValue::String(d)) => {
+                        direction = match d.to_ascii_lowercase().as_str() {
+                            "out" | "outgoing" => crate::algo::SampleDirection::Out,
+                            "in" | "incoming" => crate::algo::SampleDirection::In,
+                            "both" | "any" | "undirected" => crate::algo::SampleDirection::Both,
+                            _ => return Err(bad(format!(
+                                "unknown `direction` {d:?}; use 'out', 'in' or 'both'"
+                            ))),
+                        }
+                    }
+                    ("weightProperty", PropertyValue::String(w)) => weight = Some(w.clone()),
+                    ("batchSize", PropertyValue::Integer(n)) if *n >= 1 => batch_size = Some(*n as usize),
+                    ("batchSize", other) => {
+                        return Err(bad(format!("`batchSize` must be at least 1, got {other:?}")))
+                    }
+                    ("seed", PropertyValue::Integer(n)) => seed = *n as u64,
+                    ("label", PropertyValue::String(v)) => label = Some(v.clone()),
+                    ("edgeType", PropertyValue::String(v)) => edge_type = Some(v.clone()),
+                    (k @ ("direction" | "weightProperty" | "seed" | "label" | "edgeType"), other) => {
+                        return Err(bad(format!("`{k}` has the wrong type: {other:?}")))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some(fanouts) = fanout else {
+            return Err(bad(
+                "`fanout` is required: one entry per hop, e.g. {fanout: [10, 5]}".to_string(),
+            ));
+        };
+        if fanouts.is_empty() {
+            return Err(bad("`fanout` is empty; give at least one hop".to_string()));
+        }
+
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), weight.as_deref())?;
+        let mut seeds = Vec::with_capacity(seed_ids.len());
+        for id in seed_ids {
+            let idx = u64::try_from(id).ok().and_then(|raw| view.node_to_index.get(&raw).copied());
+            seeds.push(idx.ok_or_else(|| {
+                ExecutionError::RuntimeError(format!(
+                    "{WHAT}: node {id} is not in the projected graph -- check the \
+                     `label` and `edgeType` filters"
+                ))
+            })?);
+        }
+        let spec = crate::algo::SampleSpec {
+            fanouts,
+            direction,
+            weighted: weight.is_some(),
+            batch_size: batch_size.unwrap_or(seeds.len()),
+            seed,
+        };
+        let rows = crate::algo::sample_neighbours(&view, &seeds, &spec).map_err(|e| match e {
+            crate::algo::SampleError::BadWeight { from, to, weight: w } => bad(format!(
+                "the relationship from node {from} to node {to} has `{}` = {w}; a sampling \
+                 weight must be a finite number of at least 0",
+                weight.as_deref().unwrap_or("weight")
+            )),
+            other => ExecutionError::RuntimeError(format!("{WHAT}: {other:?}")),
+        })?;
+        for r in rows {
+            let mut rec = Record::new();
+            rec.bind("batch".to_string(), Value::Property(PropertyValue::Integer(r.batch as i64)));
+            rec.bind("hop".to_string(), Value::Property(PropertyValue::Integer(r.hop as i64)));
+            self.bind_node(store, &mut rec, "node", r.node);
+            self.bind_node(store, &mut rec, "neighbour", r.neighbour);
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.sample.forestFire`, `.snowball`, `.egoNetwork`, `.randomWalk` and
+    /// `.stratified`: a smaller piece of the graph to train or test on (ML-03,
+    /// #1720). See `samyama_graph_algorithms::subgraph_sampling` for what each
+    /// method does and the rules every sample keeps.
+    ///
+    /// The first argument is the seed node(s): a node id or a list of them.
+    /// Forest fire may omit it and start anywhere; stratified sampling takes
+    /// none. Each option is refused, not clamped, when it is out of range: a
+    /// sample drawn from a silently substituted size is not the one asked for.
+    fn execute_subgraph_sampling(&mut self, store: &GraphStore, method: SubgraphMethod) -> ExecutionResult<()> {
+        use SubgraphMethod::*;
+        const DEFAULT_SEED: u64 = 42;
+        let (name, keys): (&str, &[&str]) = match method {
+            ForestFire => ("sample.forestFire", &["direction", "edgeType", "forwardProbability", "label", "seed", "size"]),
+            Snowball => ("sample.snowball", &["direction", "edgeType", "hops", "label", "maxNodes", "perNode", "seed"]),
+            EgoNetwork => ("sample.egoNetwork", &["direction", "edgeType", "hops", "label"]),
+            RandomWalk => (
+                "sample.randomWalk",
+                &["direction", "edgeType", "label", "maxSteps", "restartProbability", "seed", "size"],
+            ),
+            Stratified => ("sample.stratified", &["fraction", "perStratum", "seed"]),
+        };
+        Self::reject_unknown_config_keys(&self.args, name, keys)?;
+        let what = format!("algo.{name}()");
+        let bad = |msg: String| ExecutionError::bad_argument(format!("{what}: {msg}"));
+
+        let empty = HashMap::new();
+        let config = self
+            .args
+            .iter()
+            .find_map(|a| match a {
+                Expression::Literal(PropertyValue::Map(m)) => Some(m),
+                _ => None,
+            })
+            .unwrap_or(&empty);
+        let int = |key: &str, min: i64| -> ExecutionResult<Option<i64>> {
+            match config.get(key) {
+                None => Ok(None),
+                Some(PropertyValue::Integer(n)) if *n >= min => Ok(Some(*n)),
+                Some(other) => Err(bad(format!("`{key}` must be a whole number of at least {min}, got {other:?}"))),
+            }
+        };
+        let probability = |key: &str, default: f64| -> ExecutionResult<f64> {
+            let p = match config.get(key) {
+                None => return Ok(default),
+                Some(PropertyValue::Float(f)) => *f,
+                Some(PropertyValue::Integer(n)) => *n as f64,
+                Some(other) => return Err(bad(format!("`{key}` must be a number between 0 and 1, got {other:?}"))),
+            };
+            if (0.0..=1.0).contains(&p) {
+                Ok(p)
+            } else {
+                Err(bad(format!("`{key}` must be between 0 and 1, got {p}")))
+            }
+        };
+        let text = |key: &str| -> ExecutionResult<Option<String>> {
+            match config.get(key) {
+                None => Ok(None),
+                Some(PropertyValue::String(v)) => Ok(Some(v.clone())),
+                Some(other) => Err(bad(format!("`{key}` must be a string, got {other:?}"))),
+            }
+        };
+        let seed = match config.get("seed") {
+            None => DEFAULT_SEED,
+            Some(PropertyValue::Integer(n)) => *n as u64,
+            Some(other) => return Err(bad(format!("`seed` must be a whole number, got {other:?}"))),
+        };
+
+        // The seed nodes: a node id or a list of them, as the first argument.
+        let seed_ids: Option<Vec<i64>> = match self.args.first() {
+            Some(Expression::Literal(PropertyValue::Integer(n))) => Some(vec![*n]),
+            Some(Expression::Literal(PropertyValue::Array(items))) => Some(
+                items
+                    .iter()
+                    .map(|v| match v {
+                        PropertyValue::Integer(n) => Ok(*n),
+                        other => Err(bad(format!("every seed must be a node id, got {other:?}"))),
+                    })
+                    .collect::<ExecutionResult<_>>()?,
+            ),
+            _ => None,
+        };
+
+        if method == Stratified {
+            if seed_ids.is_some() {
+                return Err(bad("stratified sampling draws from every node and takes no seed nodes".to_string()));
+            }
+            let allocation = match (config.get("fraction"), int("perStratum", 1)?) {
+                (Some(_), Some(_)) => return Err(bad("give `fraction` or `perStratum`, not both".to_string())),
+                (None, Some(k)) => crate::algo::StratumAllocation::PerStratum(k as usize),
+                (Some(PropertyValue::Float(f)), None) if *f > 0.0 && *f <= 1.0 => {
+                    crate::algo::StratumAllocation::Fraction(*f)
+                }
+                (Some(PropertyValue::Integer(1)), None) => crate::algo::StratumAllocation::Fraction(1.0),
+                (Some(other), None) => {
+                    return Err(bad(format!("`fraction` must be above 0 and at most 1, got {other:?}")))
+                }
+                (None, None) => {
+                    return Err(bad(
+                        "say how much of each label group to take: `fraction` (e.g. 0.1) or `perStratum` (e.g. 100)"
+                            .to_string(),
+                    ))
+                }
+            };
+            // A node's stratum is its set of labels, sorted and joined, so
+            // every node is in exactly one; an unlabelled node is in "".
+            let population: Vec<(u64, String)> = store
+                .all_nodes()
+                .into_iter()
+                .map(|n| {
+                    let mut labels: Vec<&str> = n.labels.iter().map(|l| l.as_str()).collect();
+                    labels.sort_unstable();
+                    (n.id.as_u64(), labels.join(":"))
+                })
+                .collect();
+            for (id, stratum) in crate::algo::stratified(&population, allocation, seed) {
+                let mut rec = Record::new();
+                self.bind_node(store, &mut rec, "node", id);
+                rec.bind("stratum".to_string(), Value::Property(PropertyValue::String(stratum)));
+                self.results.push(rec);
+            }
+            return Ok(());
+        }
+
+        let seed_ids = match (seed_ids, method) {
+            (Some(ids), _) if ids.is_empty() => return Err(bad("the list of seed nodes is empty".to_string())),
+            (Some(ids), _) => ids,
+            (None, ForestFire) => Vec::new(),
+            (None, _) => {
+                return Err(bad(format!(
+                    "the first argument must be a seed node id or a list of them, e.g. algo.{name}([1, 2], {{...}})"
+                )))
+            }
+        };
+        let direction = match text("direction")?.map(|d| d.to_ascii_lowercase()).as_deref() {
+            None | Some("out") | Some("outgoing") => crate::algo::SampleDirection::Out,
+            Some("in") | Some("incoming") => crate::algo::SampleDirection::In,
+            Some("both") | Some("any") | Some("undirected") => crate::algo::SampleDirection::Both,
+            Some(d) => return Err(bad(format!("unknown `direction` {d:?}; use 'out', 'in' or 'both'"))),
+        };
+        let (label, edge_type) = (text("label")?, text("edgeType")?);
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
+        let mut seeds = Vec::with_capacity(seed_ids.len());
+        for id in seed_ids {
+            let idx = u64::try_from(id).ok().and_then(|raw| view.node_to_index.get(&raw).copied());
+            seeds.push(idx.ok_or_else(|| {
+                ExecutionError::RuntimeError(format!(
+                    "{what}: node {id} is not in the projected graph -- check the `label` and `edgeType` filters"
+                ))
+            })?);
+        }
+        // The sample size, for the two methods that take one.
+        let size = |view_nodes: usize| -> ExecutionResult<usize> {
+            let Some(n) = int("size", 1)? else {
+                return Err(bad("`size` is required: how many nodes the sample should hold".to_string()));
+            };
+            if n as usize > view_nodes {
+                return Err(bad(format!(
+                    "`size` is {n}, and the projected graph has only {view_nodes} nodes"
+                )));
+            }
+            Ok(n as usize)
+        };
+
+        let (column, rows): (&str, Vec<(u64, i64)>) = match method {
+            ForestFire => {
+                let n = size(view.node_count)?;
+                let p = probability("forwardProbability", 0.7)?;
+                let order = crate::algo::forest_fire(&view, &seeds, n, p, direction, seed);
+                ("position", order.into_iter().enumerate().map(|(i, id)| (id, i as i64)).collect())
+            }
+            RandomWalk => {
+                let n = size(view.node_count)?;
+                let p = probability("restartProbability", 0.15)?;
+                let max_steps = int("maxSteps", 1)?.map_or(n.saturating_mul(100), |m| m as usize);
+                let order = crate::algo::random_walk_sample(&view, &seeds, n, p, max_steps, direction, seed);
+                ("position", order.into_iter().enumerate().map(|(i, id)| (id, i as i64)).collect())
+            }
+            Snowball => {
+                let hops = int("hops", 1)?.unwrap_or(2) as usize;
+                let per_node = match config.get("perNode") {
+                    None | Some(PropertyValue::Integer(-1)) => crate::algo::Fanout::All,
+                    Some(PropertyValue::Integer(k)) if *k >= 1 => crate::algo::Fanout::AtMost(*k as usize),
+                    Some(other) => {
+                        return Err(bad(format!(
+                            "`perNode` must be at least 1, or -1 for every neighbour; got {other:?}"
+                        )))
+                    }
+                };
+                let max_nodes = int("maxNodes", 1)?.map(|m| m as usize);
+                let got = crate::algo::snowball(&view, &seeds, hops, per_node, max_nodes, direction, seed);
+                ("hop", got.into_iter().map(|(id, h)| (id, h as i64)).collect())
+            }
+            EgoNetwork => {
+                let hops = int("hops", 0)?.unwrap_or(1) as usize;
+                let got = crate::algo::ego_network(&view, &seeds, hops, direction);
+                ("distance", got.into_iter().map(|(id, d)| (id, d as i64)).collect())
+            }
+            Stratified => unreachable!("answered above"),
+        };
+        for (id, n) in rows {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            rec.bind(column.to_string(), Value::Property(PropertyValue::Integer(n)));
             self.results.push(rec);
         }
         Ok(())
@@ -21822,9 +22348,14 @@ impl AlgorithmOperator {
     /// The cheapest path from `source` to `target` whose `resourceProperty`
     /// adds up to at most `maxResource`. Cost is `costProperty`, or one per
     /// relationship (hops) without it. Exact: see
-    /// `samyama_graph_algorithms::constrained_path`. One row, `path` (node
-    /// ids), `cost` and `resource`; no row when no path is within the limit,
-    /// as `weightedPath` gives none when there is no path.
+    /// `samyama_graph_algorithms::constrained_path`.
+    ///
+    /// Always one row: `path` (node ids), `cost` and `resource`, and the
+    /// result envelope every solve carries (OPT-09, #2265) -- `objective`
+    /// (the cost), `feasible`, `gap` (0: the search is exact),
+    /// `iterations` (partial paths expanded) and `total_time_ms`. When no
+    /// path is within the limit the row says `feasible: false`, with the
+    /// path, its totals, `objective` and `gap` null.
     fn execute_constrained_shortest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         let call = "algo.or.constrainedShortestPath";
         Self::reject_unknown_config_keys(
@@ -21891,7 +22422,8 @@ impl AlgorithmOperator {
         }
         let resource_per_edge = resources.weights.as_deref().unwrap_or(&[]);
 
-        let found = crate::algo::constrained_shortest_path(
+        let started = std::time::Instant::now();
+        let searched = crate::algo::constrained_shortest_path_search(
             &costs,
             resource_per_edge,
             source,
@@ -21913,18 +22445,49 @@ impl AlgorithmOperator {
             other => ExecutionError::bad_argument(format!("{call}: {other}")),
         })?;
 
-        if let Some(found) = found {
-            let mut record = Record::new();
-            record.bind(
-                "path".to_string(),
-                Value::Property(PropertyValue::Array(
-                    found.path.iter().map(|&n| PropertyValue::Integer(n as i64)).collect(),
-                )),
-            );
-            record.bind("cost".to_string(), Value::Property(PropertyValue::Float(found.cost)));
-            record.bind("resource".to_string(), Value::Property(PropertyValue::Float(found.resource)));
-            self.results.push(record);
+        let total_time_ms = duration_ms(started.elapsed());
+
+        // Always one row, with the result envelope (OPT-09, #2265): a search
+        // that finds nothing within the limit says so with `feasible: false`
+        // rather than an empty result, which cannot say why it is empty.
+        let mut record = Record::new();
+        let float = |v: f64| Value::Property(PropertyValue::Float(v));
+        let null = || Value::Property(PropertyValue::Null);
+        match &searched.found {
+            Some(found) => {
+                record.bind(
+                    "path".to_string(),
+                    Value::Property(PropertyValue::Array(
+                        found.path.iter().map(|&n| PropertyValue::Integer(n as i64)).collect(),
+                    )),
+                );
+                record.bind("cost".to_string(), float(found.cost));
+                record.bind("resource".to_string(), float(found.resource));
+                // Exact: the path is the cheapest within the limit, proven by
+                // the search, so its gap to the optimum is 0.
+                Self::bind_result_envelope(
+                    &mut record,
+                    float(found.cost),
+                    Value::Property(PropertyValue::Boolean(true)),
+                    float(0.0),
+                    total_time_ms,
+                );
+            }
+            None => {
+                for column in ["path", "cost", "resource"] {
+                    record.bind(column.to_string(), null());
+                }
+                Self::bind_result_envelope(
+                    &mut record,
+                    null(),
+                    Value::Property(PropertyValue::Boolean(false)),
+                    null(),
+                    total_time_ms,
+                );
+            }
         }
+        record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(searched.expanded as i64)));
+        self.results.push(record);
         Ok(())
     }
 
@@ -22061,6 +22624,49 @@ impl AlgorithmOperator {
         record.bind("total_time_ms".to_string(), Value::Property(PropertyValue::Float(total_time_ms)));
     }
 
+    /// `or.solve`'s time and evaluation limits (OPT-11, #1798): `timeBudgetMs`
+    /// and `maxEvaluations`, each a whole number of at least 1 when present.
+    /// 0 is refused rather than read as "no limit" or "stop at once", as
+    /// `/optimize/solve` refuses it: either reading would be a guess.
+    fn or_solve_run_budget(
+        config_map: &HashMap<String, PropertyValue>,
+    ) -> ExecutionResult<Budget> {
+        let limit = |a: &str, b: &str| -> ExecutionResult<Option<u64>> {
+            match config_map.get(a).map(|v| (a, v)).or_else(|| config_map.get(b).map(|v| (b, v))) {
+                None => Ok(None),
+                Some((_, PropertyValue::Integer(n))) if *n >= 1 => Ok(Some(*n as u64)),
+                Some((key, other)) => Err(ExecutionError::bad_argument(format!(
+                    "or.solve: `{key}` must be a whole number of at least 1, got {other:?}; \
+                     leave it out for no limit"
+                ))),
+            }
+        };
+        Ok(Budget {
+            time: limit("timeBudgetMs", "time_budget_ms")?.map(std::time::Duration::from_millis),
+            evaluations: limit("maxEvaluations", "max_evaluations")?,
+        })
+    }
+
+    /// What a solve used of its budget: `evaluations` made and `stopped_by`,
+    /// `iterations` when it ran every iteration, else the limit that ended it
+    /// (`time_budget` or `evaluation_budget`) -- the names `/optimize/solve`
+    /// reports.
+    fn bind_run_budget_use<P>(record: &mut Record, problem: &Budgeted<P>) {
+        record.bind(
+            "evaluations".to_string(),
+            Value::Property(PropertyValue::Integer(problem.evaluations() as i64)),
+        );
+        let stopped_by = match problem.stop_reason() {
+            StopReason::Iterations => "iterations",
+            StopReason::TimeBudget => "time_budget",
+            StopReason::EvaluationBudget => "evaluation_budget",
+        };
+        record.bind(
+            "stopped_by".to_string(),
+            Value::Property(PropertyValue::String(stopped_by.to_string())),
+        );
+    }
+
     fn execute_or_solve(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
         if self.args.is_empty() {
              return Err(ExecutionError::bad_argument("algo.or.solve requires a config map".to_string()));
@@ -22079,10 +22685,10 @@ impl AlgorithmOperator {
         Self::reject_unknown_config_keys(&self.args, "or.solve", &[
             "algorithm", "bestKnown", "best_known", "budget", "constraintHandling",
             "constraint_handling", "costProperties", "costProperty",
-            "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
-            "max_iterations",
+            "cost_properties", "cost_property", "label", "lowerBound", "max", "maxEvaluations",
+            "maxIterations", "max_evaluations", "max_iterations",
             "minTotal", "min", "min_total", "populationSize", "population_size",
-            "property", "seed", "upperBound",
+            "property", "seed", "timeBudgetMs", "time_budget_ms", "upperBound",
         ])?;
         let algorithm = config_map.get("algorithm").and_then(|v| v.as_string()).unwrap_or("Jaya");
         if !Self::is_known_solver(algorithm) {
@@ -22192,6 +22798,11 @@ impl AlgorithmOperator {
                 )))
             }
         };
+        // A time or evaluation limit on the solve (OPT-11, #1798), the two
+        // `/optimize/solve` takes. `budget` above is the cost constraint, so
+        // these have their own names. Either stops the solver between
+        // iterations with the best answer so far; `stopped_by` says which.
+        let run_budget = Self::or_solve_run_budget(config_map)?;
         macro_rules! solve_with_seed {
             ($solver:expr, $problem:expr) => {
                 match seed {
@@ -22256,6 +22867,8 @@ impl AlgorithmOperator {
         // the point actually evaluated: the repaired one under `repair`.
         let problem = Constrained::new(problem, constraint_handling)
             .map_err(|e| ExecutionError::bad_argument(format!("or.solve: {e}")))?;
+        // Counts evaluations and stops the solver once `run_budget` is spent.
+        let problem = Budgeted::new(problem, run_budget);
 
         let solver_config = SolverConfig {
             population_size: pop_size,
@@ -22285,7 +22898,7 @@ impl AlgorithmOperator {
 
             // Write back first individual from Pareto Front: the point it was
             // scored at, which `repair` may have moved.
-            let resolved = res.pareto_front.first().map(|best| problem.resolve_multi(&best.variables));
+            let resolved = res.pareto_front.first().map(|best| problem.inner().resolve_multi(&best.variables));
             if let Some(best) = &resolved {
                 for (i, &val) in best.iter().enumerate() {
                     let node_id = node_ids[i];
@@ -22320,19 +22933,24 @@ impl AlgorithmOperator {
             let (objective, feasible) = match &resolved {
                 Some(best) => (
                     Value::Property(PropertyValue::Array(
-                        MultiObjectiveProblem::objectives(problem.inner(), best)
+                        MultiObjectiveProblem::objectives(problem.inner().inner(), best)
                             .into_iter()
                             .map(PropertyValue::Float)
                             .collect(),
                     )),
                     Value::Property(PropertyValue::Boolean(is_feasible(Problem::penalty(
-                        problem.inner(),
+                        problem.inner().inner(),
                         best,
                     )))),
                 ),
                 None => (Value::Null, Value::Null),
             };
             Self::bind_result_envelope(&mut record, objective, feasible, Value::Null, total_time_ms);
+            // Iterations run and the cap, as the single-objective row has them
+            // (OPT-09, #2265): `history` holds one entry per iteration here too.
+            record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(res.history.len() as i64)));
+            record.bind("max_iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
+            Self::bind_run_budget_use(&mut record, &problem);
             self.results.push(record);
 
         } else {
@@ -22390,7 +23008,7 @@ impl AlgorithmOperator {
 
             // 4. Write back results: the point the answer was scored at, which
             // `repair` may have moved (OPT-10).
-            let best_variables = problem.resolve(&result.best_variables);
+            let best_variables = problem.inner().resolve(&result.best_variables);
             for (i, &val) in best_variables.iter().enumerate() {
                 let node_id = node_ids[i];
                 store
@@ -22433,8 +23051,8 @@ impl AlgorithmOperator {
             // The result envelope (OPT-09, #1776). `fitness` is objective plus
             // penalty, so on its own it cannot say whether the answer obeys the
             // budget and minimum: these columns separate the two.
-            let objective = Problem::objective(problem.inner(), &best_variables);
-            let feasible = is_feasible(Problem::penalty(problem.inner(), &best_variables));
+            let objective = Problem::objective(problem.inner().inner(), &best_variables);
+            let feasible = is_feasible(Problem::penalty(problem.inner().inner(), &best_variables));
             let gap = match best_known {
                 Some(best) => Value::Property(PropertyValue::Float(gap_to_best_known(objective, best))),
                 None => Value::Null,
@@ -22446,6 +23064,7 @@ impl AlgorithmOperator {
                 gap,
                 total_time_ms,
             );
+            Self::bind_run_budget_use(&mut record, &problem);
 
             self.results.push(record);
         }
@@ -22793,6 +23412,23 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "sample.neighbors" | "sample.neighbours" | "sampleneighbors" | "sampleneighbours"
+                | "neighboursampling" | "neighborsampling" => self.execute_neighbour_sampling(store)?,
+                "sample.forestfire" | "forestfire" | "forestfiresample" | "forestfiresampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::ForestFire)?
+                }
+                "sample.snowball" | "snowball" | "snowballsample" | "snowballsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Snowball)?
+                }
+                "sample.egonetwork" | "egonetwork" | "ego" | "egograph" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::EgoNetwork)?
+                }
+                "sample.randomwalk" | "randomwalksample" | "randomwalksampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::RandomWalk)?
+                }
+                "sample.stratified" | "stratifiedsample" | "stratifiedsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Stratified)?
+                }
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
@@ -22905,6 +23541,23 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "sample.neighbors" | "sample.neighbours" | "sampleneighbors" | "sampleneighbours"
+                | "neighboursampling" | "neighborsampling" => self.execute_neighbour_sampling(store)?,
+                "sample.forestfire" | "forestfire" | "forestfiresample" | "forestfiresampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::ForestFire)?
+                }
+                "sample.snowball" | "snowball" | "snowballsample" | "snowballsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Snowball)?
+                }
+                "sample.egonetwork" | "egonetwork" | "ego" | "egograph" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::EgoNetwork)?
+                }
+                "sample.randomwalk" | "randomwalksample" | "randomwalksampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::RandomWalk)?
+                }
+                "sample.stratified" | "stratifiedsample" | "stratifiedsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Stratified)?
+                }
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
