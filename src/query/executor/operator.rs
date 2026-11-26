@@ -12269,6 +12269,26 @@ impl AggregatorState {
     }
 }
 
+/// Rows an aggregate pulls from its input at a time (#2274).
+///
+/// An aggregate keeps only its group table; what it holds of its *input* is
+/// the one batch it is folding. That batch was 65,536 rows, which made the
+/// batch, not the aggregate, the peak: `MATCH (a:P)-[:R]->(b) RETURN count(b)`
+/// returned one row and peaked at 13.9 MB on 300,000 edges, which is 65,536
+/// records at about 212 bytes each, and the 2- and 3-hop counts at 20.4 and
+/// 25.0 MB as the records widened (`docs/QUERY-MEMORY.md`, finding 3). The
+/// 3-hop count folds 2.7 million rows, so a peak of 25 MB was never the whole
+/// expansion; it was one batch of it.
+///
+/// 4,096 rows bounds that batch at about 0.9 MB for the 1-hop count and
+/// 1.6 MB for the 3-hop, whatever the row count, and is still large enough
+/// that the per-batch costs -- a
+/// `Vec`, a call through the operator tree, the parallel record build in a
+/// scan, which starts at 1,024 rows -- stay amortised. The deadline is checked
+/// every ten batches, so it is now checked every 40,960 rows rather than every
+/// 655,360.
+const AGGREGATE_BATCH_ROWS: usize = 4096;
+
 /// Aggregate operator: GROUP BY + Aggregations
 pub struct AggregateOperator {
     input: OperatorBox,
@@ -12666,7 +12686,7 @@ impl AggregateOperator {
         let mut groups: rustc_hash::FxHashMap<IdentityKey, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::default();
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12774,7 +12794,7 @@ impl AggregateOperator {
         // Probing first means the allocation happens once per group.
         let mut scratch: Vec<Value> = Vec::with_capacity(self.group_by.len());
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12837,7 +12857,7 @@ impl AggregateOperator {
 
         let all_simple_count = Self::all_simple_count(&self.aggregates);
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12894,7 +12914,7 @@ impl AggregateOperator {
         let mut readers: Vec<RowReader> =
             self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -26435,7 +26455,7 @@ impl WithBarrierOperator {
             // Aggregation path: group by non-aggregate items
             let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
 
-            let batch_size = 65536;
+            let batch_size = AGGREGATE_BATCH_ROWS;
             while let Some(batch) = self.input.next_batch(store, batch_size)? {
                 for record in batch.records {
                     let mut key = Vec::new();
