@@ -1292,6 +1292,27 @@ paths:
                     type: integer
                   declined:
                     type: integer
+                  llm_calls:
+                    type: integer
+                    description: Model calls this request made, failed ones included (AI-15).
+                  usage:
+                    type: object
+                    description: >
+                      Tokens across those calls. A count is null when any call left
+                      it unknown, rather than a smaller partial sum.
+                    properties:
+                      prompt_tokens: {type: integer, nullable: true}
+                      completion_tokens: {type: integer, nullable: true}
+                      total_tokens: {type: integer, nullable: true}
+                  llm_latency_ms:
+                    type: number
+                    description: Time spent in those calls, in milliseconds.
+                  cost_usd:
+                    type: number
+                    nullable: true
+                    description: Dollars across those calls, priced as `/api/nlq` prices; null when unknown.
+                  model:
+                    type: string
         '400':
           description: Query or enrichment error
           content:
@@ -1391,6 +1412,17 @@ paths:
                     description: >
                       Wall-clock time of the model call alone, in milliseconds;
                       the schema summary and safety check are not included.
+                  cost_usd:
+                    type: number
+                    nullable: true
+                    description: >
+                      Dollars, from the model's prices in `NLQ_PRICES` (per million
+                      input and output tokens). Null when the model is not listed or
+                      the provider reported no token counts; 0 for a cached
+                      translation, which made no call (AI-15).
+                  model:
+                    type: string
+                    description: The model the call was priced for.
         '400':
           description: NLQ disabled or generation error
           content:
