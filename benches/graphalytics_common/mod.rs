@@ -29,6 +29,7 @@ pub struct LoadedGraph {
 }
 
 /// Algorithm parameters parsed from a `.properties` file.
+#[derive(Default)]
 pub struct DatasetProperties {
     pub directed: Option<bool>,
     pub bfs_source: Option<u64>,
@@ -46,21 +47,6 @@ pub struct DatasetProperties {
     pub algorithms: Option<Vec<String>>,
 }
 
-impl Default for DatasetProperties {
-    fn default() -> Self {
-        Self {
-            directed: None,
-            bfs_source: None,
-            sssp_source: None,
-            pr_damping: None,
-            pr_iterations: None,
-            cdlp_max_iterations: None,
-            vertices: None,
-            edges: None,
-            algorithms: None,
-        }
-    }
-}
 
 /// Parse a Graphalytics `.properties` file for algorithm parameters.
 pub fn parse_properties(path: &Path) -> DatasetProperties {

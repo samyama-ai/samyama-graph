@@ -308,7 +308,9 @@ fn main() {
         let load_time = load_start.elapsed();
 
         println!(
-            "  Loaded: {} vertices, {} edges in {}",
+            "  Loaded {} ({}): {} vertices, {} edges in {}",
+            loaded.info.name,
+            if loaded.info.directed { "directed" } else { "undirected" },
             format_num(loaded.info.vertex_count),
             format_num(loaded.info.edge_count),
             format_duration(load_time),
@@ -384,13 +386,15 @@ fn main() {
         println!("  SUMMARY");
         println!("================================================================");
         println!();
+        let row = ["Dataset", "Algo", "Vertices", "Time", "Valid", "Result"];
         println!(
             "  {:>20} {:>6} {:>10} {:>12}  {:>6}  {}",
-            "Dataset", "Algo", "Vertices", "Time", "Valid", "Result"
+            row[0], row[1], row[2], row[3], row[4], row[5]
         );
+        let row = ["-------", "----", "--------", "----", "-----", "------"];
         println!(
             "  {:>20} {:>6} {:>10} {:>12}  {:>6}  {}",
-            "-------", "----", "--------", "----", "-----", "------"
+            row[0], row[1], row[2], row[3], row[4], row[5]
         );
         for r in &results {
             let valid_str = if r.validated {
@@ -859,7 +863,7 @@ fn validate_wcc(
     let mut all_match = true;
     let mut mismatches = 0;
 
-    for (_label, group) in &expected_groups {
+    for group in expected_groups.values() {
         if group.len() < 2 {
             continue;
         }
