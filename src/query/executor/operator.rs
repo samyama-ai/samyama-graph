@@ -75,6 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
+use samyama_optimization::budget::{Budget, Budgeted, StopReason};
 use samyama_optimization::constraints::{Constrained, ConstraintHandling};
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, CMAESSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
@@ -12268,6 +12269,26 @@ impl AggregatorState {
     }
 }
 
+/// Rows an aggregate pulls from its input at a time (#2274).
+///
+/// An aggregate keeps only its group table; what it holds of its *input* is
+/// the one batch it is folding. That batch was 65,536 rows, which made the
+/// batch, not the aggregate, the peak: `MATCH (a:P)-[:R]->(b) RETURN count(b)`
+/// returned one row and peaked at 13.9 MB on 300,000 edges, which is 65,536
+/// records at about 212 bytes each, and the 2- and 3-hop counts at 20.4 and
+/// 25.0 MB as the records widened (`docs/QUERY-MEMORY.md`, finding 3). The
+/// 3-hop count folds 2.7 million rows, so a peak of 25 MB was never the whole
+/// expansion; it was one batch of it.
+///
+/// 4,096 rows bounds that batch at about 0.9 MB for the 1-hop count and
+/// 1.6 MB for the 3-hop, whatever the row count, and is still large enough
+/// that the per-batch costs -- a
+/// `Vec`, a call through the operator tree, the parallel record build in a
+/// scan, which starts at 1,024 rows -- stay amortised. The deadline is checked
+/// every ten batches, so it is now checked every 40,960 rows rather than every
+/// 655,360.
+const AGGREGATE_BATCH_ROWS: usize = 4096;
+
 /// Aggregate operator: GROUP BY + Aggregations
 pub struct AggregateOperator {
     input: OperatorBox,
@@ -12665,7 +12686,7 @@ impl AggregateOperator {
         let mut groups: rustc_hash::FxHashMap<IdentityKey, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::default();
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12773,7 +12794,7 @@ impl AggregateOperator {
         // Probing first means the allocation happens once per group.
         let mut scratch: Vec<Value> = Vec::with_capacity(self.group_by.len());
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12836,7 +12857,7 @@ impl AggregateOperator {
 
         let all_simple_count = Self::all_simple_count(&self.aggregates);
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12893,7 +12914,7 @@ impl AggregateOperator {
         let mut readers: Vec<RowReader> =
             self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -18853,6 +18874,70 @@ impl AlgorithmOperator {
     /// `CALL algo.pageRank({graph: 'social'})`.
     pub const GRAPH_KEY: &'static str = "graph";
 
+    /// The config key that keeps an algorithm's state with the graph between
+    /// calls and updates it from what was added (ALGO-14, #1697):
+    /// `CALL algo.pageRank({incremental: true})`. Read by `algo.pageRank`,
+    /// `algo.wcc` and `algo.degree`; see `crate::algo::incremental`.
+    pub const INCREMENTAL_KEY: &'static str = "incremental";
+
+    /// Whether this call asked for `incremental: true`.
+    ///
+    /// The value must be a boolean: `incremental: 'yes'` is refused rather
+    /// than read as false and run from scratch, which would look like it
+    /// worked. A projection is refused alongside it: a projection is fixed
+    /// when it is made, and the incremental state follows the live graph, so
+    /// the two would answer about different graphs.
+    fn incremental_requested(&self) -> ExecutionResult<bool> {
+        let mut on = false;
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                match m.get(Self::INCREMENTAL_KEY) {
+                    None => {}
+                    Some(PropertyValue::Boolean(b)) => on = *b,
+                    Some(other) => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "{}: `{}` must be true or false, got {other:?}",
+                            self.name,
+                            Self::INCREMENTAL_KEY
+                        )))
+                    }
+                }
+            }
+        }
+        if on && Self::config_has_key(&self.args, Self::GRAPH_KEY) {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: `{}` follows the live graph and a graph projection is fixed when it \
+                 is made, so `{}` and `{}` cannot be given together",
+                self.name,
+                Self::INCREMENTAL_KEY,
+                Self::INCREMENTAL_KEY,
+                Self::GRAPH_KEY
+            )));
+        }
+        Ok(on)
+    }
+
+    /// The query error for a failed incremental call, worded as the plain
+    /// call's errors are: a deadline stop is still `Query timed out`.
+    fn incremental_failed(&self, e: crate::algo::incremental::IncrementalError) -> ExecutionError {
+        use crate::algo::incremental::IncrementalError as E;
+        match e {
+            E::ViewStopped(s) => ExecutionError::RuntimeError(format!(
+                "Query timed out: {} stopped building its graph view after {} of {} nodes",
+                self.name, s.done, s.total
+            )),
+            E::RunStopped(s) => ExecutionError::RuntimeError(format!(
+                "Query timed out: {} stopped after {} of {} sweeps",
+                self.name, s.done, s.total
+            )),
+            E::Damping(d) => ExecutionError::bad_argument(format!(
+                "{}: with `{}: true`, damping must be above 0 and below 1, got {d}",
+                self.name,
+                Self::INCREMENTAL_KEY
+            )),
+        }
+    }
+
     /// Algorithms that cannot run on a projection, and why. A projection keeps
     /// topology and one weight; these read more of the graph than that, or no
     /// graph view at all. Matched on the canonical name.
@@ -19253,7 +19338,17 @@ impl AlgorithmOperator {
     }
 
     fn execute_pagerank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "pageRank", &["damping", "iterations"])?;
+        Self::reject_unknown_config_keys(&self.args, "pageRank", &["damping", "incremental", "iterations"])?;
+        let incremental = self.incremental_requested()?;
+        if incremental && Self::config_has_key(&self.args, "iterations") {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: `iterations` has no meaning with `{}: true`, which updates its scores \
+                 until every residual is below {} rather than for a number of iterations",
+                self.name,
+                Self::INCREMENTAL_KEY,
+                crate::algo::RESIDUAL_TOLERANCE
+            )));
+        }
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
         let mut edge_type = None;
@@ -19282,11 +19377,32 @@ impl AlgorithmOperator {
             }
         }
 
+        if incremental {
+            let (scores, _) = crate::algo::incremental::page_rank(
+                store,
+                label.as_deref(),
+                edge_type.as_deref(),
+                config.damping_factor,
+                &DeadlineProgress,
+                &DeadlineProgress,
+            )
+            .map_err(|e| self.incremental_failed(e))?;
+            return self.push_pagerank_rows(store, scores);
+        }
+
         // Build view and run
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         let scores = crate::algo::page_rank_with(&view, config, &DeadlineProgress)
             .map_err(|stopped| algorithm_timed_out("algo.pageRank", stopped))?;
+        self.push_pagerank_rows(store, scores)
+    }
 
+    /// One `(node, score)` row per scored node, highest score first.
+    fn push_pagerank_rows(
+        &mut self,
+        store: &GraphStore,
+        scores: impl IntoIterator<Item = (u64, f64)>,
+    ) -> ExecutionResult<()> {
         // Convert to records. One per node, with a copy of the node, so on a
         // large graph this is not free either: checked like the iterations.
         for (i, (algo_id, score)) in scores.into_iter().enumerate() {
@@ -19372,7 +19488,7 @@ impl AlgorithmOperator {
         // and reported success -- the silent drop `reject_unknown_config_keys`
         // exists to refuse. The filters are read from the map as well as
         // positionally, as the centrality procedures read them.
-        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label"])?;
+        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "incremental", "label"])?;
         // Arguments: (label?, edge_type?) or ({label, edgeType})
         let mut label = None;
         let mut edge_type = None;
@@ -19398,13 +19514,26 @@ impl AlgorithmOperator {
             }
         }
 
+        if self.incremental_requested()? {
+            let (components, _) =
+                crate::algo::incremental::wcc(store, label.as_deref(), edge_type.as_deref(), &DeadlineProgress)
+                    .map_err(|e| self.incremental_failed(e))?;
+            return self.push_component_rows(store, components);
+        }
+
         // Build view and run WCC
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         let result = crate::algo::weakly_connected_components(&view);
+        self.push_component_rows(store, result.node_component)
+    }
 
-        // Convert to records
-        // For WCC, we return (node, componentId)
-        for (node_id, component_id) in result.node_component {
+    /// One `(node, componentId)` row per node, by component then node id.
+    fn push_component_rows(
+        &mut self,
+        store: &GraphStore,
+        components: impl IntoIterator<Item = (u64, usize)>,
+    ) -> ExecutionResult<()> {
+        for (node_id, component_id) in components {
             let nid = NodeId::new(node_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(nid) {
@@ -19696,7 +19825,15 @@ impl AlgorithmOperator {
         store: &GraphStore,
         which: Centrality,
     ) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "undirected"])?;
+        // Only degree has an incremental form: the others' scores depend on
+        // paths through the whole graph, which one new relationship can change
+        // anywhere.
+        let keys: &[&str] = match which {
+            Centrality::Degree => &["edgeType", "incremental", "label", "undirected"],
+            _ => &["edgeType", "label", "undirected"],
+        };
+        Self::reject_unknown_config_keys(&self.args, &self.name, keys)?;
+        let incremental = self.incremental_requested()?;
         let (mut label, mut edge_type, mut undirected) = (None, None, None);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19717,6 +19854,17 @@ impl AlgorithmOperator {
             if let Some(Expression::Literal(PropertyValue::String(s))) = self.args.first() {
                 label = Some(s.clone());
             }
+        }
+        if incremental {
+            // `undirected` is accepted and, as in the plain call, changes
+            // nothing: degree is in plus out either way.
+            let (mut scores, _) =
+                crate::algo::incremental::degree(store, label.as_deref(), edge_type.as_deref(), &DeadlineProgress)
+                    .map_err(|e| self.incremental_failed(e))?;
+            // `ranked`'s order: score descending, then node id.
+            scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+            self.push_centrality_rows(store, scores);
+            return Ok(());
         }
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         // Undirected by default: centrality on a social or dependency graph is
@@ -19748,7 +19896,13 @@ impl AlgorithmOperator {
                 })?
             }
         };
-        for (node_id, score) in crate::algo::ranked(&view, &scores) {
+        self.push_centrality_rows(store, crate::algo::ranked(&view, &scores));
+        Ok(())
+    }
+
+    /// One `(node, score)` row per entry, in the order given.
+    fn push_centrality_rows(&mut self, store: &GraphStore, ranked: Vec<(u64, f64)>) {
+        for (node_id, score) in ranked {
             let mut record = Record::new();
             let nid = NodeId::new(node_id);
             match store.get_node(nid) {
@@ -19758,7 +19912,6 @@ impl AlgorithmOperator {
             record.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
             self.results.push(record);
         }
-        Ok(())
     }
 
     /// `algo.jaccard({limit: 10})` and friends.
@@ -22491,6 +22644,49 @@ impl AlgorithmOperator {
         record.bind("total_time_ms".to_string(), Value::Property(PropertyValue::Float(total_time_ms)));
     }
 
+    /// `or.solve`'s time and evaluation limits (OPT-11, #1798): `timeBudgetMs`
+    /// and `maxEvaluations`, each a whole number of at least 1 when present.
+    /// 0 is refused rather than read as "no limit" or "stop at once", as
+    /// `/optimize/solve` refuses it: either reading would be a guess.
+    fn or_solve_run_budget(
+        config_map: &HashMap<String, PropertyValue>,
+    ) -> ExecutionResult<Budget> {
+        let limit = |a: &str, b: &str| -> ExecutionResult<Option<u64>> {
+            match config_map.get(a).map(|v| (a, v)).or_else(|| config_map.get(b).map(|v| (b, v))) {
+                None => Ok(None),
+                Some((_, PropertyValue::Integer(n))) if *n >= 1 => Ok(Some(*n as u64)),
+                Some((key, other)) => Err(ExecutionError::bad_argument(format!(
+                    "or.solve: `{key}` must be a whole number of at least 1, got {other:?}; \
+                     leave it out for no limit"
+                ))),
+            }
+        };
+        Ok(Budget {
+            time: limit("timeBudgetMs", "time_budget_ms")?.map(std::time::Duration::from_millis),
+            evaluations: limit("maxEvaluations", "max_evaluations")?,
+        })
+    }
+
+    /// What a solve used of its budget: `evaluations` made and `stopped_by`,
+    /// `iterations` when it ran every iteration, else the limit that ended it
+    /// (`time_budget` or `evaluation_budget`) -- the names `/optimize/solve`
+    /// reports.
+    fn bind_run_budget_use<P>(record: &mut Record, problem: &Budgeted<P>) {
+        record.bind(
+            "evaluations".to_string(),
+            Value::Property(PropertyValue::Integer(problem.evaluations() as i64)),
+        );
+        let stopped_by = match problem.stop_reason() {
+            StopReason::Iterations => "iterations",
+            StopReason::TimeBudget => "time_budget",
+            StopReason::EvaluationBudget => "evaluation_budget",
+        };
+        record.bind(
+            "stopped_by".to_string(),
+            Value::Property(PropertyValue::String(stopped_by.to_string())),
+        );
+    }
+
     fn execute_or_solve(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
         if self.args.is_empty() {
              return Err(ExecutionError::bad_argument("algo.or.solve requires a config map".to_string()));
@@ -22509,10 +22705,10 @@ impl AlgorithmOperator {
         Self::reject_unknown_config_keys(&self.args, "or.solve", &[
             "algorithm", "bestKnown", "best_known", "budget", "constraintHandling",
             "constraint_handling", "costProperties", "costProperty",
-            "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
-            "max_iterations",
+            "cost_properties", "cost_property", "label", "lowerBound", "max", "maxEvaluations",
+            "maxIterations", "max_evaluations", "max_iterations",
             "minTotal", "min", "min_total", "populationSize", "population_size",
-            "property", "seed", "upperBound",
+            "property", "seed", "timeBudgetMs", "time_budget_ms", "upperBound",
         ])?;
         let algorithm = config_map.get("algorithm").and_then(|v| v.as_string()).unwrap_or("Jaya");
         if !Self::is_known_solver(algorithm) {
@@ -22622,6 +22818,11 @@ impl AlgorithmOperator {
                 )))
             }
         };
+        // A time or evaluation limit on the solve (OPT-11, #1798), the two
+        // `/optimize/solve` takes. `budget` above is the cost constraint, so
+        // these have their own names. Either stops the solver between
+        // iterations with the best answer so far; `stopped_by` says which.
+        let run_budget = Self::or_solve_run_budget(config_map)?;
         macro_rules! solve_with_seed {
             ($solver:expr, $problem:expr) => {
                 match seed {
@@ -22686,6 +22887,8 @@ impl AlgorithmOperator {
         // the point actually evaluated: the repaired one under `repair`.
         let problem = Constrained::new(problem, constraint_handling)
             .map_err(|e| ExecutionError::bad_argument(format!("or.solve: {e}")))?;
+        // Counts evaluations and stops the solver once `run_budget` is spent.
+        let problem = Budgeted::new(problem, run_budget);
 
         let solver_config = SolverConfig {
             population_size: pop_size,
@@ -22715,7 +22918,7 @@ impl AlgorithmOperator {
 
             // Write back first individual from Pareto Front: the point it was
             // scored at, which `repair` may have moved.
-            let resolved = res.pareto_front.first().map(|best| problem.resolve_multi(&best.variables));
+            let resolved = res.pareto_front.first().map(|best| problem.inner().resolve_multi(&best.variables));
             if let Some(best) = &resolved {
                 for (i, &val) in best.iter().enumerate() {
                     let node_id = node_ids[i];
@@ -22750,13 +22953,13 @@ impl AlgorithmOperator {
             let (objective, feasible) = match &resolved {
                 Some(best) => (
                     Value::Property(PropertyValue::Array(
-                        MultiObjectiveProblem::objectives(problem.inner(), best)
+                        MultiObjectiveProblem::objectives(problem.inner().inner(), best)
                             .into_iter()
                             .map(PropertyValue::Float)
                             .collect(),
                     )),
                     Value::Property(PropertyValue::Boolean(is_feasible(Problem::penalty(
-                        problem.inner(),
+                        problem.inner().inner(),
                         best,
                     )))),
                 ),
@@ -22767,6 +22970,7 @@ impl AlgorithmOperator {
             // (OPT-09, #2265): `history` holds one entry per iteration here too.
             record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(res.history.len() as i64)));
             record.bind("max_iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
+            Self::bind_run_budget_use(&mut record, &problem);
             self.results.push(record);
 
         } else {
@@ -22824,7 +23028,7 @@ impl AlgorithmOperator {
 
             // 4. Write back results: the point the answer was scored at, which
             // `repair` may have moved (OPT-10).
-            let best_variables = problem.resolve(&result.best_variables);
+            let best_variables = problem.inner().resolve(&result.best_variables);
             for (i, &val) in best_variables.iter().enumerate() {
                 let node_id = node_ids[i];
                 store
@@ -22867,8 +23071,8 @@ impl AlgorithmOperator {
             // The result envelope (OPT-09, #1776). `fitness` is objective plus
             // penalty, so on its own it cannot say whether the answer obeys the
             // budget and minimum: these columns separate the two.
-            let objective = Problem::objective(problem.inner(), &best_variables);
-            let feasible = is_feasible(Problem::penalty(problem.inner(), &best_variables));
+            let objective = Problem::objective(problem.inner().inner(), &best_variables);
+            let feasible = is_feasible(Problem::penalty(problem.inner().inner(), &best_variables));
             let gap = match best_known {
                 Some(best) => Value::Property(PropertyValue::Float(gap_to_best_known(objective, best))),
                 None => Value::Null,
@@ -22880,6 +23084,7 @@ impl AlgorithmOperator {
                 gap,
                 total_time_ms,
             );
+            Self::bind_run_budget_use(&mut record, &problem);
 
             self.results.push(record);
         }
@@ -26250,7 +26455,7 @@ impl WithBarrierOperator {
             // Aggregation path: group by non-aggregate items
             let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
 
-            let batch_size = 65536;
+            let batch_size = AGGREGATE_BATCH_ROWS;
             while let Some(batch) = self.input.next_batch(store, batch_size)? {
                 for record in batch.records {
                     let mut key = Vec::new();
