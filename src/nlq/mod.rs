@@ -4,6 +4,7 @@
 
 pub mod cache;
 pub mod client;
+pub mod pricing;
 pub mod metrics;
 #[cfg(test)]
 #[path = "test_http_cov.rs"]

@@ -53,6 +53,14 @@ your machine on that setting unless you repoint it with `NLQ_API_BASE_URL` /
 local `claude` CLI, so egress happens inside that binary rather than here —
 note the prompt appears in your process table as an argument.
 
+**What a call costs** (AI-15). `/api/nlq` and `/api/enrich` return the tokens,
+the time and, when the model has a price, the dollars of their model calls.
+The engine knows no prices; list them per model in `NLQ_PRICES`, as dollars
+per million input and output tokens:
+`NLQ_PRICES="gpt-4o=2.50/10.00, llama3=0/0"`. A model that is not listed, or a
+provider that reports no token counts, gives `cost_usd: null`, never a guess.
+`claudecode` reads its counts from the CLI's `--output-format json` output.
+
 **There is no default.** An unset or unrecognised provider is refused with the
 list of accepted names: the NLQ request fails, and a server started with
 `EMBED_ENABLED=true` and an unusable `EMBED_PROVIDER` exits rather than
@@ -88,6 +96,10 @@ key reaches Google's request logs by their design, not ours.
   make your server fetch something (`src/query/csv_source.rs:114`). Both
   clauses read only under `--import-dir`, through the same gate.
 - **Raft and sharding** talk only to the peers you configured.
+- **`samyama healthcheck`** (`src/healthcheck.rs`) sends one `GET` to the
+  `/api/status` of the URL it is given, which is the local server by default
+  (the container image's `HEALTHCHECK`), with the token it was handed if any.
+  It reports the answer through its exit code and sends nothing else.
 
 ## Personal identifiers in what we publish (TRUST-10)
 

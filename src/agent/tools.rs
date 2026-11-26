@@ -47,7 +47,7 @@ impl Tool for CypherTool {
         let query = args.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
             AgentError::ToolError("missing 'query' parameter".into())
         })?;
-        let store = self.store.read().await;
+        let store = crate::store_lock::read(&self.store).await;
         let batch = self
             .engine
             .execute(query, &*store)
