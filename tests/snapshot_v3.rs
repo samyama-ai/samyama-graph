@@ -141,7 +141,11 @@ fn rich() -> GraphStore {
     for (k, v) in every_variant() {
         g.set_node_property(T, a, k.to_string(), v).unwrap();
     }
-    // `b` has only some keys, and `mixed` as a string where `c` has an integer.
+    // `b` has only some keys, and `mixed` as a string where `a` and `c` have an
+    // integer. `c` is also an Admin, so it is written to the Admin file; `a`
+    // is what makes the key's type differ within the Person file.
+    g.set_node_property(T, a, "mixed".to_string(), PropertyValue::Integer(7))
+        .unwrap();
     g.set_node_property(T, b, "integer".to_string(), PropertyValue::Integer(3))
         .unwrap();
     g.set_node_property(T, b, "mixed".to_string(), PropertyValue::String("x".into()))
