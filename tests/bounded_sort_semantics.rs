@@ -254,3 +254,60 @@ fn a_bounded_sort_does_not_scale_with_the_rows_it_discards() {
         large / small
     );
 }
+
+/// `(seq, v)` per row, so a test can see *which* of a tied set came back.
+fn run_rows(store: &GraphStore, cypher: &str) -> Vec<(i64, Option<i64>)> {
+    let query = parse_query(cypher).expect("query should parse");
+    QueryExecutor::new(store)
+        .execute(&query)
+        .expect("query should run")
+        .records
+        .iter()
+        .map(|r| {
+            let seq = match r.get("s") {
+                Some(Value::Property(PropertyValue::Integer(n))) => *n,
+                other => panic!("{other:?}"),
+            };
+            let v = match r.get("v") {
+                Some(Value::Property(PropertyValue::Integer(n))) => Some(*n),
+                Some(Value::Property(PropertyValue::Null)) | Some(Value::Null) | None => None,
+                other => panic!("{other:?}"),
+            };
+            (seq, v)
+        })
+        .collect()
+}
+
+#[test]
+fn a_bounded_sort_keeps_the_same_tied_rows_as_sorting_everything() {
+    // The top-k is fed in small batches and trimmed many times (#2275). Which
+    // rows of a tied set survive must not depend on where those trims fall:
+    // the answer is the first k rows of the unbounded sort, which breaks a
+    // tie by input order. Three values and nulls, so every cut falls inside
+    // a tie, and nulls (greatest) lead under DESC and trail under ASC.
+    let values: Vec<Option<i64>> = (0..N as i64)
+        .map(|i| if i % 11 == 0 { None } else { Some(i % 3) })
+        .collect();
+    let store = store_of(&values);
+    for order in ["DESC", "ASC"] {
+        let all = run_rows(&store, &format!("MATCH (n:N) RETURN n.seq AS s, n.v AS v ORDER BY v {order}"));
+        assert_eq!(all.len(), N);
+        for (skip, limit) in [(0usize, 10usize), (0, 5_000), (37, 25), (4_090, 20), (70_000, 10)] {
+            let got = run_rows(
+                &store,
+                &format!("MATCH (n:N) RETURN n.seq AS s, n.v AS v ORDER BY v {order} SKIP {skip} LIMIT {limit}"),
+            );
+            assert_eq!(got, all[skip..skip + limit].to_vec(), "{order} SKIP {skip} LIMIT {limit}");
+        }
+    }
+}
+
+#[test]
+fn a_bounded_distinct_agrees_with_sorting_everything() {
+    let values: Vec<Option<i64>> = (0..N as i64).map(|i| Some((i * 7919) % 1_000)).collect();
+    let store = store_of(&values);
+    let all = run(&store, "MATCH (n:N) RETURN DISTINCT n.v AS v ORDER BY v DESC");
+    assert_eq!(all.len(), 1_000);
+    let top = run(&store, "MATCH (n:N) RETURN DISTINCT n.v AS v ORDER BY v DESC SKIP 3 LIMIT 10");
+    assert_eq!(top, all[3..13].to_vec());
+}
