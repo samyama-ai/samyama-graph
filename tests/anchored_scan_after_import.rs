@@ -60,7 +60,14 @@ fn plan_for_unchecked(store: &GraphStore, query: &str) -> String {
     let batch = engine
         .execute(&format!("EXPLAIN {query}"), store)
         .expect("explain");
-    format!("{:?}", batch.records[0].get("plan")).replace("\\n", "\n")
+    let text = format!("{:?}", batch.records[0].get("plan")).replace("\\n", "\n");
+    // The chosen plan only. With the graph-native planner on (the default since
+    // #1729) EXPLAIN also lists the plans it rejected, and a rejected plan that
+    // scans the target label is not a plan that runs.
+    match text.find("--- Planner Diagnostics ---") {
+        Some(end) => text[..end].to_string(),
+        None => text,
+    }
 }
 
 /// [`plan_for_unchecked`], refusing a plan tree that stops early.
