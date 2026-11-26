@@ -636,7 +636,11 @@ paths:
                   description: >
                     Problem dimension; defaults to the benchmark's own. The only
                     spelling accepted — `n_var`, `dimensions` and
-                    `num_variables` are rejected, not silently ignored.
+                    `num_variables` are rejected, not silently ignored. Only a
+                    single-objective benchmark can change size; ZDT, DTLZ and
+                    `uc2_dosing` answer 400 to a `dim` other than their own
+                    (OPT-11). For a problem that grows with the graph, use
+                    `algo.or.solve`, one variable per node.
                 seed:
                   type: integer
                   format: int64
@@ -840,6 +844,56 @@ paths:
                   nodes: 2000
                   edges: 11000
                   persistence_degraded: false
+
+  /api/sparql:
+    post:
+      operationId: postSparql
+      summary: Run a SPARQL SELECT or ASK over the graph
+      description: |
+        Evaluates SPARQL 1.1 SELECT and ASK over the property graph read as
+        RDF where it is (#2100): no copy, nothing written. Triples follow the
+        `samyama convert` export: `<base>node/<id>`, `rdf:type <base>class/<Label>`,
+        `<base>prop/<key>`, `<base>rel/<TYPE>`, with edge properties reified
+        under `<base>statement/<id>`. `base` defaults to `https://samyama.ai/rdf/`.
+        CONSTRUCT, DESCRIBE and UPDATE are refused with 400, never answered
+        with an empty result. Read role, as `/api/query`.
+      requestBody:
+        required: true
+        content:
+          application/sparql-query:
+            schema:
+              type: string
+            example: "SELECT ?s WHERE { ?s a <https://samyama.ai/rdf/class/Person> }"
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query:
+                  type: string
+                graph:
+                  type: string
+                  default: default
+                  description: Must be `default`; this build serves one graph.
+                base:
+                  type: string
+                  description: Base IRI the graph is read under.
+      responses:
+        '200':
+          description: W3C SPARQL 1.1 Query Results JSON
+          content:
+            application/sparql-results+json:
+              schema:
+                type: object
+              example:
+                head: { vars: [s] }
+                results:
+                  bindings:
+                    - s: { type: uri, value: "https://samyama.ai/rdf/node/1" }
+        '400':
+          description: A query that does not parse, a form not evaluated yet, or a graph other than `default`
+        '403':
+          description: The credential may not read this graph
 
   /api/changes:
     get:
@@ -1239,6 +1293,27 @@ paths:
                     type: integer
                   declined:
                     type: integer
+                  llm_calls:
+                    type: integer
+                    description: Model calls this request made, failed ones included (AI-15).
+                  usage:
+                    type: object
+                    description: >
+                      Tokens across those calls. A count is null when any call left
+                      it unknown, rather than a smaller partial sum.
+                    properties:
+                      prompt_tokens: {type: integer, nullable: true}
+                      completion_tokens: {type: integer, nullable: true}
+                      total_tokens: {type: integer, nullable: true}
+                  llm_latency_ms:
+                    type: number
+                    description: Time spent in those calls, in milliseconds.
+                  cost_usd:
+                    type: number
+                    nullable: true
+                    description: Dollars across those calls, priced as `/api/nlq` prices; null when unknown.
+                  model:
+                    type: string
         '400':
           description: Query or enrichment error
           content:
@@ -1338,6 +1413,17 @@ paths:
                     description: >
                       Wall-clock time of the model call alone, in milliseconds;
                       the schema summary and safety check are not included.
+                  cost_usd:
+                    type: number
+                    nullable: true
+                    description: >
+                      Dollars, from the model's prices in `NLQ_PRICES` (per million
+                      input and output tokens). Null when the model is not listed or
+                      the provider reported no token counts; 0 for a cached
+                      translation, which made no call (AI-15).
+                  model:
+                    type: string
+                    description: The model the call was priced for.
         '400':
           description: NLQ disabled or generation error
           content:

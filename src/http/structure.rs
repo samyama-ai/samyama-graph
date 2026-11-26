@@ -43,7 +43,7 @@ pub async fn list_hierarchies_handler(
         return resp;
     }
 
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
     let items: Vec<_> = store
         .hierarchy_index
         .list()
@@ -108,7 +108,7 @@ pub async fn hierarchy_cues_handler(
         return resp;
     }
 
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
     let Some(entry_arc) = store.hierarchy_index.get(&name) else {
         return (
             StatusCode::NOT_FOUND,
@@ -177,7 +177,7 @@ pub async fn get_structure_handler(
         return resp;
     }
 
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
     let explicit = store.structure_registry.list();
     let effective = store.structure_registry.effective_conventions(&store);
     Json(json!({
@@ -227,7 +227,7 @@ pub async fn put_structure_handler(
         }
     }
 
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
     store.structure_registry.replace(payload.structures);
     let explicit = store.structure_registry.list();
     let effective = store.structure_registry.effective_conventions(&store);
@@ -278,7 +278,7 @@ pub async fn structure_cues_handler(
         return resp;
     }
 
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
     let effective = store.structure_registry.effective_conventions(&store);
     if effective.is_empty() {
         return (

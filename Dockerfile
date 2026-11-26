@@ -52,9 +52,12 @@ EXPOSE 8080
 # Set environment variables
 ENV RUST_LOG=info
 
-# Healthcheck via HTTP status endpoint
+# Healthcheck from the binary itself (#2202): no shell, no curl. Unlike
+# `curl -sf`, it counts a 401 from a server with --auth-file as up, and a
+# server degraded by a failed write as down. Set SAMYAMA_HEALTHCHECK_TOKEN to
+# have it read the status through authentication.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -sf http://localhost:8080/api/status || exit 1
+    CMD ["samyama", "healthcheck"]
 
 # Run the server, binding to 0.0.0.0 so it's reachable from outside the container
 CMD ["samyama", "--host", "0.0.0.0"]
