@@ -109,9 +109,8 @@ impl PersistedWriter {
         if self.persistence.is_some() && health::is_degraded() {
             return Err(PersistedWriteError::Refused(health::refusal()));
         }
-        let mut store = self
-            .store
-            .write()
+        // Through the helper, so the lock probes see this wait too (#2219).
+        let mut store = crate::store_lock::write(&self.store)
             .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write"))
             .await;
         write_locked(&mut store, self.persistence.as_deref(), tenant, body)

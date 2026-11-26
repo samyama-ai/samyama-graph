@@ -133,17 +133,15 @@ fn a_selector_and_a_restrictor_compose() {
     assert_eq!(rows(&g, any), 2, "ANY is one path per endpoint pair, not one overall");
 }
 
-/// An unbounded WALK is refused rather than served from a capped subset.
+/// An unbounded WALK is refused under `ALL` rather than served from a capped subset.
 ///
 /// The standard forbids it under `ALL` because the answer is infinite on any graph
-/// with a cycle. It is refused here under **every** selector, which is stricter than
-/// the standard and deliberately so: under `ALL`, and under `ALL SHORTEST`, this
-/// implementation enumerates candidates and then applies the selector, so on an
-/// unbounded walk the selector never gets a turn.
+/// with a cycle. `ALL SHORTEST` is refused too, which is stricter than the standard:
+/// this implementation answers it by enumerating candidates and then applying the
+/// selector, so on an unbounded walk the selector never gets a turn.
 ///
-/// `ANY` and `ANY SHORTEST` are finite under the standard and refused here for the
-/// same reason, and the shortcut that looks obvious is wrong: see #1648 and the
-/// comment below.
+/// `ANY` and `ANY SHORTEST` are answered (#1648): one walk per endpoint pair, from a
+/// search that ends on its state count. See `tests/selector_bounds_unbounded_search.rs`.
 #[test]
 fn an_unbounded_walk_is_refused_and_the_alternatives_are_not() {
     let g = graph(TRIANGLE);
@@ -165,23 +163,23 @@ fn an_unbounded_walk_is_refused_and_the_alternatives_are_not() {
         "the error must say which limit is being hit: {msg}"
     );
 
-    // No selector rescues it yet (#1648). `ANY` and `ANY SHORTEST` are finite under
-    // the standard -- one path per endpoint pair -- and the obvious shortcut, routing
-    // them to the first-reach traversal, is wrong: that traversal marks its source
-    // visited at depth 0, so it never returns the (v, v) pair a cycle produces. The
-    // query would answer, and be missing a row. Refusing is the honest position until
-    // a traversal exists that can re-reach its own start.
-    for refused in [
+    // A single-path selector bounds it (#1648): one walk per endpoint pair. On the
+    // triangle every node reaches all three, itself included round the cycle, so
+    // 3 sources x 3 ends. A first-reach answer would be 6, missing each (v, v).
+    for answered in [
         "MATCH ANY SHORTEST WALK (a)-[:E*]->(b) RETURN b",
         "MATCH ANY WALK (a)-[:E*]->(b) RETURN b",
-        "MATCH ALL SHORTEST WALK (a)-[:E*]->(b) RETURN b",
     ] {
-        assert!(
-            QueryEngine::new().execute(refused, &g).is_err(),
-            "{refused} must be refused while the search cannot be bounded from the \
-             selector"
-        );
+        assert_eq!(rows(&g, answered), 9, "{answered}");
     }
+    // ALL SHORTEST still needs every candidate, so it stays refused.
+    assert!(
+        QueryEngine::new()
+            .execute("MATCH ALL SHORTEST WALK (a)-[:E*]->(b) RETURN b", &g)
+            .is_err(),
+        "ALL SHORTEST over an unbounded walk must be refused while it is answered by \
+         enumeration"
+    );
 
     // Each of the ways out actually works.
     for ok in [

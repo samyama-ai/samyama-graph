@@ -48,7 +48,8 @@ fn map() -> Map {
     Map { s: s.as_u64(), a: a.as_u64(), b: b.as_u64(), t: t.as_u64(), store }
 }
 
-/// `(path, cost, resource)` of the one row, or `None` for no row.
+/// `(path, cost, resource)` of the row, or `None` when the row says no path
+/// fits (`feasible: false`, the path null).
 type Answer = Option<(Vec<u64>, f64, f64)>;
 
 fn answer(m: &Map, config: &str) -> Result<Answer, String> {
@@ -56,10 +57,30 @@ fn answer(m: &Map, config: &str) -> Result<Answer, String> {
 }
 
 fn ask(m: &Map, name: &str, config: &str) -> Result<Answer, String> {
-    let q = format!("CALL {name}({}, {}, {config}) YIELD path, cost, resource RETURN path, cost, resource", m.s, m.t);
+    let q = format!(
+        "CALL {name}({}, {}, {config}) YIELD path, cost, resource, feasible \
+         RETURN path, cost, resource, feasible",
+        m.s, m.t
+    );
     let batch = QueryEngine::new().execute(&q, &m.store).map_err(|e| e.to_string())?;
-    assert!(batch.records.len() <= 1, "one row at most: {:?}", batch.records);
-    Ok(batch.records.first().map(|r| {
+    // Always exactly one row (OPT-09, #2265): nothing fitting is a row too.
+    assert_eq!(batch.records.len(), 1, "one row, always: {:?}", batch.records);
+    let r = &batch.records[0];
+    let feasible = match r.get("feasible") {
+        Some(Value::Property(PropertyValue::Boolean(b))) => *b,
+        other => panic!("feasible is {other:?}"),
+    };
+    if !feasible {
+        for k in ["path", "cost", "resource"] {
+            assert!(
+                matches!(r.get(k), Some(Value::Property(PropertyValue::Null)) | None),
+                "an infeasible row carries a {k}: {:?}",
+                r.get(k)
+            );
+        }
+        return Ok(None);
+    }
+    Ok(Some(r).map(|r| {
         let path = match r.get("path") {
             Some(Value::Property(PropertyValue::Array(ids))) => ids
                 .iter()
@@ -89,7 +110,7 @@ fn the_time_limit_decides_which_route_is_cheapest() {
     assert_eq!(at("20"), Some((vec![s, a, t], 2.0, 20.0)), "a limit met exactly is within it");
     assert_eq!(at("19.5"), Some((vec![s, b, t], 10.0, 2.0)), "the cheap road is too slow");
     assert_eq!(at("1"), Some((vec![s, t], 20.0, 1.0)), "only the direct road fits");
-    assert_eq!(at("0.5"), None, "no road fits: no row, not an error");
+    assert_eq!(at("0.5"), None, "no road fits: a row saying so, not an error");
 }
 
 #[test]
@@ -191,4 +212,41 @@ fn ids_and_the_whole_config_can_be_parameters() {
              {resourceProperty: 'minutes', maxResource: $limit}) YIELD cost RETURN cost";
     let err = engine.execute_with_params(q, &m.store, &params).unwrap_err().to_string();
     assert!(err.contains("pass the whole map as one parameter"), "{err}");
+}
+
+/// Every answer carries the result envelope OPT-09 asks of every solve
+/// (#2265): `objective`, `feasible`, `gap`, `iterations` and `total_time_ms`,
+/// whether a path fits or not.
+#[test]
+fn every_answer_carries_the_result_envelope() {
+    let m = map();
+    let row = |max: &str| {
+        let q = format!(
+            "CALL algo.or.constrainedShortestPath({}, {}, {{{ROADS}, maxResource: {max}}}) \
+             YIELD cost, objective, feasible, gap, iterations, total_time_ms \
+             RETURN cost, objective, feasible, gap, iterations, total_time_ms",
+            m.s, m.t
+        );
+        let batch = QueryEngine::new().execute(&q, &m.store).unwrap();
+        assert_eq!(batch.records.len(), 1);
+        let r = &batch.records[0];
+        let get = |k: &str| r.get(k).and_then(|v| v.as_property()).cloned().unwrap_or(PropertyValue::Null);
+        (get("cost"), get("objective"), get("feasible"), get("gap"), get("iterations"), get("total_time_ms"))
+    };
+
+    let (cost, objective, feasible, gap, iterations, time) = row("19.5");
+    assert_eq!(objective, cost, "the objective is the path's cost");
+    assert_eq!(objective, PropertyValue::Float(10.0));
+    assert_eq!(feasible, PropertyValue::Boolean(true));
+    assert_eq!(gap, PropertyValue::Float(0.0), "exact: proven optimal within the limit");
+    assert!(matches!(iterations, PropertyValue::Integer(n) if n >= 1), "{iterations:?}");
+    assert!(matches!(time, PropertyValue::Float(t) if t >= 0.0), "{time:?}");
+
+    let (cost, objective, feasible, gap, iterations, time) = row("0.5");
+    assert_eq!(feasible, PropertyValue::Boolean(false), "nothing fits");
+    assert_eq!((cost, objective, gap), (PropertyValue::Null, PropertyValue::Null, PropertyValue::Null));
+    // The search still ran, and says how much: only the source was expanded,
+    // every road from it needing more than 0.5 minutes.
+    assert_eq!(iterations, PropertyValue::Integer(1));
+    assert!(matches!(time, PropertyValue::Float(t) if t >= 0.0), "{time:?}");
 }
