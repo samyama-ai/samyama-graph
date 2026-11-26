@@ -929,15 +929,24 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
     "db.labels",
     "db.propertyKeys",
     "db.relationshipTypes",
+    "db.retention.drop",
+    "db.retention.list",
+    "db.retention.set",
     "db.schema.forLLM",
     "db.schema.visualization",
 ];
+
+/// Named procedures outside `db.*`, offered as "did you mean" beside
+/// [`KNOWN_DB_PROCEDURES`] but not listed among the schema procedures when
+/// nothing is close (#2098).
+pub const KNOWN_OTHER_PROCEDURES: &[&str] = &["ai.rag.retrieve"];
 
 /// The refusal for a procedure name nothing dispatches: a likely intended
 /// name when there is one, and otherwise where the procedures are.
 pub fn unknown_procedure_message(name: &str) -> String {
     let known = KNOWN_DB_PROCEDURES
         .iter()
+        .chain(KNOWN_OTHER_PROCEDURES)
         .chain(super::feature_ops::FeatureProcedure::NAMES)
         .copied();
     match crate::query::suggest::closest(name, known) {
@@ -4112,6 +4121,20 @@ impl QueryPlanner {
             )?));
         }
 
+        // Per-label retention rules (#2217).
+        if let Some(procedure) = super::retention_ops::RetentionProcedure::from_name(&call_clause.procedure_name) {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::retention_ops::RetentionOperator::new(
+                procedure,
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
+        }
+
         // BM25 + vector + local expansion, fused and reranked (#1279).
         if super::hybrid_ops::is_procedure(&call_clause.procedure_name) {
             let yields: Vec<(String, Option<String>)> = call_clause
@@ -4137,6 +4160,43 @@ impl QueryPlanner {
                 call_clause.arguments.clone(),
                 &yields,
             )?));
+        }
+
+        if call_clause.procedure_name == super::rag_ops::NAME {
+            // (label, property, queryVector, k, hops) (#2098). The first four
+            // are `db.index.vector.queryNodes`' own, planned by it, so the two
+            // read their arguments the same way and refuse the same mistakes.
+            let args = &call_clause.arguments;
+            if args.len() != 5 {
+                return Err(ExecutionError::PlanningError(format!(
+                    "{} takes (label, property, queryVector, k, hops)",
+                    super::rag_ops::NAME
+                )));
+            }
+            let hops = match super::operator::eval_expression(&args[4], &super::Record::new(), store) {
+                Ok(super::Value::Property(PropertyValue::Integer(h))) if h >= 0 => h as usize,
+                _ => {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "{}: hops must be a non-negative integer",
+                        super::rag_ops::NAME
+                    )))
+                }
+            };
+            let search = CallClause {
+                procedure_name: "db.index.vector.queryNodes".to_string(),
+                arguments: args[..4].to_vec(),
+                yield_items: ["node", "score"]
+                    .iter()
+                    .map(|n| crate::query::ast::YieldItem { name: n.to_string(), alias: None })
+                    .collect(),
+            };
+            let search = self.plan_call_filtered(&search, store, None, None)?;
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::rag_ops::RagRetrieveOperator::new(search, hops, &yields)?));
         }
 
         if call_clause.procedure_name == "db.index.vector.queryNodes" {
@@ -4396,6 +4456,32 @@ impl QueryPlanner {
                 )));
             }
             Ok(Box::new(SchemaForLlmOperator::new(token_budget)))
+        } else if call_clause.procedure_name.eq_ignore_ascii_case("rdf.sparql") {
+            // SPARQL over the graph from Cypher (#2100, part 3b). The query and
+            // the optional base are string literals, as the full-text
+            // procedure's are: read at plan time, so a wrong argument is a
+            // planning error rather than a row that never arrives.
+            use crate::query::executor::sparql_call::SparqlCallOperator;
+            let args = &call_clause.arguments;
+            let text = |e: &Expression, what: &str| -> ExecutionResult<String> {
+                match e {
+                    Expression::Literal(PropertyValue::String(s)) => Ok(s.clone()),
+                    _ => Err(ExecutionError::PlanningError(format!(
+                        "rdf.sparql: {what} must be a string literal"
+                    ))),
+                }
+            };
+            match args.len() {
+                1 | 2 => {}
+                n => {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "rdf.sparql takes (query) or (query, baseIri); got {n} arguments"
+                    )))
+                }
+            }
+            let query = text(&args[0], "the query")?;
+            let base = args.get(1).map(|b| text(b, "the base IRI")).transpose()?;
+            Ok(Box::new(SparqlCallOperator::new(query, base)))
         } else if let Some((mode, bare)) =
             AlgorithmOperator::unsupported_gds_mode(&call_clause.procedure_name)
         {

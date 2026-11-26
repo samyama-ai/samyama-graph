@@ -11,7 +11,7 @@ use std::time::Instant;
 
 /// GET /api/vector/indexes — list all registered vector indexes
 pub async fn list_indexes_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
     let keys = store.vector_index.list_indices();
     let indexes: Vec<_> = keys
         .iter()
@@ -108,7 +108,7 @@ pub async fn create_index_handler(
 
     let canonical = canonical_metric(&metric);
     // write lock: create_vector_index mutates the index registry
-    let store = state.store.write().await;
+    let store = crate::store_lock::write(&state.store).await;
     match store.create_vector_index(&payload.label, &payload.property_key, payload.dimensions, metric) {
         Ok(_) => {
             if let Some(model_id) = payload.model_id.as_deref() {
@@ -229,7 +229,7 @@ pub async fn search_handler(
         None => {
             let label = payload.label.as_deref();
             let candidates: Vec<String> = {
-                let store = state.store.read().await;
+                let store = crate::store_lock::read(&state.store).await;
                 store
                     .vector_index
                     .list_indices()
@@ -316,7 +316,7 @@ pub async fn search_handler(
             .into_response();
     };
 
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
 
     if let Some(query_model) = query_model.as_deref() {
         if let Some(refusal) = incompatible_index(
@@ -659,7 +659,7 @@ mod tests {
         }
         let (status, _) = post_json(test_app(state.clone()), "/api/vector/indexes", body).await;
         assert_eq!(status, axum::http::StatusCode::OK);
-        let mut store = state.store.write().await;
+        let mut store = crate::store_lock::write(&state.store).await;
         for i in 0..2u8 {
             let id = store.create_node("Doc");
             let mut v = vec![0.1_f32; 64];
@@ -749,7 +749,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = state_with_model(None);
         seed_doc_index(&src, Some("model-a")).await;
-        src.store.read().await.vector_index.dump_all(dir.path()).unwrap();
+        crate::store_lock::read(&src.store).await.vector_index.dump_all(dir.path()).unwrap();
 
         let meta_path = dir.path().join("metadata.json");
         let meta: serde_json::Value =
@@ -758,7 +758,7 @@ mod tests {
 
         // Round trip: the reloaded index still refuses model B.
         let reloaded = state_with_model(Some("model-b"));
-        reloaded.store.read().await.vector_index.load_all(dir.path()).unwrap();
+        crate::store_lock::read(&reloaded.store).await.vector_index.load_all(dir.path()).unwrap();
         let (status, body) = text_search(&reloaded, Some("Doc")).await;
         assert_eq!(status, axum::http::StatusCode::CONFLICT, "{}", body);
 
@@ -767,16 +767,16 @@ mod tests {
         legacy[0].as_object_mut().unwrap().remove("model_id");
         std::fs::write(&meta_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let old = state_with_model(Some("model-b"));
-        old.store.read().await.vector_index.load_all(dir.path()).unwrap();
+        crate::store_lock::read(&old.store).await.vector_index.load_all(dir.path()).unwrap();
         // The graph the index was dumped beside: search returns only nodes
         // that exist and carry the label (#1605).
         {
-            let mut store = old.store.write().await;
+            let mut store = crate::store_lock::write(&old.store).await;
             for _ in 0..2 {
                 store.create_node("Doc");
             }
         }
-        assert_eq!(old.store.read().await.vector_index.model_id("Doc", "embedding"), None);
+        assert_eq!(crate::store_lock::read(&old.store).await.vector_index.model_id("Doc", "embedding"), None);
         let (status, body) = text_search(&old, Some("Doc")).await;
         assert_eq!(status, axum::http::StatusCode::OK, "{}", body);
         assert_eq!(body["results"].as_array().unwrap().len(), 2, "{}", body);
@@ -845,9 +845,7 @@ mod tests {
     async fn a_label_with_indexes_on_two_properties_needs_a_property_key() {
         let state = test_state();
         for p in ["emb_a", "emb_b"] {
-            state
-                .store
-                .read()
+            crate::store_lock::read(&state.store)
                 .await
                 .create_vector_index("Doc", p, 2, DistanceMetric::L2)
                 .unwrap();
@@ -867,7 +865,7 @@ mod tests {
     async fn the_only_indexed_property_is_searched_and_hidden_unless_asked_for() {
         let state = test_state();
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             store
                 .create_vector_index("Doc", "emb", 2, DistanceMetric::L2)
                 .unwrap();
@@ -936,9 +934,7 @@ mod tests {
     #[tokio::test]
     async fn a_query_of_the_wrong_dimension_is_a_400_naming_the_index() {
         let state = test_state();
-        state
-            .store
-            .read()
+        crate::store_lock::read(&state.store)
             .await
             .create_vector_index("Doc", "vec", 2, DistanceMetric::L2)
             .unwrap();
@@ -1051,7 +1047,7 @@ mod tests {
         // only, so a 32-dim index built by another model is not in the way.
         let state = state_with_model(Some("model-b"));
         {
-            let store = state.store.read().await;
+            let store = crate::store_lock::read(&state.store).await;
             store
                 .create_vector_index("Small", "embedding", 32, DistanceMetric::Cosine)
                 .unwrap();

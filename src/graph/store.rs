@@ -1360,6 +1360,10 @@ pub struct GraphStore {
     /// In memory only; see `crate::graph::feature`.
     pub features: Arc<crate::graph::feature::FeatureRegistry>,
 
+    /// Per-label retention rules (#2217). Persisted through the index
+    /// catalog; see [`crate::graph::retention`].
+    retention: crate::graph::retention::RetentionRules,
+
     /// Columnar storage for node properties
     pub node_columns: ColumnStore,
 
@@ -1422,6 +1426,12 @@ pub struct GraphStore {
     /// here counts, so a mutator added later makes a projection look stale,
     /// never fresh: the safe direction.
     data_changes: std::sync::atomic::AtomicU64,
+    /// The nodes and relationships added since a point, for the incremental
+    /// algorithms (ALGO-14). See `structure_log.rs`.
+    structure_log: super::structure_log::StructureLog,
+    /// The incremental algorithms' saved state for this graph (ALGO-14).
+    /// Lives with the store so it is per tenant and goes when the graph does.
+    incremental: crate::algo::incremental::IncrementalStates,
     /// The last content hash computed and the `data_changes` it was computed
     /// at (ML-08, #1747). A hash is one pass over the whole graph, so an
     /// export reuses it until the data changes.
@@ -1509,6 +1519,7 @@ impl GraphStore {
             structure_registry: Arc::new(crate::index::structure::StructureRegistry::new()),
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
             features: Arc::new(crate::graph::feature::FeatureRegistry::new()),
+            retention: Default::default(),
             node_columns: ColumnStore::new(),
             edge_columns: ColumnStore::new(),
             index_sender: None,
@@ -1521,6 +1532,8 @@ impl GraphStore {
             statistics_cache: std::sync::RwLock::new(None),
             epoch: std::sync::atomic::AtomicU64::new(0),
             data_changes: std::sync::atomic::AtomicU64::new(0),
+            structure_log: Default::default(),
+            incremental: Default::default(),
             content_hash_memo: std::sync::Mutex::new(None),
             snapshot_sources: Vec::new(),
             snapshot_sources_epoch: 0,
@@ -2200,6 +2213,7 @@ NodeDeleted { id, .. } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.node_added(node_id);
     }
 
     /// Create a node with multiple labels and properties, refusing one that
@@ -2393,6 +2407,7 @@ NodeDeleted { id, .. } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.node_added(node_id);
         node_id
     }
 
@@ -2536,6 +2551,7 @@ NodeDeleted { id, .. } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.node_added(node_id);
         node_id
     }
 
@@ -2824,6 +2840,9 @@ NodeDeleted { id, .. } => {
         
         // Add to free list for reuse (In true MVCC, we only reuse after compaction/vacuum)
         self.free_node_ids.push(id.as_u64());
+        // The id is reused: a materialized feature must not answer for the
+        // next node that takes it (ML-13).
+        self.features.forget_node(id);
         // The history goes with the node. The id is reused, and the next node
         // to take it must not answer for this one's earlier states. A death
         // version is not recorded yet, so a snapshot loses a node deleted after
@@ -2914,6 +2933,7 @@ NodeDeleted { id, .. } => {
         }
 
         self.journal(crate::graph::event::Mutation::NodeDeleted(id));
+        self.structure_log.rewritten();
         Ok(node)
     }
 
@@ -3003,6 +3023,7 @@ NodeDeleted { id, .. } => {
         }
 
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.rewritten();
         Ok(true)
     }
 
@@ -3164,6 +3185,7 @@ NodeDeleted { id, .. } => {
         }
 
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.rewritten();
         Ok(())
     }
 
@@ -3220,6 +3242,7 @@ NodeDeleted { id, .. } => {
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.structure_log.edge_added(edge_id);
         Ok(edge_id)
     }
 
@@ -3323,6 +3346,7 @@ NodeDeleted { id, .. } => {
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.structure_log.edge_added(edge_id);
         Ok(edge_id)
     }
 
@@ -3432,6 +3456,7 @@ NodeDeleted { id, .. } => {
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.structure_log.edge_added(edge_id);
         Ok(edge_id)
     }
 
@@ -3738,6 +3763,7 @@ NodeDeleted { id, .. } => {
         self.catalog.on_edge_deleted(edge.source, &src_labels, &edge.edge_type, edge.target, &tgt_labels);
 
         self.journal(crate::graph::event::Mutation::EdgeDeleted(id));
+        self.structure_log.rewritten();
         Ok(edge)
     }
 
@@ -5019,6 +5045,17 @@ NodeDeleted { id, .. } => {
     /// How many times data may have changed: the epoch, less housekeeping.
     /// Equal readings mean no node, relationship, label or property changed in
     /// between. See `data_changes`.
+    /// The nodes and relationships added since a point, and whether anything
+    /// was removed (ALGO-14).
+    pub fn structure_log(&self) -> &super::structure_log::StructureLog {
+        &self.structure_log
+    }
+
+    /// The incremental algorithms' saved state (ALGO-14).
+    pub fn incremental_states(&self) -> &crate::algo::incremental::IncrementalStates {
+        &self.incremental
+    }
+
     /// The memo `snapshot::content_hash::cached_content_hash` keeps.
     pub(crate) fn content_hash_memo(&self) -> &std::sync::Mutex<Option<(u64, String)>> {
         &self.content_hash_memo
@@ -6594,6 +6631,7 @@ NodeDeleted { id, .. } => {
     /// Clear all data from the graph
     pub fn clear(&mut self) {
         self.invalidate_statistics_cache();
+        self.structure_log.rewritten();
         self.snapshot_sources.clear();
         self.snapshot_sources_stale = false;
         self.structure_registry.clear();
@@ -6624,6 +6662,7 @@ NodeDeleted { id, .. } => {
         self.graph_projections = Arc::new(crate::graph::projection::GraphProjections::new());
         // Materialized feature values name nodes `clear` just removed.
         self.features = Arc::new(crate::graph::feature::FeatureRegistry::new());
+        self.retention.clear();
         self.node_columns = ColumnStore::new();
         self.edge_columns = ColumnStore::new();
         self.next_node_id = 1;
@@ -6759,6 +6798,53 @@ NodeDeleted { id, .. } => {
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Set `label`'s retention rule, replacing any it had (#2217). Returns
+    /// the rule it replaced.
+    pub fn set_retention(
+        &mut self,
+        label: &str,
+        rule: crate::graph::retention::RetentionRule,
+    ) -> Option<crate::graph::retention::RetentionRule> {
+        let old = self.retention.insert(label.to_string(), rule);
+        if old != Some(rule) {
+            // A cached `db.retention.list` must not outlive the rule it shows.
+            self.bump_epoch();
+            self.mark_index_catalog_changed();
+        }
+        old
+    }
+
+    /// Remove `label`'s retention rule. Returns it, or `None` if it had none.
+    pub fn drop_retention(&mut self, label: &str) -> Option<crate::graph::retention::RetentionRule> {
+        let old = self.retention.remove(label);
+        if old.is_some() {
+            self.bump_epoch();
+            self.mark_index_catalog_changed();
+        }
+        old
+    }
+
+    /// Every label's retention rule, by label.
+    pub fn retention_rules(&self) -> &crate::graph::retention::RetentionRules {
+        &self.retention
+    }
+
+    /// Delete every node the retention rules no longer cover at `now_ms`,
+    /// with its relationships, and return how many nodes went (#2217).
+    ///
+    /// Each deletion is journalled like any other, so a caller with the
+    /// write log enabled persists the sweep the way it persists a statement.
+    pub fn sweep_retention(&mut self, tenant_id: &str, now_ms: i64) -> usize {
+        if self.retention.is_empty() {
+            return 0;
+        }
+        let doomed = crate::graph::retention::expired(self, &self.retention, now_ms);
+        doomed
+            .into_iter()
+            .filter(|id| self.delete_node(tenant_id, *id).is_ok())
+            .count()
+    }
+
     /// Every index declaration in the store, in the order `SHOW INDEXES` sorts
     /// them.
     ///
@@ -6792,6 +6878,11 @@ NodeDeleted { id, .. } => {
         definitions.extend(self.point_index.listing().into_iter().map(
             |(name, label, property)| IndexDefinition::Point { name, label, property },
         ));
+        definitions.extend(self.retention.iter().map(|(label, rule)| IndexDefinition::Retention {
+            label: label.clone(),
+            max_age_ms: rule.max_age_ms,
+            max_records: rule.max_records,
+        }));
         // Sorted so two runs of the same DDL produce byte-identical records and
         // a diff of the catalog is a diff of the indexes, not of hash order.
         definitions.sort_by_key(|d| match d {
@@ -6818,6 +6909,9 @@ NodeDeleted { id, .. } => {
             }
             IndexDefinition::VectorKind { label, property, .. } => {
                 (6u8, label.clone(), property.clone(), String::new())
+            }
+            IndexDefinition::Retention { label, .. } => {
+                (7u8, label.clone(), String::new(), String::new())
             }
         });
         IndexCatalog { definitions }
@@ -7031,6 +7125,15 @@ NodeDeleted { id, .. } => {
                 }
                 IndexDefinition::VectorKind { label, property, kind } => {
                     vector_kinds.push((label, property, *kind));
+                }
+                IndexDefinition::Retention { label, max_age_ms, max_records } => {
+                    self.retention.insert(
+                        label.clone(),
+                        crate::graph::retention::RetentionRule {
+                            max_age_ms: *max_age_ms,
+                            max_records: *max_records,
+                        },
+                    );
                 }
                 IndexDefinition::VectorParams { label, property, m, ef_construction, ef } => {
                     vector_params.push((
@@ -7533,6 +7636,7 @@ NodeDeleted { id, .. } => {
     pub fn insert_recovered_node(&mut self, node: Node) {
         self.bump_epoch();
         let node_id = node.id;
+        self.structure_log.node_added(node_id);
         let idx = node_id.as_u64() as usize;
 
         // Ensure storage capacity
@@ -7587,6 +7691,7 @@ NodeDeleted { id, .. } => {
         if !self.has_node(target) {
             return Err(GraphError::InvalidEdgeTarget(target));
         }
+        self.structure_log.edge_added(edge_id);
 
         // Update adjacency lists (sorted insert)
         {
@@ -7700,7 +7805,7 @@ fn spawn_auto_embed(
             }
         };
         if let Some(store) = store {
-            let mut guard = store.write().await;
+            let mut guard = crate::store_lock::write(&store).await;
             match guard.set_node_property(
                 &tenant_id,
                 id,
