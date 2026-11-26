@@ -916,8 +916,10 @@ async fn error_and_cancel_events_carry_no_time() {
 async fn every_algorithm_reports_a_measured_time_over_http() {
     let (_, algos) = get_json(app(), "/optimize/algorithms").await;
     let algos = algos.as_array().unwrap();
-    assert_eq!(algos.len(), 27);
-    for a in algos {
+    assert_eq!(algos.len(), 28);
+    // Every solver `/optimize/solve` runs: the exact one runs on
+    // `/optimize/lp` and is refused here (OPT-05, #1766).
+    for a in algos.iter().filter(|a| a["family"] != "exact") {
         let id = a["id"].as_str().unwrap();
         let bench = if a["multi_objective"].as_bool().unwrap() {
             "zdt1"
@@ -955,7 +957,9 @@ fn budgeted_body(algorithm: &str, benchmark: &str, budget: &str) -> String {
 async fn every_algorithm_stops_at_an_evaluation_budget_over_http() {
     const MAX_EVALUATIONS: u64 = 200;
     let (_, algos) = get_json(app(), "/optimize/algorithms").await;
-    for a in algos.as_array().unwrap() {
+    // The exact solver evaluates no objective to count, and runs on
+    // `/optimize/lp` (OPT-05, #1766).
+    for a in algos.as_array().unwrap().iter().filter(|a| a["family"] != "exact") {
         let id = a["id"].as_str().unwrap();
         let bench = if a["multi_objective"].as_bool().unwrap() {
             "zdt1"
