@@ -6,7 +6,7 @@
 //! plain values (ids, numbers, `{nodes, edges}` for a path), and sent back as
 //! a parameter.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use samyama::graph::{EdgeId, GraphStore, PropertyValue};
 use samyama::query::executor::record::Value;
@@ -184,8 +184,8 @@ const VERIFY: &str = "CALL ai.rag.verify_or_refuse($q, $claims, $evidence, $conf
 struct Verdict {
     status: String,
     reason: Option<String>,
-    verified: Vec<HashMap<String, Value>>,
-    unsupported: Vec<HashMap<String, Value>>,
+    verified: Vec<BTreeMap<String, Value>>,
+    unsupported: Vec<BTreeMap<String, Value>>,
     confidence: Option<f64>,
     coverage: Option<f64>,
     detail: String,
@@ -217,7 +217,7 @@ fn run(
         Some(Value::Null) | Some(Value::Property(PropertyValue::Null)) => None,
         other => panic!("{c}: {other:?}"),
     };
-    let list = |c: &str| -> Vec<HashMap<String, Value>> {
+    let list = |c: &str| -> Vec<BTreeMap<String, Value>> {
         match r.get(c) {
             Some(Value::List(items)) => items
                 .iter()
@@ -244,14 +244,14 @@ fn verify(store: &GraphStore, answer: PropertyValue, config: PropertyValue) -> V
     run(store, answer, rows_envelope(store), config).unwrap()
 }
 
-fn get_int(m: &HashMap<String, Value>, k: &str) -> Option<i64> {
+fn get_int(m: &BTreeMap<String, Value>, k: &str) -> Option<i64> {
     match m.get(k) {
         Some(Value::Property(PropertyValue::Integer(i))) => Some(*i),
         _ => None,
     }
 }
 
-fn get_str(m: &HashMap<String, Value>, k: &str) -> Option<String> {
+fn get_str(m: &BTreeMap<String, Value>, k: &str) -> Option<String> {
     match m.get(k) {
         Some(Value::Property(PropertyValue::String(x))) => Some(x.clone()),
         _ => None,

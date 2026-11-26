@@ -620,9 +620,11 @@ fn same_value(stored: &PropertyValue, claimed: &PropertyValue) -> bool {
     use PropertyValue as P;
     match (stored, claimed) {
         (P::String(a), P::String(b)) => norm(a) == norm(b),
-        (P::Integer(_) | P::Float(_), P::Integer(_) | P::Float(_)) => {
-            stored.as_float() == claimed.as_float()
-        }
+        (P::Integer(a), P::Integer(b)) => a == b,
+        // `as_float` is `None` for an integer, so it cannot compare across the
+        // two numeric types: widen the integer instead.
+        (P::Integer(i), P::Float(f)) | (P::Float(f), P::Integer(i)) => *i as f64 == *f,
+        (P::Float(a), P::Float(b)) => a == b,
         (P::Array(a), P::Array(b)) => {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| same_value(x, y))
         }
