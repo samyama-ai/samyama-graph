@@ -398,7 +398,8 @@ paths:
                         category:
                           type: string
                           enum: [centrality, community, path, link_prediction, similarity,
-                                 structure, graph_metric, temporal, embedding, optimization]
+                                 structure, graph_metric, temporal, embedding, sampling,
+                                 optimization, dataset]
                         description:
                           type: string
                           description: What the algorithm computes, in one sentence.
