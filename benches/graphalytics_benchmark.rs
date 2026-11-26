@@ -39,7 +39,7 @@ mod graphalytics_common;
 use graphalytics_common::{
     load_graphalytics_dataset, find_dataset_files, find_properties_file,
     parse_properties, load_validation, DatasetProperties,
-    format_num, format_duration,
+    format_num, format_duration, scale, size_class, class_rank, scale_covered,
 };
 
 // ============================================================================
@@ -153,14 +153,28 @@ fn sssp_single_source(view: &GraphView, source_id: u64) -> HashMap<u64, f64> {
 
 const ALL_ALGOS: &[&str] = &["BFS", "PR", "WCC", "CDLP", "LCC", "SSSP"];
 
-/// XS-size (example) datasets for correctness testing.
-const XS_DATASETS: &[&str] = &["example-directed", "example-undirected"];
-
-/// S-size datasets for performance benchmarking.
-const S_DATASETS: &[&str] = &["wiki-Talk", "cit-Patents", "datagen-7_5-fb"];
-
-/// Default datasets to run when --all is specified without --dataset.
+/// Default datasets to run when --all is specified without --dataset or
+/// --size: the two LDBC example graphs, the correctness set. They are far
+/// below 2XS, so they cover no size class.
 const DEFAULT_DATASETS: &[&str] = &["example-directed", "example-undirected"];
+
+/// Every dataset under `data_dir` that has a properties file stating its
+/// vertex and edge counts, with its scale and size class (ALGO-08, #1687).
+fn discover_datasets(data_dir: &Path) -> Vec<(String, f64, Option<&'static str>)> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(data_dir) else { return found };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(props_path) = find_properties_file(data_dir, &name) else { continue };
+        let props = parse_properties(&props_path);
+        if let (Some(v), Some(e)) = (props.vertices, props.edges) {
+            let s = scale(v, e);
+            found.push((name, s, size_class(s)));
+        }
+    }
+    found.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal).then(a.0.cmp(&b.0)));
+    found
+}
 
 fn main() {
     bench_setup::init();
@@ -174,6 +188,7 @@ fn main() {
     let size_arg = get_arg(&args, "--size");
     let run_all = args.iter().any(|a| a == "--all");
     let validate = !args.iter().any(|a| a == "--no-validate");
+    let json_out = get_arg(&args, "--json");
 
     if !run_all && dataset_arg.is_none() && algo_arg.is_none() {
         print_usage();
@@ -184,44 +199,29 @@ fn main() {
     let datasets: Vec<String> = if let Some(ds) = dataset_arg {
         vec![ds]
     } else if let Some(ref size) = size_arg {
-        match size.to_uppercase().as_str() {
-            "XS" => XS_DATASETS.iter().map(|s| s.to_string()).collect(),
-            "S" => {
-                // Auto-discover S-size datasets present in data directory
-                let data_path = Path::new(&data_dir);
-                let mut found: Vec<String> = S_DATASETS
-                    .iter()
-                    .filter(|ds| {
-                        let dir = data_path.join(ds);
-                        dir.join(format!("{}.v", ds)).exists()
-                            && dir.join(format!("{}.e", ds)).exists()
-                    })
-                    .map(|s| s.to_string())
-                    .collect();
-                if found.is_empty() {
-                    eprintln!("WARNING: No S-size datasets found in {}", data_dir);
-                    eprintln!("Run: scripts/download_graphalytics.sh --size S");
-                    return;
-                }
-                found.sort();
-                found
-            }
-            "ALL" => {
-                let data_path = Path::new(&data_dir);
-                let mut all: Vec<String> = XS_DATASETS.iter().map(|s| s.to_string()).collect();
-                for ds in S_DATASETS {
-                    let dir = data_path.join(ds);
-                    if dir.join(format!("{}.v", ds)).exists() {
-                        all.push(ds.to_string());
-                    }
-                }
-                all
-            }
-            other => {
-                eprintln!("Unknown size '{}'. Valid: XS, S, all", other);
-                return;
-            }
+        // A size is a Graphalytics class, computed from each dataset's own
+        // vertex and edge counts (ALGO-08, #1687), or `all`.
+        let want = size.to_uppercase();
+        if want != "ALL" && class_rank(&want).is_none() {
+            eprintln!("Unknown size '{}'. Valid: 2XS, XS, S, M, L, XL, 2XL, all", size);
+            std::process::exit(2);
         }
+        let picked: Vec<String> = discover_datasets(Path::new(&data_dir))
+            .into_iter()
+            .filter(|(_, _, class)| match class {
+                Some(c) => want == "ALL" || c.eq_ignore_ascii_case(&want),
+                None => false,
+            })
+            .map(|(name, _, _)| name)
+            .collect();
+        if picked.is_empty() {
+            // Not a silent success: asking for S and running nothing used to
+            // exit 0, which a harness reads as "S passed".
+            eprintln!("No {} datasets found in {}", want, data_dir);
+            eprintln!("Run: scripts/download_graphalytics.sh --size {}", want);
+            std::process::exit(2);
+        }
+        picked
     } else {
         DEFAULT_DATASETS.iter().map(|s| s.to_string()).collect()
     };
@@ -247,6 +247,9 @@ fn main() {
     let data_path = Path::new(&data_dir);
 
     let mut results: Vec<BenchmarkResult> = Vec::new();
+    // Per dataset: its class and whether every algorithm it defines ran and
+    // matched the reference (ALGO-08, #1687).
+    let mut dataset_runs: Vec<DatasetRun> = Vec::new();
 
     for dataset in &datasets {
         println!("----------------------------------------------------------------");
@@ -260,6 +263,7 @@ fn main() {
                 eprintln!("  ERROR: {}", e);
                 eprintln!("  Run scripts/download_graphalytics.sh to download datasets.");
                 eprintln!();
+                dataset_runs.push(DatasetRun::failed(dataset, "dataset files not found"));
                 continue;
             }
         };
@@ -276,6 +280,16 @@ fn main() {
         let directed = props.directed.unwrap_or_else(|| {
             graphalytics_common::is_directed(dataset)
         });
+        let (ds_scale, ds_class) = match (props.vertices, props.edges) {
+            (Some(v), Some(e)) => {
+                let s = scale(v, e);
+                (Some(s), size_class(s))
+            }
+            _ => (None, None),
+        };
+        if let Some(s) = ds_scale {
+            println!("  Scale {:.1}: class {}", s, ds_class.unwrap_or("below 2XS"));
+        }
 
         // Load the graph
         println!("  Loading {} (directed={})...", dataset, directed);
@@ -284,6 +298,10 @@ fn main() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("  ERROR loading dataset: {}", e);
+                let mut run = DatasetRun::failed(dataset, "dataset did not load");
+                run.class = ds_class;
+                run.scale = ds_scale;
+                dataset_runs.push(run);
                 continue;
             }
         };
@@ -299,25 +317,64 @@ fn main() {
 
         let view = &loaded.view;
 
-        // Run each requested algorithm
+        let mut run = DatasetRun {
+            dataset: dataset.clone(),
+            class: ds_class,
+            scale: ds_scale,
+            vertices: loaded.info.vertex_count,
+            edges: loaded.info.edge_count,
+            load_ms: load_time.as_secs_f64() * 1000.0,
+            all_passed: true,
+            note: None,
+        };
+
+        // Run each requested algorithm the dataset defines. A dataset's
+        // properties list its algorithms; an unweighted graph lists no SSSP and
+        // ships no SSSP reference, which is not a failure. Without a list,
+        // every requested algorithm counts.
         for algo in &algos {
-            let result = run_algorithm(algo, view, dataset, &props, data_path, validate, directed);
-            if let Some(r) = result {
-                let status = if r.validated {
-                    if r.validation_passed { "  PASS" } else { "  FAIL" }
-                } else {
-                    ""
-                };
-                println!(
-                    "  {:>6}  {:>12}  {}{}",
-                    r.algorithm,
-                    format_duration(r.duration),
-                    r.summary,
-                    status,
-                );
-                results.push(r);
+            if let Some(listed) = &props.algorithms {
+                if !listed.iter().any(|a| a == algo) {
+                    println!("  {:>6}  {:>12}  not defined for this dataset", algo, "-");
+                    continue;
+                }
             }
+            let result = run_algorithm(algo, view, dataset, &props, data_path, validate, directed);
+            let Some(mut r) = result else {
+                run.all_passed = false;
+                continue;
+            };
+            // An algorithm the dataset defines with no reference output to
+            // check it against has not been validated, and is reported as a
+            // failure, not left blank: a blank is how a size class could look
+            // covered without one answer having been compared.
+            if validate && !r.validated {
+                r.validated = true;
+                r.validation_passed = false;
+                r.summary.push_str(" (no reference output)");
+            }
+            if !(r.validated && r.validation_passed) {
+                run.all_passed = false;
+            }
+            let status = if r.validated {
+                if r.validation_passed { "  PASS" } else { "  FAIL" }
+            } else {
+                ""
+            };
+            println!(
+                "  {:>6}  {:>12}  {}{}",
+                r.algorithm,
+                format_duration(r.duration),
+                r.summary,
+                status,
+            );
+            results.push(r);
         }
+        if !validate {
+            run.all_passed = false;
+            run.note = Some("validation disabled");
+        }
+        dataset_runs.push(run);
         println!();
     }
 
@@ -354,6 +411,57 @@ fn main() {
         println!();
     }
 
+    // The largest size class every dataset of which validated (ALGO-08).
+    let covered = scale_covered(
+        &dataset_runs.iter().map(|r| (r.class, r.all_passed)).collect::<Vec<_>>(),
+    );
+    println!("  Datasets by class:");
+    for r in &dataset_runs {
+        println!(
+            "    {:>20}  {:>9}  {}{}",
+            r.dataset,
+            r.class.unwrap_or("below 2XS"),
+            if r.all_passed { "every algorithm validated" } else { "NOT validated" },
+            r.note.map(|n| format!(" ({n})")).unwrap_or_default(),
+        );
+    }
+    println!(
+        "  scale_covered: {}",
+        covered.unwrap_or("none (no size class has every dataset validated)")
+    );
+    println!();
+
+    if let Some(path) = &json_out {
+        let summary = serde_json::json!({
+            "scale_covered": covered,
+            "validation": validate,
+            "datasets": dataset_runs.iter().map(|d| serde_json::json!({
+                "dataset": d.dataset,
+                "class": d.class,
+                "scale": d.scale,
+                "vertices": d.vertices,
+                "edges": d.edges,
+                "load_ms": d.load_ms,
+                "all_passed": d.all_passed,
+                "note": d.note,
+                "algorithms": results.iter().filter(|r| r.dataset == d.dataset).map(|r| serde_json::json!({
+                    "algorithm": r.algorithm,
+                    "ms": r.duration.as_secs_f64() * 1000.0,
+                    "validated": r.validated,
+                    "passed": r.validated && r.validation_passed,
+                    "summary": r.summary,
+                })).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        });
+        match std::fs::write(path, serde_json::to_string_pretty(&summary).unwrap()) {
+            Ok(()) => println!("  Wrote {}", path),
+            Err(e) => {
+                eprintln!("  ERROR writing {}: {}", path, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Exit with non-zero status if any validations failed
     let failures = results.iter().filter(|r| r.validated && !r.validation_passed).count();
     if failures > 0 {
@@ -365,6 +473,34 @@ fn main() {
 // ============================================================================
 // ALGORITHM DISPATCH
 // ============================================================================
+
+/// What one dataset's run established (ALGO-08, #1687).
+struct DatasetRun {
+    dataset: String,
+    class: Option<&'static str>,
+    scale: Option<f64>,
+    vertices: usize,
+    edges: usize,
+    load_ms: f64,
+    /// Every algorithm the dataset defines ran and matched its reference.
+    all_passed: bool,
+    note: Option<&'static str>,
+}
+
+impl DatasetRun {
+    fn failed(dataset: &str, note: &'static str) -> Self {
+        Self {
+            dataset: dataset.to_string(),
+            class: None,
+            scale: None,
+            vertices: 0,
+            edges: 0,
+            load_ms: 0.0,
+            all_passed: false,
+            note: Some(note),
+        }
+    }
+}
 
 struct BenchmarkResult {
     dataset: String,
@@ -863,7 +999,10 @@ fn print_usage() {
     println!("  --all              Run all algorithms on all default datasets");
     println!("  --dataset <name>   Specify a dataset (e.g., example-directed, wiki-Talk)");
     println!("  --algo <name>      Run a specific algorithm: BFS, PR, WCC, CDLP, LCC, SSSP");
-    println!("  --size <XS|S|all>  Dataset size: XS (default), S (performance), all (both)");
+    println!("  --size <class|all> Every dataset in --data-dir of that LDBC size class");
+    println!("                     (2XS, XS, S, M, L, XL, 2XL), computed from its");
+    println!("                     .properties vertex and edge counts; or all of them");
+    println!("  --json <path>      Also write the results and scale_covered as JSON");
     println!("  --data-dir <path>  Dataset directory (default: data/graphalytics/)");
     println!("  --no-validate      Skip result validation against expected outputs");
     println!();

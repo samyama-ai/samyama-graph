@@ -2,25 +2,33 @@
 #
 # Download LDBC Graphalytics datasets.
 #
-# By default downloads tiny (XS) example datasets for correctness testing.
-# Use --size S to download S-size datasets for performance benchmarking.
+# By default downloads the two tiny LDBC example graphs, the correctness set.
+# --size names an LDBC size class (scale = log10(vertices + edges)); the
+# graphs listed for it below are of that class, checked by
+# tests/graphalytics_size_class.rs (ALGO-08, #1687).
 #
 # Usage:
-#   ./scripts/download_graphalytics.sh                     # XS datasets
-#   ./scripts/download_graphalytics.sh --size S            # S-size datasets
-#   ./scripts/download_graphalytics.sh --size all          # Both XS and S
+#   ./scripts/download_graphalytics.sh                     # example graphs
+#   ./scripts/download_graphalytics.sh --size S            # S: datagen-7_5-fb, graph500-22
+#   ./scripts/download_graphalytics.sh --size M            # M: datagen-8_0-fb, graph500-23
+#   ./scripts/download_graphalytics.sh --size all          # examples and every class below
 #   ./scripts/download_graphalytics.sh --data-dir /path    # Custom output dir
+#
+# Archives come from https://datasets.ldbcouncil.org/graphalytics/ and need
+# `zstd`. Each holds the graph, its .properties and the reference output of
+# every algorithm the graph defines. Sizes (compressed): S 170 and 212 MB,
+# M 527 and 430 MB; extracted, about 1, 1, 3.4 and 2.4 GB.
 
 set -euo pipefail
 
 # ── Parse arguments ──────────────────────────────────────────────────
 DATA_DIR="data/graphalytics"
-SIZE="XS"
+SIZE="examples"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --size)
-            SIZE="${2:-XS}"
+            SIZE="${2:-examples}"
             shift 2
             ;;
         --data-dir)
@@ -101,20 +109,26 @@ download_xs_dataset() {
     echo "    Done: ${dir}/"
 }
 
-# ── S-size dataset helper ────────────────────────────────────────────
+# ── Datasets by LDBC size class ─────────────────────────────────────
 #
-# S-size datasets are distributed as tar.zst archives from the LDBC
-# Graphalytics data repository.  Requires `zstd` for decompression.
+# scale = log10(vertices + edges), to one decimal; 2XS [6.5, 7), XS [7, 7.5),
+# S [7.5, 8), M [8, 8.5). This list used to call wiki-Talk (2XS) and
+# cit-Patents (XS) "S".
 #
-# Datasets:
-#   wiki-Talk       ~  2.4M edges,  2.4M vertices (directed)
-#   cit-Patents     ~  16.5M edges, 3.8M vertices (directed)
-#   datagen-7_5-fb  ~  34.2M edges, 633K vertices (undirected)
+#   wiki-Talk        2.4M vertices,   5.0M edges  scale 6.9  2XS  directed
+#   cit-Patents      3.8M vertices,  16.5M edges  scale 7.3  XS   directed
+#   datagen-7_5-fb   633K vertices,  34.2M edges  scale 7.5  S    undirected, weighted
+#   graph500-22      2.4M vertices,  64.2M edges  scale 7.8  S    undirected
+#   datagen-8_0-fb   1.7M vertices, 107.5M edges  scale 8.0  M    undirected, weighted
+#   graph500-23      4.6M vertices, 129.3M edges  scale 8.1  M    undirected
 #
-S_DATASETS=("wiki-Talk" "cit-Patents" "datagen-7_5-fb")
-S_BASE_URL="https://ldbcouncil.org/ldbc_graphalytics/datasets"
+CLASS_2XS=("wiki-Talk")
+CLASS_XS=("cit-Patents")
+CLASS_S=("datagen-7_5-fb" "graph500-22")
+CLASS_M=("datagen-8_0-fb" "graph500-23")
+ARCHIVE_URL="https://datasets.ldbcouncil.org/graphalytics"
 
-download_s_dataset() {
+download_archive() {
     local name="$1"
     local dir="${DATA_DIR}/${name}"
 
@@ -129,35 +143,17 @@ download_s_dataset() {
         return 1
     fi
 
-    echo "  [DOWNLOAD] ${name} (S-size)..."
+    echo "  [DOWNLOAD] ${name}..."
     mkdir -p "${dir}"
 
-    local archive="${DATA_DIR}/${name}.tar.zst"
-    local url="${S_BASE_URL}/${name}.tar.zst"
+    local url="${ARCHIVE_URL}/${name}.tar.zst"
 
-    # Download archive
-    if curl -fSL --progress-bar "${url}" -o "${archive}"; then
-        echo "    Downloaded: $(du -h "${archive}" | cut -f1)"
-    else
-        echo "    WARNING: Could not download ${name}.tar.zst from ${url}"
-        echo "    Trying alternate URL..."
-        local alt_url="https://datasets.ldbcouncil.org/graphalytics/${name}.tar.zst"
-        if curl -fSL --progress-bar "${alt_url}" -o "${archive}"; then
-            echo "    Downloaded: $(du -h "${archive}" | cut -f1)"
-        else
-            echo "    ERROR: Could not download ${name}.tar.zst"
-            rm -f "${archive}"
-            return 1
-        fi
+    # The archives hold their files at the top level, so they are unpacked
+    # into the dataset's own directory, where the runner looks for them.
+    if ! curl -fSL --progress-bar "${url}" | zstd -dc | tar -x -C "${dir}"; then
+        echo "    ERROR: Could not download or unpack ${url}"
+        return 1
     fi
-
-    # Decompress and extract
-    echo "    Decompressing..."
-    zstd -d "${archive}" -o "${DATA_DIR}/${name}.tar" --force 2>/dev/null
-    tar -xf "${DATA_DIR}/${name}.tar" -C "${DATA_DIR}/"
-
-    # Clean up archive files
-    rm -f "${archive}" "${DATA_DIR}/${name}.tar"
 
     # Verify extraction
     if [ -f "${dir}/${name}.v" ] && [ -f "${dir}/${name}.e" ]; then
@@ -177,22 +173,32 @@ download_s_dataset() {
 
 # ── Download datasets ────────────────────────────────────────────────
 
-if [[ "${SIZE}" == "XS" || "${SIZE}" == "all" ]]; then
-    echo "Downloading XS (example) datasets..."
+SIZE_UPPER=$(echo "${SIZE}" | tr '[:lower:]' '[:upper:]')
+case "${SIZE_UPPER}" in
+    EXAMPLES) WANT=() ;;
+    2XS) WANT=("${CLASS_2XS[@]}") ;;
+    XS)  WANT=("${CLASS_XS[@]}") ;;
+    S)   WANT=("${CLASS_S[@]}") ;;
+    M)   WANT=("${CLASS_M[@]}") ;;
+    ALL) WANT=("${CLASS_2XS[@]}" "${CLASS_XS[@]}" "${CLASS_S[@]}" "${CLASS_M[@]}") ;;
+    *)
+        echo "Unknown size '${SIZE}'. Valid: examples, 2XS, XS, S, M, all"
+        exit 2
+        ;;
+esac
+
+if [[ "${SIZE_UPPER}" == "EXAMPLES" || "${SIZE_UPPER}" == "ALL" ]]; then
+    echo "Downloading the example graphs..."
     echo ""
     download_xs_dataset "example-directed"
     download_xs_dataset "example-undirected"
     echo ""
 fi
 
-if [[ "${SIZE}" == "S" || "${SIZE}" == "all" ]]; then
-    echo "Downloading S-size datasets..."
-    echo ""
-    for ds in "${S_DATASETS[@]}"; do
-        download_s_dataset "${ds}" || true
-    done
-    echo ""
-fi
+FAILED=0
+for ds in "${WANT[@]+"${WANT[@]}"}"; do
+    download_archive "${ds}" || FAILED=1
+done
 
 # ── Verify ───────────────────────────────────────────────────────────
 echo "Verifying datasets..."
@@ -204,19 +210,19 @@ for ds in example-directed example-undirected; do
     if [ -f "${dir}/${ds}.v" ] && [ -f "${dir}/${ds}.e" ]; then
         vcount=$(wc -l < "${dir}/${ds}.v" | tr -d ' ')
         ecount=$(wc -l < "${dir}/${ds}.e" | tr -d ' ')
-        echo "  ${ds} (XS):"
+        echo "  ${ds} (example):"
         echo "    Vertex file: ${dir}/${ds}.v  (${vcount} lines)"
         echo "    Edge file:   ${dir}/${ds}.e  (${ecount} lines)"
     fi
 done
 
-# Check S datasets
-for ds in "${S_DATASETS[@]}"; do
+# Check class datasets
+for ds in "${CLASS_2XS[@]}" "${CLASS_XS[@]}" "${CLASS_S[@]}" "${CLASS_M[@]}"; do
     dir="${DATA_DIR}/${ds}"
     if [ -f "${dir}/${ds}.v" ] && [ -f "${dir}/${ds}.e" ]; then
         vcount=$(wc -l < "${dir}/${ds}.v" | tr -d ' ')
         ecount=$(wc -l < "${dir}/${ds}.e" | tr -d ' ')
-        echo "  ${ds} (S):"
+        echo "  ${ds}:"
         echo "    Vertex file: ${dir}/${ds}.v  (${vcount} lines)"
         echo "    Edge file:   ${dir}/${ds}.e  (${ecount} lines)"
     fi
@@ -228,7 +234,8 @@ echo "  Download complete!"
 echo ""
 echo "  Run benchmarks:"
 echo "    cargo bench --release --bench graphalytics_benchmark -- --all"
-if [[ "${SIZE}" == "S" || "${SIZE}" == "all" ]]; then
-    echo "    cargo bench --release --bench graphalytics_benchmark -- --size S --all"
+if [[ "${SIZE_UPPER}" != "EXAMPLES" ]]; then
+    echo "    cargo bench --release --bench graphalytics_benchmark -- --size ${SIZE} --all"
 fi
 echo "================================================================"
+exit "${FAILED}"
