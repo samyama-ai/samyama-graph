@@ -96,7 +96,12 @@ parse-cache entry, which is kept on purpose; every later run keeps 0.
 4. **`ORDER BY … LIMIT 10` costs 60% of a full sort.** Top-10 peaks at
    35.4 MB against 59.2 MB for sorting all 100,000 rows. A bounded top-k needs
    memory for k rows; most of the 35 MB is the projected input, held before
-   the top-k sees it.
+   the top-k sees it. **Addressed by #2275**: the bounded sort now feeds rows
+   into the top-k as they arrive and pulls its input in batches no larger
+   than its working buffer, so it holds thousands of rows, not 65,536.
+   `tests/topk_memory.rs` gates the ratio (top-10 below a fifth of the full
+   sort's peak); the table above is the pre-change baseline until the
+   benchmark is re-run.
 
 5. **A result row is large.** 300,000 rows of two integers peak at 112.5 MB,
    374 bytes per row and 1.55 times the graph itself. Each `Value` in a
