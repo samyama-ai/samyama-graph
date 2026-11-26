@@ -117,6 +117,11 @@ Moving these algorithms onto the shared walk changed no answer:
 | DAG longest path | dagLongestPath, longestPath | Out-edges | Ignored: longest by edge count | A self-loop makes the graph cyclic, and the call refuses | The best endpoint is chosen across all components | Smallest index among equally long endpoints | None |
 | Random walk | randomWalk | Out-edges | **Ignored**: the step is uniform over successors, not weight-proportional **(differs)** | Traversed like any edge | A dead end ends the walk early; there is no restart | Not applicable | Reproducible from the seed: a fixed xorshift, no clock. Seeds `2k` and `2k+1` give the same walk **(differs)** |
 | Neighbour sampling | sample.neighbors, sample.neighbours, sampleNeighbors, sampleNeighbours, neighbourSampling, neighborSampling | `direction`: `'out'` (default) follows each relationship, `'in'` goes against it, `'both'` ignores it | Uniform unless `weightProperty` is given; then drawn in proportion to the weight, without replacement (Efraimidis-Spirakis). Weight 0 is never drawn; a negative, infinite or NaN weight is refused; a relationship without the property counts as 1, as in every weighted algorithm here. Parallel relationships are one neighbour, their weights added | A self-loop is a relationship like any other: a node can be drawn as its own neighbour. It is not expanded again | A node with no neighbours gives no rows; a seed outside the projection is refused | Seeded (`seed`, default 42), with a fixed SplitMix64 rather than `rand`: the same seed returns the same rows in the same order. A node is expanded at most once per batch | None: one row per sampled relationship, `batch, hop, node, neighbour`, grouped by batch, then hop; at most `fanout` neighbours per node per hop, all of them when it has fewer |
+| Forest fire | sample.forestFire, forestFire, forestFireSample, forestFireSampling | `direction`: `'out'` (default) follows each relationship, `'in'` goes against it, `'both'` ignores it | Ignored | A self-loop is never burnt: its node is already alight | When the fire dies before `size` it restarts at the next unburnt seed, else at a uniformly chosen unburnt node, so it always reaches `size` | Seeded (`seed`, default 42), with the fixed SplitMix64 neighbour sampling uses: the same seed returns the same rows in the same order; neighbours are taken in id order before the draw | None: `node, position`, one row per node in the order it caught fire; mean burnt per node `p/(1-p)` for `forwardProbability` p (default 0.7) |
+| Snowball sampling | sample.snowball, snowball, snowballSample, snowballSampling | `direction`: `'out'` (default) follows each relationship, `'in'` goes against it, `'both'` ignores it | Ignored | A self-loop adds nothing: its node is already in the sample | Stays within the seeds' reach; fewer rows when it is smaller than `maxNodes` | Seeded (`seed`, default 42), with the fixed SplitMix64 neighbour sampling uses: the same seed returns the same rows in the same order; with `perNode: -1` (default) nothing is random | None: `node, hop`, seeds at hop 0, at most `perNode` new neighbours per node per wave |
+| Ego network | sample.egoNetwork, egoNetwork, ego, egoGraph | `direction`: `'out'` (default) follows each relationship, `'in'` goes against it, `'both'` ignores it | Ignored: hops, not weighted distance | A self-loop adds nothing | Only the seeds' own components | Not random; ordered by distance, then node id | None: `node, distance`, each node at its smallest number of hops from a seed, up to `hops` (default 1) |
+| Random walk sampling | sample.randomWalk, randomWalkSample, randomWalkSampling | `direction`: `'out'` (default) follows each relationship, `'in'` goes against it, `'both'` ignores it | Ignored: each step is uniform over neighbours | A self-loop is a step like any other | A walk cannot leave its seeds' components: fewer than `size` rows when they hold fewer nodes, or `maxSteps` (default `100 * size`) runs out | Seeded (`seed`, default 42), with the fixed SplitMix64 neighbour sampling uses: the same seed returns the same rows in the same order | None: `node, position`, first-visit order; restarts at a uniformly chosen seed with `restartProbability` (default 0.15) or at a dead end |
+| Stratified sampling | sample.stratified, stratifiedSample, stratifiedSampling | Not applicable: reads node labels, not relationships | Not applicable | Not applicable | Every node is in exactly one stratum, its labels sorted and joined with `:`; an unlabelled node is in `""` | Seeded (`seed`, default 42), with the fixed SplitMix64 neighbour sampling uses: the same seed returns the same rows in the same order; members are taken in id order before the draw | `fraction`: the nearest whole number of each stratum (a stratum can round to 0); `perStratum`: that many, or the whole stratum when it is smaller. `node, stratum`, by stratum, then node id |
 | Topological sort | topologicalSort, toposort | Out-edges | Ignored | A self-loop keeps the in-degree above 0 forever, so the graph reports as cyclic | All components emitted in one order, interleaved by index | The smallest ready index | None |
 | Cycle detection | cycleDetection, findCycle | Out-edges | Ignored | Detected: a self-loop is a one-node cycle | The search restarts from every unvisited node | The first back edge, from the lowest start index | None |
 | Max flow | maxFlow | Out-edges; each arc gets a reverse arc at capacity 0 | Used as capacity, 1.0 when absent; parallel edges sum | Inert | An unreachable sink is a flow of 0. A node that is not in the graph, and a source equal to the sink, are refused | The augmenting path comes from a hash-ordered scan, so **which** path is chosen varies; the flow value does not **(differs)** | None: the raw flow |
@@ -336,6 +341,68 @@ What it refuses:
 - a `graph` that names no projection, or is not a non-empty string;
 - a `graph` an algorithm never takes a view from, rather than ignoring it.
 
+## Incremental updates
+
+`incremental: true` keeps an algorithm's result with the graph between calls
+and updates it from what was added since, instead of computing it again from
+the whole graph (ALGO-14):
+
+```cypher
+CALL algo.pageRank({incremental: true}) YIELD node, score
+
+CALL algo.wcc({incremental: true}) YIELD node, componentId
+
+CALL algo.degree({incremental: true}) YIELD node, score
+```
+
+The first call builds the result as a plain call does and keeps it. A later
+call reads the nodes and relationships created since and applies just those,
+so one new relationship costs about what it changes rather than a full run.
+`label` and `edgeType` work as they do without the key; each combination of
+them -- and, for PageRank, each `damping` -- keeps its own result.
+
+What it promises against a plain call on the same graph:
+
+| Algorithm | Same answer? |
+|---|---|
+| `algo.degree` | Exactly the same scores. |
+| `algo.wcc` | The same components. The first call's `componentId`s are the plain call's; after that an untouched component keeps its id, and two components that merge take one of their ids, which a plain call may number differently. Compare which nodes share an id, not the ids. |
+| `algo.pageRank` | The same fixed point, to within an L1 distance of `2 * 1e-4 / (1 - damping)` (1.3e-3 at 0.85) on a graph with no dangling nodes. A plain call stops after `iterations` (20), which leaves more error than that; `iterations: 1000` is the plain call to compare against. |
+
+When it computes from scratch instead -- still the right answer, at a plain
+call's cost:
+
+- **anything was deleted** -- a node or a relationship -- **or a node gained or
+  lost a label**, since the last call. Deletions are not applied as updates: a
+  removed relationship can split a component or move PageRank mass anywhere;
+- more nodes and relationships were added since the last call than the graph's
+  log of additions keeps -- between half a million and a million, depending on
+  when it last made room (`MAX_RECORDED_ADDITIONS`);
+- after the update, the result's node count (or, with no filter, its
+  relationship count) differs from the graph's. Every write is meant to reach
+  the update; this check turns one that did not into a recompute rather than
+  a wrong answer.
+
+What it keeps, and where:
+
+- with the graph, in memory, per tenant. A restart forgets it, as it forgets
+  projections;
+- at most 8 results per graph; the least recently used goes first. A PageRank
+  result holds a copy of the graph's adjacency, so this bounds the memory it
+  can hold to a few times the graph's own relationship arrays.
+
+What it refuses:
+
+- `incremental` on any other algorithm (`unknown config key`). Closeness,
+  betweenness and the like depend on paths through the whole graph, which one
+  new relationship can change anywhere;
+- an `incremental` that is not `true` or `false`;
+- `incremental: true` with `graph`: a projection is a snapshot, and the
+  incremental result follows the live graph;
+- `incremental: true` with `iterations` on PageRank: it runs until every
+  residual is small, not for a number of iterations;
+- a `damping` that is not above 0 and below 1.
+
 ## Embeddings
 
 **`gds.fastRP` and `gds.node2vec` are the one exception to "`gds.*` is the
@@ -422,7 +489,7 @@ ratio, and placing them largest first keeps the overshoot to one group per split
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
 |---|---|---|---|---|---|---|---|
 | PCA | pca | No edges: it reads numeric node properties | Node properties, not edge weights; a non-numeric or missing value is the caller's to handle | Not applicable | Not applicable: there is no graph | Components in eigenvalue-descending order; equal eigenvalues give an arbitrary but reproducible basis | Centred by default, scaled on request. **Component sign is not fixed** **(differs)**. Deterministic: a fixed start vector and a seeded RNG |
-| Optimisation solvers | or.solve | Not applicable | Not applicable | Not applicable | Not applicable | Solver-specific; every solver is seed-reproducible (OPT-08) | Solver-specific. Every row carries `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and `total_time_ms` (OPT-09), multi-objective rows included; `fitness` includes the constraint penalty, `objective` does not |
+| Optimisation solvers | or.solve | Not applicable | Not applicable | Not applicable | Not applicable | Solver-specific; every solver is seed-reproducible (OPT-08) | Solver-specific. Every row carries `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and `total_time_ms` (OPT-09), multi-objective rows included, and `evaluations` and `stopped_by` (`iterations`, `time_budget` or `evaluation_budget`) for the optional `timeBudgetMs` and `maxEvaluations` limits (OPT-11); `fitness` includes the constraint penalty, `objective` does not |
 
 ## Where a convention differs from the obvious one
 

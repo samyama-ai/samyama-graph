@@ -1,0 +1,124 @@
+#!/usr/bin/env bpftrace
+/*
+ * samyama-tail-latency.bt -- where a slow statement's time went (#2219).
+ *
+ *   sudo bpftrace -p "$(pidof samyama)" ops/bpftrace/samyama-tail-latency.bt [threshold_ms]
+ *
+ * A write is two spans, and a slow write can be slow in either:
+ *
+ *   samyama:query__start .. query__done      the engine runs the statement
+ *   samyama:persist__start .. persist__done  its mutations reach the WAL and
+ *                                            RocksDB, fsync included when
+ *                                            SAMYAMA_FSYNC=1
+ *
+ * The query span ends before persistence starts (measured), so a write that
+ * waited 600 ms on a slow disk reports ~0 ms in query__done. This script
+ * reports both spans. For each one slower than threshold_ms (default 100):
+ *
+ *   SLOW query   412 ms  oncpu=35 futex=361 syscall=6 sched=10  write=1  MATCH ...
+ *   SLOW persist 603 ms  fsync=601 oncpu=1 other=1  mutations=1  fsync_calls=2
+ *
+ *   oncpu    the thread was running
+ *   futex    blocked in futex(): a contended std/parking_lot lock or condvar
+ *   syscall  blocked in any other syscall (reads, page-ins, epoll)
+ *   sched    runnable but not running: CPU contention
+ *   fsync    inside libc fsync()/fdatasync(), timed at the libc boundary so
+ *            the whole wait counts, whoever caused it
+ *
+ * Not seen here: waiting for the store's lock. It is a tokio RwLock, taken
+ * before query__start, and an async wait parks the task, not the thread.
+ *
+ * A span starts and ends on one thread (measured: 20 of 20 queries and 10 of
+ * 10 persists under concurrent reads and writes), so time is kept per thread.
+ * Ctrl-C prints the latency histograms.
+ */
+
+BEGIN
+{
+	@threshold_ns = ($1 > 0 ? $1 : 100) * 1000000;
+}
+
+usdt::samyama:query__start   { @span[tid] = 1; @t0[tid] = nsecs; }
+usdt::samyama:persist__start { @span[tid] = 2; @t0[tid] = nsecs; }
+
+tracepoint:sched:sched_switch
+/@span[args.prev_pid]/
+{
+	@off_ts[args.prev_pid] = nsecs;
+	@runnable[args.prev_pid] = (args.prev_state == 0);
+}
+
+tracepoint:sched:sched_switch
+/@off_ts[args.next_pid]/
+{
+	$d = nsecs - @off_ts[args.next_pid];
+	if (@runnable[args.next_pid]) {
+		@sched[args.next_pid] += $d;
+	} else {
+		@off[args.next_pid] += $d;
+	}
+	delete(@off_ts[args.next_pid]);
+	delete(@runnable[args.next_pid]);
+}
+
+tracepoint:syscalls:sys_enter_futex /@span[tid]/ { @futex_ts[tid] = nsecs; }
+tracepoint:syscalls:sys_exit_futex  /@futex_ts[tid]/
+{
+	@futex[tid] += nsecs - @futex_ts[tid];
+	delete(@futex_ts[tid]);
+}
+
+uprobe:libc:fsync, uprobe:libc:fdatasync { @fsync_ts[tid] = nsecs; }
+uretprobe:libc:fsync, uretprobe:libc:fdatasync
+/@fsync_ts[tid]/
+{
+	$d = nsecs - @fsync_ts[tid];
+	@fsync_us = hist($d / 1000);
+	if (@span[tid]) {
+		@fsync[tid] += $d;
+		@fsync_n[tid] += 1;
+	}
+	delete(@fsync_ts[tid]);
+}
+
+usdt::samyama:query__done
+/@span[tid] == 1/
+{
+	$total = nsecs - @t0[tid];
+	$off = @off[tid];
+	$futex = @futex[tid] < $off ? @futex[tid] : $off;
+	$oncpu = $total > $off + @sched[tid] ? $total - $off - @sched[tid] : 0;
+	if (arg5) { @write_query_ms = hist($total / 1000000); } else { @read_query_ms = hist($total / 1000000); }
+	if ((int64)$total >= @threshold_ns) {
+		printf("SLOW query   %d ms  oncpu=%d futex=%d syscall=%d sched=%d  write=%d  %s\n",
+		       $total / 1000000, $oncpu / 1000000, $futex / 1000000, ($off - $futex) / 1000000,
+		       @sched[tid] / 1000000, arg5, str(arg0, arg1 < 120 ? arg1 : 120));
+	}
+	delete(@span[tid]); delete(@t0[tid]); delete(@off[tid]); delete(@sched[tid]);
+	delete(@futex[tid]); delete(@fsync[tid]); delete(@fsync_n[tid]);
+}
+
+usdt::samyama:persist__done
+/@span[tid] == 2/
+{
+	$total = nsecs - @t0[tid];
+	$off = @off[tid] + @sched[tid];
+	$fsync = @fsync[tid];
+	$oncpu = $total > $off ? $total - $off : 0;
+	$other = $total > $fsync + $oncpu ? $total - $fsync - $oncpu : 0;
+	@persist_ms = hist($total / 1000000);
+	if ((int64)$total >= @threshold_ns) {
+		printf("SLOW persist %d ms  fsync=%d oncpu=%d other=%d  mutations=%d  fsync_calls=%d  failed=%d\n",
+		       $total / 1000000, $fsync / 1000000, $oncpu / 1000000, $other / 1000000,
+		       arg0, @fsync_n[tid], arg2);
+	}
+	delete(@span[tid]); delete(@t0[tid]); delete(@off[tid]); delete(@sched[tid]);
+	delete(@futex[tid]); delete(@fsync[tid]); delete(@fsync_n[tid]);
+}
+
+END
+{
+	clear(@threshold_ns); clear(@span); clear(@t0); clear(@off); clear(@sched);
+	clear(@runnable); clear(@off_ts); clear(@futex); clear(@futex_ts);
+	clear(@fsync); clear(@fsync_n); clear(@fsync_ts);
+}

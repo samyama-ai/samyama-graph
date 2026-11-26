@@ -4,6 +4,8 @@
 //! Algorithms are implemented in `samyama-graph-algorithms` crate.
 //! This module provides the integration/adapter layer.
 
+pub mod incremental;
+
 use crate::graph::{GraphStore, EdgeType, Label, PropertyValue};
 pub use samyama_graph_algorithms::GraphView;
 use samyama_graph_algorithms::NodeId as AlgoNodeId;
@@ -14,6 +16,7 @@ pub use samyama_graph_algorithms::{
     page_rank, page_rank_with, PageRankConfig,
     constrained_shortest_path, constrained_shortest_path_search, ConstrainedPath, ConstrainedPathError, ConstrainedSearch,
     Progress, NoProgress, Stopped,
+    RESIDUAL_TOLERANCE,
     weakly_connected_components, WccResult,
     strongly_connected_components, SccResult,
     bfs, dijkstra, bfs_all_shortest_paths, PathResult,
@@ -29,6 +32,7 @@ pub use samyama_graph_algorithms::{
     eigenvector_centrality, harmonic_centrality, ranked,
     predict_links, score_one, LinkScore, PairScore,
     sample_neighbours, Fanout, SampleDirection, SampleError, SampleSpec, SampledEdge,
+    ego_network, forest_fire, random_walk_sample, snowball, stratified, StratumAllocation,
     negative_samples, NegativeStrategy,
     articulation_points, bridges, find_cycle, topological_sort, TopoResult,
     average_neighbour_degree, degree_assortativity, diameter, eccentricity, radius, ranked_opt,

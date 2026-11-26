@@ -301,7 +301,7 @@ pub async fn export_handler(
     // The content hash is taken under the same guard as the query, so it names
     // the graph the rows were read from and not one a write produced between.
     let (batch, snapshot_hash) = {
-        let store_guard = state.store.read().await;
+        let store_guard = crate::store_lock::read(&state.store).await;
         let snapshot_hash = crate::snapshot::content_hash::cached_content_hash(&store_guard);
         if let Some(pinned) = &payload.snapshot_hash {
             if *pinned != snapshot_hash {
@@ -807,7 +807,7 @@ async fn run_query(
         let store_guard = {
             use tracing::Instrument;
             // A stage of the request's trace (#2077).
-            state.store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+            crate::store_lock::read(&state.store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
         };
         // Measured after the span closes, so the wait in `stats` is the wait
         // the trace shows (#2079).
@@ -970,8 +970,7 @@ async fn stream_query(
     let guard = {
         use tracing::Instrument;
         // A stage of the request's trace (#2077).
-        std::sync::Arc::clone(&state.store)
-            .read_owned()
+        crate::store_lock::read_owned(std::sync::Arc::clone(&state.store))
             .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read"))
             .await
     };
@@ -1363,7 +1362,7 @@ fn render_query_result(
 
 /// Handler for system status
 pub async fn status_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let store_guard = state.store.read().await;
+    let store_guard = crate::store_lock::read(&state.store).await;
     let stats = state.engine.cache_stats();
     // The one thing here that can stop being true of a running server: after a
     // failed persist, every write is refused until a restart (#2082).
@@ -1425,7 +1424,7 @@ pub async fn changes_handler(
     State(state): State<AppState>,
     Query(params): Query<ChangesParams>,
 ) -> impl IntoResponse {
-    let token = change_token(&*state.store.read().await);
+    let token = change_token(&*crate::store_lock::read(&state.store).await);
     let changed = params.since.as_deref() != Some(token.as_str());
     (
         // A cached "unchanged" is the one wrong answer this route can give.
@@ -1457,7 +1456,7 @@ pub async fn algorithm_catalog_handler() -> impl IntoResponse {
 /// asked is worse than an absent one -- Prometheus reads a reset as a restart
 /// and produces a spike.
 pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let store_guard = state.store.read().await;
+    let store_guard = crate::store_lock::read(&state.store).await;
     let r = store_guard.memory_report();
     let stats = state.engine.cache_stats();
     let indexes = store_guard.index_memory();
@@ -1624,7 +1623,7 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
 /// between them is a number on the page and not a subtraction somebody has to
 /// know to do (#2080).
 pub async fn memory_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let store_guard = state.store.read().await;
+    let store_guard = crate::store_lock::read(&state.store).await;
     let r = store_guard.memory_report();
     let indexes = store_guard.index_memory();
     let index_bytes: usize = indexes.iter().map(|i| i.bytes).sum();
@@ -1757,7 +1756,7 @@ pub fn sorted_label_strs(labels: &std::collections::HashSet<crate::graph::Label>
 const SCHEMA_PROPERTY_SAMPLE: usize = 1000;
 
 pub async fn schema_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let store_guard = state.store.read().await;
+    let store_guard = crate::store_lock::read(&state.store).await;
 
     let total_nodes = store_guard.node_count();
     let total_edges = store_guard.edge_count();
@@ -1900,7 +1899,7 @@ pub async fn sample_handler(
     State(state): State<AppState>,
     Json(payload): Json<SampleRequest>,
 ) -> impl IntoResponse {
-    let store_guard = state.store.read().await;
+    let store_guard = crate::store_lock::read(&state.store).await;
     let max_nodes = payload.max_nodes.min(1000); // Cap at 1000
 
     // Determine which labels to sample
@@ -3026,7 +3025,7 @@ impl<'a> CsvImport<'a> {
                 )
                     .into_response());
             };
-            let endpoints = EdgeEndpoints::new(&*self.state.store.read().await, spec);
+            let endpoints = EdgeEndpoints::new(&*crate::store_lock::read(&self.state.store).await, spec);
             self.edge = Some(CsvEdgeState {
                 src_idx,
                 tgt_idx,
@@ -3528,7 +3527,7 @@ pub async fn import_json_handler(
 
 /// POST /api/snapshot/export — export a .sgsnap snapshot
 pub async fn export_snapshot_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let store_guard = state.store.read().await;
+    let store_guard = crate::store_lock::read(&state.store).await;
 
     let mut buf = Vec::new();
     // Encrypted when a key is configured (REL-09). The filename below says so
@@ -3664,7 +3663,7 @@ pub async fn restore_snapshot_handler(
     // recovered nothing, so a server that also had ordinary writes lost the
     // import on restart. The side file is still written when there is no
     // persistence layer, the one case where replaying it is all there is.
-    let mut store_guard = state.store.write().await;
+    let mut store_guard = crate::store_lock::write(&state.store).await;
     if state.persistence.is_some() {
         store_guard.enable_write_log();
     }
@@ -3874,7 +3873,7 @@ pub async fn enrich_handler(
 
     // Read phase: nothing async is awaited while the store guard or the (non-Send) batch lives.
     let (gaps, ctxs) = {
-        let store = state.store.read().await;
+        let store = crate::store_lock::read(&state.store).await;
         let batch = match state.engine.execute(&req.query, &*store) {
             Ok(b) => b,
             Err(e) => {
@@ -3942,9 +3941,23 @@ pub async fn enrich_handler(
         })
         .await;
 
+    // What the model calls cost (AI-15, #1732): every call this request made,
+    // summed. A token total is null when any call left its count unknown, and
+    // `cost_usd` is null when the model has no price in `NLQ_PRICES`.
+    let spent = worker.spent();
+    let usage = spent.usage();
     (
         StatusCode::OK,
-        Json(json!({ "gaps": gaps.len(), "filled": filled, "declined": declined })),
+        Json(json!({
+            "gaps": gaps.len(),
+            "filled": filled,
+            "declined": declined,
+            "llm_calls": spent.calls,
+            "usage": usage,
+            "llm_latency_ms": spent.latency.as_secs_f64() * MILLIS_PER_SECOND,
+            "cost_usd": crate::nlq::pricing::cost_usd(&usage, worker.model()),
+            "model": worker.model(),
+        })),
     )
         .into_response()
 }
@@ -3957,7 +3970,7 @@ pub async fn verify_handler(
 ) -> impl IntoResponse {
     let cfg = enrich::global_config().read().unwrap().clone();
     let node_ids = {
-        let store = state.store.read().await;
+        let store = crate::store_lock::read(&state.store).await;
         let batch = match state.engine.execute(&req.query, &*store) {
             Ok(b) => b,
             Err(e) => {
@@ -4022,6 +4035,7 @@ pub async fn nlq_handler(
         }
     };
 
+    let model = config.model.clone();
     let pipeline = match NLQPipeline::new(config) {
         Ok(p) => p,
         Err(e) => {
@@ -4035,26 +4049,37 @@ pub async fn nlq_handler(
 
     // Snapshot the schema summary and drop the read guard before the async LLM call.
     let schema = {
-        let store_guard = state.store.read().await;
+        let store_guard = crate::store_lock::read(&state.store).await;
         store_guard.schema_summary()
     };
 
     match pipeline.translate(&payload.question, &schema).await {
         // What the call cost, so a caller can account for it per access
-        // method (COST-07, #1790). The provider's token counts used to be
-        // dropped. There is no `cost_usd`: the engine holds no price for any
-        // model, and a made-up one would be worse than none.
-        Ok(t) => (
-            StatusCode::OK,
-            Json(json!({
-                "cypher": t.cypher,
-                "usage": t.usage,
-                "llm_latency_ms": t.llm_latency.as_secs_f64() * MILLIS_PER_SECOND,
-                // From the translation cache: no model call, no tokens (AI-13).
-                "cached": t.cached,
-            })),
-        )
-            .into_response(),
+        // method (COST-07 #1790, AI-15 #1732): tokens, latency and dollars.
+        // `cost_usd` is priced from `NLQ_PRICES` for the model that ran, and is
+        // null when that model has no listed price or the provider reported no
+        // token counts -- never a guess. A cached translation made no call, so
+        // it cost nothing.
+        Ok(t) => {
+            let cost_usd = if t.cached {
+                Some(0.0)
+            } else {
+                crate::nlq::pricing::cost_usd(&t.usage, &model)
+            };
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "cypher": t.cypher,
+                    "usage": t.usage,
+                    "llm_latency_ms": t.llm_latency.as_secs_f64() * MILLIS_PER_SECOND,
+                    "cost_usd": cost_usd,
+                    "model": model,
+                    // From the translation cache: no model call, no tokens (AI-13).
+                    "cached": t.cached,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
@@ -4620,7 +4645,7 @@ mod tests {
 
         // Seed data into the store
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let alice = store.create_node("Person");
             store
                 .get_node_mut(alice)
@@ -4633,7 +4658,7 @@ mod tests {
 
         // Run a query through the engine to populate cache stats
         {
-            let store_guard = state.store.read().await;
+            let store_guard = crate::store_lock::read(&state.store).await;
             let _ = state
                 .engine
                 .execute("MATCH (n:Person) RETURN n", &*store_guard);
@@ -4670,7 +4695,7 @@ mod tests {
 
         // Seed data
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let alice = store.create_node("Person");
             store
                 .get_node_mut(alice)
@@ -4709,7 +4734,7 @@ mod tests {
 
         // Seed data
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let n = store.create_node("Person");
             store.get_node_mut(n).unwrap().set_property("name", "Bob");
         }
@@ -4732,7 +4757,7 @@ mod tests {
 
         // Seed data: Alice -[:KNOWS]-> Bob
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let alice = store.create_node("Person");
             store
                 .get_node_mut(alice)
@@ -4783,7 +4808,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
 
         // Verify the node was actually created in the store
-        let store = state.store.read().await;
+        let store = crate::store_lock::read(&state.store).await;
         assert_eq!(store.node_count(), 1);
     }
 
@@ -4797,7 +4822,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
 
         // Verify node was created
-        let store = state.store.read().await;
+        let store = crate::store_lock::read(&state.store).await;
         assert_eq!(store.node_count(), 1);
     }
 
@@ -4807,7 +4832,7 @@ mod tests {
 
         // Seed data with integer property
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let n = store.create_node("Person");
             store.get_node_mut(n).unwrap().set_property("age", 30i64);
         }
@@ -4874,7 +4899,7 @@ mod tests {
 
         // Seed a node without 'age' property
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let n = store.create_node("Person");
             store.get_node_mut(n).unwrap().set_property("name", "Alice");
         }
@@ -4894,7 +4919,7 @@ mod tests {
 
         // Seed data with a path
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let a = store.create_node("Person");
             store.get_node_mut(a).unwrap().set_property("name", "Alice");
             let b = store.create_node("Person");
@@ -4928,7 +4953,7 @@ mod tests {
         let (app, state) = test_app();
 
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let n = store.create_node("Person");
             store.get_node_mut(n).unwrap().set_property("name", "Alice");
             store.get_node_mut(n).unwrap().set_property("age", 30i64);
@@ -4961,7 +4986,7 @@ mod tests {
 
         // Create 2 nodes with edges between them
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let a = store.create_node("Person");
             store.get_node_mut(a).unwrap().set_property("name", "Alice");
             let b = store.create_node("Person");
@@ -4989,7 +5014,7 @@ mod tests {
 
         // Seed data
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let n = store.create_node("Person");
             store.get_node_mut(n).unwrap().set_property("name", "Alice");
         }
@@ -5009,7 +5034,7 @@ mod tests {
         let (app, state) = test_app();
 
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             store.create_node("Person");
             store.create_node("Person");
         }
@@ -5032,7 +5057,7 @@ mod tests {
 
         // Create an edge with properties
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let a = store.create_node("Person");
             store.get_node_mut(a).unwrap().set_property("name", "Alice");
             let b = store.create_node("Person");
@@ -5210,7 +5235,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         assert_eq!(
-            state.store.read().await.node_count(),
+            crate::store_lock::read(&state.store).await.node_count(),
             2,
             "imported into memory"
         );
@@ -5264,7 +5289,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["nodes_created"], 1);
 
-        let store = state.store.read().await;
+        let store = crate::store_lock::read(&state.store).await;
         let node_id = store.get_nodes_by_label(&"Person".into())[0].id;
         // Through the merged view, not `node.properties` (#1505). Since #1188
         // `set_node_property` writes the column and deliberately drops the row
@@ -5302,7 +5327,7 @@ mod tests {
             json["nodes_created"], 1,
             "a quoted newline made a second node"
         );
-        assert_eq!(state.store.read().await.node_count(), 1);
+        assert_eq!(crate::store_lock::read(&state.store).await.node_count(), 1);
     }
 
     /// A row with the wrong number of fields used to be truncated in silence: the
@@ -5319,7 +5344,7 @@ mod tests {
         let (status, json) = post_csv(app, "Person", "name,age\nada,36\ngrace\nalan,41\n").await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
         assert_eq!(
-            state.store.read().await.node_count(),
+            crate::store_lock::read(&state.store).await.node_count(),
             0,
             "the rows before the ragged one were committed anyway"
         );
@@ -5400,7 +5425,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
         assert_eq!(
-            state.store.read().await.node_count(),
+            crate::store_lock::read(&state.store).await.node_count(),
             0,
             "an import sent to tenant_b landed in the default graph"
         );
@@ -5418,7 +5443,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
-        assert_eq!(state.store.read().await.node_count(), 0);
+        assert_eq!(crate::store_lock::read(&state.store).await.node_count(), 0);
         pm.checkpoint().unwrap();
         let on_disk = pm.recover("tenant_b").map(|(n, _)| n.len()).unwrap_or(0);
         assert_eq!(on_disk, 0);
@@ -5445,7 +5470,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{json}");
-        assert_eq!(state.store.read().await.node_count(), 0);
+        assert_eq!(crate::store_lock::read(&state.store).await.node_count(), 0);
     }
 
     /// Nodes, then the edges between them, the way the issue's loader does it:
@@ -5490,7 +5515,7 @@ mod tests {
         assert_eq!(json["created"], 3);
         assert_eq!(json["skipped"], 0);
 
-        let store = state.store.read().await;
+        let store = crate::store_lock::read(&state.store).await;
         assert_eq!(store.edge_count(), 3);
         let placed = store.get_edges_by_type(&"PLACED".into());
         assert_eq!(placed.len(), 3);
@@ -5553,7 +5578,7 @@ mod tests {
         assert_eq!(json["missing_targets"], 1, "{json}");
         assert_eq!(json["created"], 0);
         assert_eq!(
-            state.store.read().await.edge_count(),
+            crate::store_lock::read(&state.store).await.edge_count(),
             0,
             "a strict import with a dangling record wrote the good ones anyway"
         );
@@ -5565,7 +5590,7 @@ mod tests {
         assert_eq!(json["processed"], 3);
         assert_eq!(json["created"], 1);
         assert_eq!(json["skipped"], 2);
-        let store = state.store.read().await;
+        let store = crate::store_lock::read(&state.store).await;
         assert_eq!(store.edge_count(), 1);
         assert!(store.check_integrity().is_empty());
     }
@@ -5594,7 +5619,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
         assert_eq!(json["ambiguous"], 1, "{json}");
-        assert_eq!(state.store.read().await.edge_count(), 0);
+        assert_eq!(crate::store_lock::read(&state.store).await.edge_count(), 0);
     }
 
     /// The JSON importer takes the same edge mode, and its keys may be numbers.
@@ -5628,7 +5653,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "{json}");
         assert_eq!(json["created"], 2, "{json}");
         assert_eq!(json["missing_targets"], 1, "{json}");
-        let store = state.store.read().await;
+        let store = crate::store_lock::read(&state.store).await;
         assert_eq!(store.get_edges_by_type(&"ROAD".into()).len(), 2);
         assert!(store.check_integrity().is_empty());
     }
@@ -5669,7 +5694,7 @@ mod tests {
             let (status, json) = post_query(app, &body).await;
             assert_eq!(status, StatusCode::OK, "{query} -> {json}");
 
-            assert_eq!(state.store.read().await.node_count(), expected, "{query}");
+            assert_eq!(crate::store_lock::read(&state.store).await.node_count(), expected, "{query}");
             pm.checkpoint().unwrap();
             let (nodes, _) = pm.recover("default").unwrap();
             assert_eq!(
@@ -5700,7 +5725,7 @@ mod tests {
         let offenders: Vec<(usize, &str)> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains("store.write().await"))
+            .filter(|(_, l)| l.contains("store_lock::write("))
             // The waiver is a `persistence:` note in the comment block above the
             // line, so it has room to say *how* the path is durable instead.
             .filter(|(i, _)| {
