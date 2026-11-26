@@ -2632,7 +2632,7 @@ fn sorted_keys(mut keys: Vec<PropertyValue>) -> Vec<PropertyValue> {
 /// every comparison confidently, including the ones Cypher says have no
 /// answer. Using it for a query-level comparison is what turned "unknown" into
 /// a definite `false`.
-fn cypher_ordering(left: &PropertyValue, right: &PropertyValue) -> Option<std::cmp::Ordering> {
+pub(crate) fn cypher_ordering(left: &PropertyValue, right: &PropertyValue) -> Option<std::cmp::Ordering> {
     use PropertyValue::*;
     match (left, right) {
         (Integer(l), Integer(r)) => Some(l.cmp(r)),
