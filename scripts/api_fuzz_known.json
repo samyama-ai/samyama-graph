@@ -1,0 +1,77 @@
+{
+  "DELETE /api/tenants/{id}": [
+    "ST103"
+  ],
+  "GET /api/hierarchies": [
+    "ST103",
+    "ST202"
+  ],
+  "GET /api/structure": [
+    "ST103",
+    "ST202"
+  ],
+  "PATCH /api/tenants/{id}": [
+    "ST202"
+  ],
+  "POST /api/enrich": [
+    "ST202"
+  ],
+  "POST /api/enrich/policy": [
+    "ST201"
+  ],
+  "POST /api/hierarchies/{name}/cues": [
+    "ST202"
+  ],
+  "POST /api/import/csv": [
+    "ST202"
+  ],
+  "POST /api/import/json": [
+    "ST202"
+  ],
+  "POST /api/import/parquet": [
+    "ST202"
+  ],
+  "POST /api/nlq": [
+    "ST202"
+  ],
+  "POST /api/query": [
+    "ST103",
+    "ST202"
+  ],
+  "POST /api/query/export": [
+    "ST202"
+  ],
+  "POST /api/retract": [
+    "ST202"
+  ],
+  "POST /api/sample": [
+    "ST202"
+  ],
+  "POST /api/snapshot/import": [
+    "ST202"
+  ],
+  "POST /api/sparql": [
+    "ST202"
+  ],
+  "POST /api/structure/cues": [
+    "ST202"
+  ],
+  "POST /api/tenants": [
+    "ST202"
+  ],
+  "POST /api/vector-search": [
+    "ST202"
+  ],
+  "POST /api/vector/indexes": [
+    "ST202"
+  ],
+  "POST /api/verify": [
+    "ST202"
+  ],
+  "POST /optimize/solve": [
+    "ST202"
+  ],
+  "PUT /api/structure": [
+    "ST202"
+  ]
+}
