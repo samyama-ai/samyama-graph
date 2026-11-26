@@ -77,24 +77,52 @@ the engine's `GraphOptimizationProblem` (`src/query/executor/operator.rs`) and
 
 MPS and LP are file formats for a linear or mixed-integer program. They hold an objective
 coefficient row, a constraint matrix, constraint senses, right-hand sides and integrality
-markers. **None of that exists in this crate, and none of it can be recovered from a
-function.** So the missing part of MPS/LP export (requirement OPT-14) is not a serializer.
-It is a **structured linear/MILP problem representation**, and this crate does not have
-one. An MPS or LP writer depends on that representation. Writing one over the black-box
-trait would mean inventing a linear model that is not the problem being solved, so the
-exported file would lead to a different optimum.
+markers. **None of that can be recovered from a black-box function**, so the metaheuristic
+problems above can never be exported to MPS: an exported file would describe a different
+problem.
 
-What that work would involve, none of which exists today:
+### Exact linear and mixed-integer programs (OPT-05)
 
-- a linear model type (objective coefficients, constraint matrix, senses, right-hand
-  sides, bounds, integrality) alongside the black-box `Problem` trait;
-- a way for callers, including the Cypher `algo.or.solve` path, to build one (today
-  constraints become a penalty term);
-- MPS/LP writers over that type, and importing results back;
-- a decision about problems with no linear form. That is most of the problems here: the
-  objectives call the database, which is why this crate uses metaheuristics at all.
+`linear::LinearModel` is that structured representation: variables with bounds and an
+integrality flag, a linear objective, and `<=` / `>=` / `=` constraints. `linear::solve`
+hands it to [HiGHS](https://highs.dev) (MIT), which returns the **proven** optimum, or the
+proof that there is none. It is the one exact solver here; everything else in the crate is a
+metaheuristic that reports the best point it sampled.
 
-Until that representation exists, OPT-14 is blocked on the model, not on a file writer.
+The user-facing form is `linear::LinearProgramSpec`, the same JSON from Cypher and HTTP:
+
+```cypher
+CALL algo.or.lp({
+  sense: 'max',
+  objective: {x: 3, y: 2},
+  constraints: [{terms: {x: 1, y: 1}, op: '<=', rhs: 4},
+                {terms: {x: 1, y: 3}, op: '<=', rhs: 6}],
+  bounds: {y: [0, 3]},          // [lower, upper]; null leaves a side open
+  integer: ['x'],               // makes it a MILP
+  timeLimitMs: 1000             // optional
+}) YIELD status, objective, values, gap
+```
+
+`POST /optimize/lp` takes the same object as its JSON body. Every name used in `objective`,
+a constraint, `bounds` or `integer` is a variable; **a variable with no `bounds` entry is
+non-negative**, the usual LP convention.
+
+| Column | Meaning |
+|---|---|
+| `status` | `optimal`, `infeasible`, `unbounded`, `infeasible_or_unbounded`, `time_limit` or `not_solved`, as HiGHS reports it |
+| `objective`, `values` | The objective and each variable's value. Null when there is no point: an infeasible or unbounded program has no answer to report |
+| `feasible` | True when there is a point; false when the program is proven infeasible |
+| `gap` | 0 exactly when `status` is `optimal`, which HiGHS proves; null otherwise (the result envelope, OPT-09) |
+| `mip_gap` | For a MILP its time limit stopped: HiGHS's proven relative gap between the point and the best bound |
+| `iterations`, `nodes`, `total_time_ms`, `solver` | Simplex iterations, branch-and-bound nodes, wall-clock time, `HiGHS` |
+
+A program that cannot mean what it says is refused with the reason, not passed to the
+solver: an unknown key, `op` or `sense`, an inverted bound, a coefficient that is not a
+finite number, the same variable twice in a constraint. HiGHS runs single-threaded and
+silent, so one query does not take every core or write to the server's stdout.
+
+**OPT-14 (MPS/LP export)** now has the model it was blocked on; the writer over
+`LinearModel` is the remaining work.
 
 ## Usage
 
