@@ -69,7 +69,7 @@ scripts/coverage.sh --lcov       # coverage/lcov.info
 |---|---|
 | `download_ldbc_snb.sh` | Downloads and extracts LDBC SNB Interactive SF1 data used by the loader and SNB benchmarks. |
 | `download_finbench.sh` | Generates the synthetic LDBC FinBench files through the FinBench loader. |
-| `download_graphalytics.sh` | Downloads LDBC Graphalytics datasets; defaults to XS, with `--size S` or `--size all` for larger datasets. The S-size archives require `zstd`. |
+| `download_graphalytics.sh` | Downloads LDBC Graphalytics datasets: the two example graphs by default, or every listed graph of an LDBC size class with `--size 2XS`, `XS`, `S`, `M` or `all`. The class archives require `zstd`. |
 | `download_ann_datasets.py` | Downloads ann-benchmarks HDF5 datasets (SIFT-1M, GIST-1M, GloVe-100, DEEP) and converts each to the `base.fvecs`/`query.fvecs`/`groundtruth.ivecs`/`metric.txt` directory `ann_benchmark --dataset` reads; `--convert FILE` converts a local HDF5 file. Needs `numpy` and `h5py`. |
 
 ## Requirements

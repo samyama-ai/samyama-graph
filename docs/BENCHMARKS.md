@@ -350,6 +350,48 @@ either already correct or has since been fixed. They found seven silent
 wrong answers; they were never a coverage measurement. **The TCK is the coverage
 measurement**, and it says there is a great deal left.
 
+## LDBC Graphalytics — S and M (ALGO-08)
+
+Measured 2026-11-26 on engine `ff75e203` (dev) plus the runner changes of
+#1687, on a laptop: Intel i9-9880H, 16 threads, 32 GB RAM, macOS. Release
+build. Every run is validated node by node against the reference output that
+ships in the LDBC archive.
+
+```bash
+scripts/download_graphalytics.sh --size S          # and --size M
+cargo bench --release --bench graphalytics_benchmark -- --size all --all --json galx.json
+```
+
+**22 of 22 runs agree with the reference. `scale_covered: M`.**
+
+| Dataset | Class (scale) | Vertices | Edges | Load | BFS | PR | WCC | CDLP | LCC | SSSP |
+|---|---|---|---|---|---|---|---|---|---|---|
+| datagen-7_5-fb | S (7.5) | 633K | 34.2M | 29.0 s | 0.55 s | 0.73 s | 1.00 s | 6.4 s | 34.3 s | 1.31 s |
+| graph500-22 | S (7.8) | 2.40M | 64.2M | 50.3 s | 1.62 s | 5.21 s | 3.22 s | 12.5 s | **550 s** | — |
+| datagen-8_0-fb | M (8.0) | 1.71M | 107.5M | 108.9 s | 2.85 s | 8.21 s | 4.49 s | 32.2 s | 152 s | 7.09 s |
+| graph500-23 | M (8.1) | 4.61M | 129.3M | 108.4 s | 3.75 s | 14.1 s | 7.16 s | 32.7 s | **1552 s** | — |
+
+`—`: the graph500 graphs are unweighted, define no SSSP and ship no SSSP
+reference. The whole run took 46 minutes; peak resident memory was 16.1 GB
+(graph500-23, 258.7M stored arcs, each undirected edge held both ways).
+
+What these numbers are and are not:
+
+- **The class is computed, not asserted.** Graphalytics defines scale as
+  `log10(vertices + edges)` to one decimal: S is [7.5, 8), M is [8, 8.5). The
+  runner reads the counts from each dataset's `.properties`. The list it used to
+  call "S" held wiki-Talk (2XS), cit-Patents (XS) and one S graph.
+- **`scale_covered` is the largest class whose every dataset validated every
+  algorithm it defines.** An algorithm a dataset defines with no reference
+  output counts as a failure, not a blank.
+- **LCC is correct but slow on graph500.** 550 s at S and 26 minutes at M,
+  against 34 s and 152 s on the datagen graphs of the same class. graph500 is a
+  Kronecker graph with a few vertices of very high degree, and triangle counting
+  is quadratic in degree at those vertices. Correctness is what this row
+  measures; LCC's cost on skewed graphs is a separate performance question.
+- **One host, one sitting.** These are not cross-engine figures and not a
+  claim about L or XL, which were not run.
+
 ## LDBC SNB Interactive
 
 Samyama Graph's own results on the [LDBC Social Network Benchmark (SNB) Interactive](https://ldbcouncil.org/benchmarks/snb/) read workload (IS1–IS7 short reads, IC1–IC14 complex reads), at two scale factors. In-process (embedded) timing, 1 warm-up + 3 timed runs, median latency. Provenance: commit `31a7e77`, id-indexes built on all anchor labels.
@@ -591,7 +633,7 @@ re-derived or refuted.
 |-----------|--------|---------|-------|
 | SNB Interactive | **21/21 complete, 21/21 return rows** | SF1: 3.18M nodes, 17.26M edges | `CH-BENCH-LDBC` |
 | SNB BI | **20/20 complete, 0 timeouts** | SF1 | `CH-BENCH-LDBC` |
-| Graphalytics | **12/12 agree with the LDBC reference** | XS reference graphs | `CH-BENCH-GALX` |
+| Graphalytics | **22/22 agree with the LDBC reference at S and M; `scale_covered: M`** (plus 12/12 on the two example graphs) | 2 S + 2 M graphs, up to 4.6M vertices / 129M edges | `CH-BENCH-GALX` |
 | FinBench | **21 read queries run, 21 return rows** | synthetic, ~7.7K nodes / 42.2K edges | `CH-BENCH-FIN` |
 
 One of those is not clean, and saying so is the point of publishing them:
