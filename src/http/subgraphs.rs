@@ -139,7 +139,10 @@ pub async fn delete_subgraph_handler(
     if let Some(refusal) = state.writes_refused() {
         return error(StatusCode::SERVICE_UNAVAILABLE, refusal);
     }
-    let exists = crate::store_lock::read(&state.store).await.subgraph(&name).is_some();
+    let exists = crate::store_lock::read(&state.store)
+        .await
+        .subgraph(&name)
+        .is_some();
     if !exists {
         return not_found(&name);
     }
