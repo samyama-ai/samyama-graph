@@ -63,6 +63,7 @@ pub use mapping::{
 };
 
 pub use mapping_impl::{RdfImportReport, SyncReport, IRI_PROPERTY};
+pub(crate) use mapping_impl::value_for;
 pub use graph_as_rdf::{GraphAsRdf, TripleSource};
 
 pub use namespace::{

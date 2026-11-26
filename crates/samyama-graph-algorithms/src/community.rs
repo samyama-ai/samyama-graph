@@ -14,28 +14,38 @@ pub struct WccResult {
     pub node_component: HashMap<NodeId, usize>,
 }
 
-/// Union-Find data structure
-struct UnionFind {
+/// Union-Find data structure. Shared with the incremental WCC (ALGO-14), which
+/// must union in the same order as [`weakly_connected_components`] to give the
+/// same component ids on its first run.
+pub(crate) struct UnionFind {
     parent: Vec<usize>,
     rank: Vec<usize>,
 }
 
 impl UnionFind {
-    fn new(size: usize) -> Self {
+    pub(crate) fn new(size: usize) -> Self {
         UnionFind {
             parent: (0..size).collect(),
             rank: vec![0; size],
         }
     }
 
-    fn find(&mut self, i: usize) -> usize {
+    /// Add one element, in a set of its own; returns its index.
+    pub(crate) fn push(&mut self) -> usize {
+        let i = self.parent.len();
+        self.parent.push(i);
+        self.rank.push(0);
+        i
+    }
+
+    pub(crate) fn find(&mut self, i: usize) -> usize {
         if self.parent[i] != i {
             self.parent[i] = self.find(self.parent[i]); // Path compression
         }
         self.parent[i]
     }
 
-    fn union(&mut self, i: usize, j: usize) {
+    pub(crate) fn union(&mut self, i: usize, j: usize) {
         let root_i = self.find(i);
         let root_j = self.find(j);
 
