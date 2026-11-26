@@ -294,6 +294,10 @@ name = "memory_footprint"
 harness = false
 
 [[bench]]
+name = "query_memory"
+harness = false
+
+[[bench]]
 name = "prop_scaling"
 harness = false
 

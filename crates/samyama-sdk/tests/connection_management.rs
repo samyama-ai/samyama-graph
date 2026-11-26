@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use samyama_sdk::{ConnectionConfig, RemoteClient, SamyamaClient};
+use samyama_sdk::{ConnectionConfig, RemoteClient, SamyamaClient, SamyamaError};
 use tokio::net::TcpListener;
 
 /// A listener that accepts connections and never replies.
@@ -82,10 +82,13 @@ async fn the_default_configuration_sets_a_deadline() {
 }
 
 #[tokio::test]
-async fn a_timeout_is_retried_the_configured_number_of_times() {
+async fn a_timed_out_read_is_retried_the_configured_number_of_times() {
     // Counted at the server: each attempt opens a connection, so the accept
     // count is the attempt count. Asserting on elapsed time alone would pass
     // for a client that retried zero times and simply waited longer.
+    //
+    // A read: only a request that cannot write is repeated after a timeout
+    // (#2175). `a_timed_out_write_is_sent_once` is the other half.
     let (url, accepted) = black_hole().await;
     let client = RemoteClient::with_config(
         &url,
@@ -97,13 +100,85 @@ async fn a_timeout_is_retried_the_configured_number_of_times() {
         },
     );
 
-    let _ = client.query("default", "RETURN 1").await;
+    let _ = client.query_readonly("default", "RETURN 1").await;
 
     let n = accepted.load(Ordering::SeqCst);
     assert_eq!(
         n, 3,
         "expected the first attempt plus two retries, saw {n} connections"
     );
+}
+
+#[tokio::test]
+async fn a_timed_out_write_is_sent_once() {
+    // The server may have run a write whose answer never arrived, and
+    // repeating it is how one `CREATE` became three nodes with the default
+    // settings (#2175). With retries on, a write that times out is sent once
+    // and reported as a timeout, so the caller can decide.
+    let (url, accepted) = black_hole().await;
+    let client = RemoteClient::with_config(
+        &url,
+        ConnectionConfig {
+            timeout: Some(Duration::from_millis(150)),
+            max_retries: 2,
+            retry_base_delay: Duration::from_millis(10),
+            ..Default::default()
+        },
+    );
+
+    let err = client
+        .query("default", "CREATE (:Order {id: 1})")
+        .await
+        .expect_err("a server that never answers must not return Ok");
+
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "a timed-out write was sent again"
+    );
+    assert!(
+        matches!(err, SamyamaError::Timeout(_)),
+        "a timeout must be reported as one, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_timeout_and_a_refused_connection_are_different_errors() {
+    // The caller's next step depends on which one it was: a refused
+    // connection never reached the server, a timeout may have (#2175). Both
+    // used to read `HTTP error: error sending request for url (...)`.
+    let (url, _) = black_hole().await;
+    let silent = RemoteClient::with_config(
+        &url,
+        ConnectionConfig {
+            timeout: Some(Duration::from_millis(150)),
+            max_retries: 0,
+            ..Default::default()
+        },
+    );
+    let timed_out = silent.query("default", "RETURN 1").await.unwrap_err();
+
+    let closed_port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        l.local_addr().expect("addr").port()
+    };
+    let refused = RemoteClient::with_config(
+        &format!("http://127.0.0.1:{closed_port}"),
+        ConnectionConfig {
+            max_retries: 0,
+            ..Default::default()
+        },
+    )
+    .query("default", "RETURN 1")
+    .await
+    .unwrap_err();
+
+    assert!(
+        matches!(timed_out, SamyamaError::Timeout(_)),
+        "{timed_out:?}"
+    );
+    assert!(matches!(refused, SamyamaError::HttpError(_)), "{refused:?}");
+    assert_ne!(timed_out.to_string(), refused.to_string());
 }
 
 #[tokio::test]
@@ -141,7 +216,7 @@ async fn the_backoff_grows() {
     );
 
     let start = Instant::now();
-    let _ = client.query("default", "RETURN 1").await;
+    let _ = client.query_readonly("default", "RETURN 1").await;
     let elapsed = start.elapsed();
 
     // 3 × 100 ms of timeout + 50 ms + 100 ms of backoff = 450 ms minimum.

@@ -3653,21 +3653,30 @@ pub async fn restore_snapshot_handler(
         }
     }
 
-    // persistence: the snapshot bytes are committed to `data_path/snapshots` below
-    // and reloaded by `restore_persisted_snapshots` at boot (HA-08), so this path
-    // does not go through the mutation journal -- one journal entry per node of a
-    // hundred-million-node snapshot is not the right shape for it.
+    // Persistence (#2348): with a persistence layer the import is journalled
+    // like any other write -- every node and edge it creates or merges is
+    // written to RocksDB before the reply, and a restart recovers it with the
+    // rest of the graph.
+    //
+    // It used to skip the journal and keep the snapshot bytes under
+    // `data_path/snapshots` instead, replayed at boot only when RocksDB
+    // recovered nothing, so a server that also had ordinary writes lost the
+    // import on restart. The side file is still written when there is no
+    // persistence layer, the one case where replaying it is all there is.
     let mut store_guard = crate::store_lock::write(&state.store).await;
+    if state.persistence.is_some() {
+        store_guard.enable_write_log();
+    }
 
     // The ceiling every row of the import is charged against. The import takes
     // the store lock itself rather than going through `AppState::mutate`, so
     // nothing else installs one, and without it a body longer than its header
     // was unbounded.
     //
-    // "Used" is the larger of the quota counter and what the store holds. A
-    // snapshot import is not journalled, so the counter never learns of its
-    // rows; taken alone it would let each upload start again from the count
-    // before the last one.
+    // "Used" is the larger of the quota counter and what the store holds.
+    // Imports made before #2348 were not journalled, so the counter never
+    // learnt of their rows; taken alone it would let each upload start again
+    // from the count before the last one.
     let admission = state
         .persistence
         .as_ref()
@@ -3714,11 +3723,19 @@ pub async fn restore_snapshot_handler(
             )
         }
     });
+    // Drained whatever happened: a failed import has been rolled back, and
+    // its entries name rows that are no longer there.
+    let journal = if state.persistence.is_some() {
+        store_guard.take_write_log()
+    } else {
+        Vec::new()
+    };
     match imported {
         Ok(stats) => {
-            // HA-08: Persist snapshot atomically (tmp → fsync → rename → marker)
-            // so it survives server restart. Crash-before-marker = ignored on boot.
-            if let Some(ref data_path) = state.data_path {
+            // HA-08: without a persistence layer, keep the snapshot atomically
+            // (tmp → fsync → rename → marker) so it survives a restart.
+            // Crash-before-marker = ignored on boot.
+            if let (None, Some(data_path)) = (&state.persistence, &state.data_path) {
                 match crate::snapshot::persist::persist_snapshot(data_path, &data) {
                     Ok(_) => eprintln!(
                         "[snapshot-persist] Committed snapshot to {}/snapshots ({} bytes)",
@@ -3743,6 +3760,26 @@ pub async fn restore_snapshot_handler(
                 Some(r) => (r.vector, Some(r)),
                 None => (store_guard.rebuild_vector_index_full(), None),
             };
+
+            if let Some(pm) = &state.persistence {
+                if let Err(e) = pm.apply_mutations(&default_graph(), &store_guard, &journal) {
+                    // The rows are in memory but not on disk. Said so here
+                    // rather than answered "ok": a restart would lose them.
+                    crate::persistence::health::mark_degraded(e.to_string());
+                    return (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "error": format!(
+                                "the snapshot was imported but could not be saved, \
+                                 so it will not survive a restart: {e}"
+                            ),
+                            "nodes_imported": stats.node_count,
+                            "edges_imported": stats.edge_count,
+                        })),
+                    )
+                        .into_response();
+                }
+            }
 
             Json(json!({
                 "status": "ok",
@@ -3904,9 +3941,23 @@ pub async fn enrich_handler(
         })
         .await;
 
+    // What the model calls cost (AI-15, #1732): every call this request made,
+    // summed. A token total is null when any call left its count unknown, and
+    // `cost_usd` is null when the model has no price in `NLQ_PRICES`.
+    let spent = worker.spent();
+    let usage = spent.usage();
     (
         StatusCode::OK,
-        Json(json!({ "gaps": gaps.len(), "filled": filled, "declined": declined })),
+        Json(json!({
+            "gaps": gaps.len(),
+            "filled": filled,
+            "declined": declined,
+            "llm_calls": spent.calls,
+            "usage": usage,
+            "llm_latency_ms": spent.latency.as_secs_f64() * MILLIS_PER_SECOND,
+            "cost_usd": crate::nlq::pricing::cost_usd(&usage, worker.model()),
+            "model": worker.model(),
+        })),
     )
         .into_response()
 }
@@ -3984,6 +4035,7 @@ pub async fn nlq_handler(
         }
     };
 
+    let model = config.model.clone();
     let pipeline = match NLQPipeline::new(config) {
         Ok(p) => p,
         Err(e) => {
@@ -4003,20 +4055,31 @@ pub async fn nlq_handler(
 
     match pipeline.translate(&payload.question, &schema).await {
         // What the call cost, so a caller can account for it per access
-        // method (COST-07, #1790). The provider's token counts used to be
-        // dropped. There is no `cost_usd`: the engine holds no price for any
-        // model, and a made-up one would be worse than none.
-        Ok(t) => (
-            StatusCode::OK,
-            Json(json!({
-                "cypher": t.cypher,
-                "usage": t.usage,
-                "llm_latency_ms": t.llm_latency.as_secs_f64() * MILLIS_PER_SECOND,
-                // From the translation cache: no model call, no tokens (AI-13).
-                "cached": t.cached,
-            })),
-        )
-            .into_response(),
+        // method (COST-07 #1790, AI-15 #1732): tokens, latency and dollars.
+        // `cost_usd` is priced from `NLQ_PRICES` for the model that ran, and is
+        // null when that model has no listed price or the provider reported no
+        // token counts -- never a guess. A cached translation made no call, so
+        // it cost nothing.
+        Ok(t) => {
+            let cost_usd = if t.cached {
+                Some(0.0)
+            } else {
+                crate::nlq::pricing::cost_usd(&t.usage, &model)
+            };
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "cypher": t.cypher,
+                    "usage": t.usage,
+                    "llm_latency_ms": t.llm_latency.as_secs_f64() * MILLIS_PER_SECOND,
+                    "cost_usd": cost_usd,
+                    "model": model,
+                    // From the translation cache: no model call, no tokens (AI-13).
+                    "cached": t.cached,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
