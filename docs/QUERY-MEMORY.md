@@ -83,6 +83,16 @@ parse-cache entry, which is kept on purpose; every later run keeps 0.
    for each of the 300,000 edges it counts. A streaming count needs a few
    bytes. The same pattern holds at 2 and 3 hops.
 
+   *Cause and change (#2274).* The peak was one input batch, not the whole
+   expansion: the aggregate pulled 65,536 rows at a time, and 13.9 MB is
+   65,536 records at about 212 bytes (the 3-hop count folds 2.7 million rows
+   and peaks at 25 MB, so it cannot have been holding them all). The
+   aggregate now pulls 4,096 rows at a time (`AGGREGATE_BATCH_ROWS`), which
+   bounds that batch at roughly 0.9 MB for the 1-hop count whatever the row
+   count. `tests/an_aggregate_over_an_expansion_streams.rs` asserts that ten
+   times the rows peak at under three times the memory. The baseline table
+   above is the figure before the change; rerun the benchmark for the after.
+
 4. **`ORDER BY … LIMIT 10` costs 60% of a full sort.** Top-10 peaks at
    35.4 MB against 59.2 MB for sorting all 100,000 rows. A bounded top-k needs
    memory for k rows; most of the 35 MB is the projected input, held before
