@@ -12269,6 +12269,26 @@ impl AggregatorState {
     }
 }
 
+/// Rows an aggregate pulls from its input at a time (#2274).
+///
+/// An aggregate keeps only its group table; what it holds of its *input* is
+/// the one batch it is folding. That batch was 65,536 rows, which made the
+/// batch, not the aggregate, the peak: `MATCH (a:P)-[:R]->(b) RETURN count(b)`
+/// returned one row and peaked at 13.9 MB on 300,000 edges, which is 65,536
+/// records at about 212 bytes each, and the 2- and 3-hop counts at 20.4 and
+/// 25.0 MB as the records widened (`docs/QUERY-MEMORY.md`, finding 3). The
+/// 3-hop count folds 2.7 million rows, so a peak of 25 MB was never the whole
+/// expansion; it was one batch of it.
+///
+/// 4,096 rows bounds that batch at about 0.9 MB for the 1-hop count and
+/// 1.6 MB for the 3-hop, whatever the row count, and is still large enough
+/// that the per-batch costs -- a
+/// `Vec`, a call through the operator tree, the parallel record build in a
+/// scan, which starts at 1,024 rows -- stay amortised. The deadline is checked
+/// every ten batches, so it is now checked every 40,960 rows rather than every
+/// 655,360.
+const AGGREGATE_BATCH_ROWS: usize = 4096;
+
 /// Aggregate operator: GROUP BY + Aggregations
 pub struct AggregateOperator {
     input: OperatorBox,
@@ -12666,7 +12686,7 @@ impl AggregateOperator {
         let mut groups: rustc_hash::FxHashMap<IdentityKey, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::default();
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12774,7 +12794,7 @@ impl AggregateOperator {
         // Probing first means the allocation happens once per group.
         let mut scratch: Vec<Value> = Vec::with_capacity(self.group_by.len());
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12837,7 +12857,7 @@ impl AggregateOperator {
 
         let all_simple_count = Self::all_simple_count(&self.aggregates);
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12894,7 +12914,7 @@ impl AggregateOperator {
         let mut readers: Vec<RowReader> =
             self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -14216,12 +14236,11 @@ impl SortOperator {
     ///
     /// `select_nth_unstable_by` partitions in O(n) rather than sorting, so
     /// trimming a buffer is cheaper than sorting it and is done repeatedly as
-    /// the input streams in. Rows tied with the k-th are dropped along with
-    /// the rest of the tail; Cypher does not define a tie-break for
-    /// `ORDER BY … LIMIT`, so any k of a tied set is a valid answer, but two
-    /// runs may therefore disagree about *which* — the same latitude the
-    /// unstable sort below already takes.
-    fn trim_to(keyed: &mut Vec<(SortKey<'_>, Record)>, k: usize, items: &[(Expression, bool)]) {
+    /// the input streams in. A full tie is broken by the row's input position,
+    /// as the unbounded sort breaks it, so the rows kept are exactly the first
+    /// `k` the unbounded sort would return -- whatever the batch sizes, and
+    /// however often the buffer is trimmed (#2275).
+    fn trim_to(keyed: &mut Vec<(SortKey<'_>, usize, Record)>, k: usize, items: &[(Expression, bool)]) {
         if k == 0 {
             keyed.clear();
             return;
@@ -14229,8 +14248,17 @@ impl SortOperator {
         if keyed.len() <= k {
             return;
         }
-        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items));
+        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_ranked(a, b, items));
         keyed.truncate(k);
+    }
+
+    /// The bounded sort's total order: the key, then the input position.
+    fn cmp_ranked(
+        a: &(SortKey<'_>, usize, Record),
+        b: &(SortKey<'_>, usize, Record),
+        items: &[(Expression, bool)],
+    ) -> std::cmp::Ordering {
+        Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items).then(a.1.cmp(&b.1))
     }
 
     /// The row order for a key whose every part, in every row, is a non-null
@@ -14738,29 +14766,39 @@ impl SortOperator {
             return Ok(());
         }
 
-        let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::new();
-        while let Some(batch) = self.input.next_batch(store, batch_size)? {
-            keyed.reserve(batch.records.len());
+        // Rows are fed into the top-k as they arrive, and the input is asked
+        // for batches no larger than the working size. Pulling 65,536 rows at
+        // a time held that many *projected* rows -- in the input's batch and
+        // again in the buffer -- before the first trim: a top-10 over 100,000
+        // rows peaked at 60% of sorting all of them (#2275). Now the buffer
+        // holds at most `trim_at` rows and a batch at most as many again.
+        let (Some(k), Some(trim_at)) = (bound, trim_at) else {
+            unreachable!("the unbounded sort returned above")
+        };
+        let pull = trim_at.min(batch_size);
+        let mut keyed: Vec<(SortKey<'_>, usize, Record)> = Vec::new();
+        let mut seq = 0usize;
+        while let Some(batch) = self.input.next_batch(store, pull)? {
             let mut known = known_values(&mut self.input, batch.records.len());
             for record in batch.records {
-                let k = retained_key.zip(known.next().flatten());
-                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store, k)?;
-                keyed.push((key, record));
-            }
-            if let (Some(k), Some(threshold)) = (bound, trim_at) {
-                if keyed.len() >= threshold {
+                let r = retained_key.zip(known.next().flatten());
+                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store, r)?;
+                keyed.push((key, seq, record));
+                seq += 1;
+                // Per row, not per batch, so an input that ignores the batch
+                // size still cannot grow the buffer past the working size.
+                if keyed.len() >= trim_at {
                     Self::trim_to(&mut keyed, k, &self.sort_items);
                 }
             }
         }
-        if let Some(k) = bound {
-            Self::trim_to(&mut keyed, k, &self.sort_items);
-        }
+        Self::trim_to(&mut keyed, k, &self.sort_items);
 
         let sort_items = &self.sort_items;
-        keyed.sort_by(|a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), sort_items));
+        // A total order (key, then input position), so unstable is exact.
+        keyed.sort_unstable_by(|a, b| Self::cmp_ranked(a, b, sort_items));
 
-        self.records = keyed.into_iter().map(|(_, record)| record).collect();
+        self.records = keyed.into_iter().map(|(_, _, record)| record).collect();
         self.sorted_upto = self.records.len();
         self.executed = true;
         Ok(())
@@ -26435,7 +26473,7 @@ impl WithBarrierOperator {
             // Aggregation path: group by non-aggregate items
             let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
 
-            let batch_size = 65536;
+            let batch_size = AGGREGATE_BATCH_ROWS;
             while let Some(batch) = self.input.next_batch(store, batch_size)? {
                 for record in batch.records {
                     let mut key = Vec::new();

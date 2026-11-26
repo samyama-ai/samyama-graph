@@ -1456,6 +1456,54 @@ jobs:
   # listed in `needs` below, because a suite added without being added here would
   # stop gating silently: the aggregator would go green without ever waiting for
   # it.
+  # SEC-API-FUZZ (#2209, REL-12): every operation in openapi/openapi.yaml gets
+  # schema-derived and schema-violating requests. A 5xx, an unanswered request
+  # or a panic fails; a spec/server disagreement not already listed in
+  # scripts/api_fuzz_known.json fails. See scripts/api_fuzz.py.
+  api-fuzz:
+    name: api-fuzz (every documented route under generated input)
+    needs: [changes, gates]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Discard any cached release executable
+        run: rm -f target/release/samyama
+
+      - name: Take the release binary from the test job
+        id: fuzz_release_binary
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: samyama-release
+          path: target/release
+
+      - name: Use it if it arrived, otherwise build it
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.fuzz_release_binary.outcome }}" = "success" ] && [ -f target/release/samyama ]; then
+            # An artifact download does not preserve the executable bit.
+            chmod +x target/release/samyama
+            echo "using the binary built by the test job"
+          else
+            echo "::notice::no release artifact; building the engine"
+            rm -f target/release/samyama
+            cargo build --release --bin samyama --locked
+          fi
+
+      - name: SEC-API-FUZZ
+        # Pinned: a new Schemathesis generates different inputs and adds
+        # checks, which would move the known list without a code change.
+        run: |
+          python3 -m pip install --quiet schemathesis==4.33.4
+          python3 scripts/api_fuzz.py --bin target/release/samyama
+
   triage-sla-contract:
     name: triage SLA role lookup (workflow token)
     runs-on: ubuntu-24.04
@@ -1611,6 +1659,7 @@ jobs:
       - snapshot-portability
       - snapshot-portability-read
       - sdk-compat
+      - api-fuzz
       - excluded-lockfiles
       - platforms
       - tls-scan
