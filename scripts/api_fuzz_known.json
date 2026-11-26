@@ -47,6 +47,9 @@
   "POST /api/snapshot/import": [
     "ST202"
   ],
+  "POST /api/sparql": [
+    "ST202"
+  ],
   "POST /api/structure/cues": [
     "ST202"
   ],

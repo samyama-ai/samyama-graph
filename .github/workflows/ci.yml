@@ -1538,6 +1538,52 @@ jobs:
           done
           echo "every excluded workspace lockfile is current"
 
+  # SEC-TLS (#2209, REL-12): testssl.sh against the HTTP listener served over
+  # TLS (REL-09) with a freshly generated certificate. Fails on SSLv2/3,
+  # TLS 1.0/1.1, or any HIGH/CRITICAL finding other than the test
+  # certificate's own (self-signed, no CRL/OCSP). See scripts/tls_scan.py.
+  tls-scan:
+    name: tls-scan (testssl.sh against the HTTPS listener)
+    needs: [changes, gates]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Discard any cached release executable
+        run: rm -f target/release/samyama
+
+      - name: Take the release binary from the test job
+        id: tls_release_binary
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: samyama-release
+          path: target/release
+
+      - name: Use it if it arrived, otherwise build it
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.tls_release_binary.outcome }}" = "success" ] && [ -f target/release/samyama ]; then
+            # An artifact download does not preserve the executable bit.
+            chmod +x target/release/samyama
+            echo "using the binary built by the test job"
+          else
+            echo "::notice::no release artifact; building the engine"
+            rm -f target/release/samyama
+            cargo build --release --bin samyama --locked
+          fi
+
+      - name: SEC-TLS
+        # Pinned: a new testssl.sh adds checks and re-rates findings, which
+        # would move the verdict without a change to the server.
+        run: |
+          git clone --quiet --depth 1 --branch v3.2.5 https://github.com/testssl/testssl.sh "$RUNNER_TEMP/testssl"
+          python3 scripts/tls_scan.py --bin target/release/samyama --testssl "$RUNNER_TEMP/testssl/testssl.sh"
+
   # Folded in from `kg-catalogs.yml` and `sort-measurement.yml`, which were the
   # only other workflows a pull request triggered. Called rather than copied, so
   # each still has one definition and keeps its own schedule and dispatch.
@@ -1583,6 +1629,7 @@ jobs:
       - api-fuzz
       - excluded-lockfiles
       - platforms
+      - tls-scan
     runs-on: ubuntu-24.04
     steps:
       - name: Every suite either succeeded or was skipped

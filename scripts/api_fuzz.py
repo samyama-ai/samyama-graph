@@ -112,7 +112,9 @@ def main() -> int:
                "--report-dir", str(work / "report")]
         for rx in EXCLUDE:
             cmd += ["--exclude-path-regex", rx]
-        run = subprocess.run(cmd, capture_output=True, text=True, cwd=work)
+        st_env = dict(os.environ, SCHEMATHESIS_HOOKS="api_fuzz_hooks",
+                      PYTHONPATH=os.pathsep.join(filter(None, [str(ROOT / "scripts"), os.environ.get("PYTHONPATH")])))
+        run = subprocess.run(cmd, capture_output=True, text=True, cwd=work, env=st_env)
         reports = list((work / "report").glob("*.xml"))
         if not reports:
             sys.exit(f"FAIL: Schemathesis wrote no report (exit {run.returncode}):\n{run.stdout[-3000:]}{run.stderr[-2000:]}")

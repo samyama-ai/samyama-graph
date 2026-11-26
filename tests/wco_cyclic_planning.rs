@@ -205,3 +205,87 @@ fn the_fused_close_is_not_slower_than_the_plan_it_replaces() {
          ({new:.6}s against {old:.6}s) (#1614)"
     );
 }
+
+/// The graph-native, cost-based planner -- the default reads use since #1729.
+fn native(store: &GraphStore) -> QueryExecutor<'_> {
+    use samyama::query::executor::planner::{PlannerConfig, QueryPlanner};
+    QueryExecutor::with_planner(
+        store,
+        QueryPlanner::with_config(PlannerConfig { graph_native: true, max_candidate_plans: 64 }),
+    )
+}
+
+/// The chosen plan only: the graph-native planner's EXPLAIN also lists the
+/// plans it rejected.
+fn native_plan(store: &GraphStore, cypher: &str) -> String {
+    let query = parse_query(&format!("EXPLAIN {cypher}")).unwrap();
+    let batch = native(store).execute(&query).unwrap();
+    let text = match batch.records[0].get("plan") {
+        Some(Value::Property(PropertyValue::String(t))) => t.clone(),
+        other => panic!("{other:?}"),
+    };
+    text.split("--- Planner Diagnostics ---").next().unwrap().to_string()
+}
+
+fn native_count(store: &GraphStore, cypher: &str) -> i64 {
+    let query = parse_query(cypher).unwrap_or_else(|e| panic!("{cypher}: {e:?}"));
+    let batch = native(store).execute(&query).unwrap();
+    match batch.records[0].get("n") {
+        Some(Value::Property(PropertyValue::Integer(n))) => *n,
+        other => panic!("{cypher}: {other:?}"),
+    }
+}
+
+/// #2249: with the graph-native planner (the default since #1729) four of the
+/// five phrasings closed the cycle by expand-and-test: its plan puts
+/// relationship-uniqueness Filters between the hops, and the TrieJoin rewrite
+/// cannot merge across them without losing parallel relationships. A cyclic
+/// MATCH now goes to the default planner, which closes it on a TrieJoin; an
+/// acyclic one is still cost-planned.
+#[test]
+fn the_graph_native_planner_plans_a_trie_join_for_every_cyclic_phrasing() {
+    let store = fixture(40);
+    for (name, cyclic, _) in CYCLIC {
+        let chosen = native_plan(&store, cyclic);
+        assert!(chosen.contains("TrieJoin"), "{name}: the chosen plan has no TrieJoin\n{chosen}");
+    }
+    let chosen = native_plan(&store, CONTROL);
+    assert!(!chosen.contains("TrieJoin"), "acyclic control planned a TrieJoin:\n{chosen}");
+    let query = parse_query(&format!("EXPLAIN {CONTROL}")).unwrap();
+    let batch = native(&store).execute(&query).unwrap();
+    let text = format!("{:?}", batch.records[0].get("plan"));
+    assert!(text.contains("Candidates evaluated"), "an acyclic MATCH is still cost-planned:\n{text}");
+}
+
+#[test]
+fn the_graph_native_trie_join_answers_what_the_other_planner_answers() {
+    for n in [40usize, 700] {
+        let store = fixture(n);
+        for (name, cyclic, reference) in CYCLIC {
+            let expected = count(&store, reference);
+            assert!(expected > 0, "{name} at n={n}: the fixture has no match");
+            assert_eq!(native_count(&store, cyclic), expected, "{name} at n={n}");
+        }
+        assert_eq!(native_count(&store, CONTROL), count(&store, CONTROL), "control at n={n}");
+    }
+}
+
+/// Parallel relationships inside the cycle, a self-loop on one of its nodes,
+/// and a second triangle sharing an edge: each parallel edge is its own match,
+/// so a TrieJoin that intersected neighbour sets and forgot multiplicity would
+/// count too few. The graph-native answer must equal the other planner's.
+#[test]
+fn the_graph_native_trie_join_counts_parallel_edges_inside_the_cycle() {
+    let mut store = GraphStore::new();
+    let n: Vec<_> = (0..4).map(|_| store.create_node("P")).collect();
+    for (s, t) in [(0, 1), (0, 1), (1, 2), (2, 0), (2, 0), (1, 3), (3, 0), (2, 2), (0, 2)] {
+        store.create_edge(n[s], n[t], "R").unwrap();
+    }
+    for (name, cyclic, reference) in CYCLIC {
+        let expected = count(&store, reference);
+        assert_eq!(native_count(&store, cyclic), expected, "{name}");
+        assert_eq!(count(&store, cyclic), expected, "{name} (default planner)");
+    }
+    assert!(count(&store, CYCLIC[1].2) > 0, "the fixture has triangles");
+}
+

@@ -1426,6 +1426,12 @@ pub struct GraphStore {
     /// here counts, so a mutator added later makes a projection look stale,
     /// never fresh: the safe direction.
     data_changes: std::sync::atomic::AtomicU64,
+    /// The nodes and relationships added since a point, for the incremental
+    /// algorithms (ALGO-14). See `structure_log.rs`.
+    structure_log: super::structure_log::StructureLog,
+    /// The incremental algorithms' saved state for this graph (ALGO-14).
+    /// Lives with the store so it is per tenant and goes when the graph does.
+    incremental: crate::algo::incremental::IncrementalStates,
     /// The last content hash computed and the `data_changes` it was computed
     /// at (ML-08, #1747). A hash is one pass over the whole graph, so an
     /// export reuses it until the data changes.
@@ -1526,6 +1532,8 @@ impl GraphStore {
             statistics_cache: std::sync::RwLock::new(None),
             epoch: std::sync::atomic::AtomicU64::new(0),
             data_changes: std::sync::atomic::AtomicU64::new(0),
+            structure_log: Default::default(),
+            incremental: Default::default(),
             content_hash_memo: std::sync::Mutex::new(None),
             snapshot_sources: Vec::new(),
             snapshot_sources_epoch: 0,
@@ -2205,6 +2213,7 @@ NodeDeleted { id, .. } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.node_added(node_id);
     }
 
     /// Create a node with multiple labels and properties, refusing one that
@@ -2398,6 +2407,7 @@ NodeDeleted { id, .. } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.node_added(node_id);
         node_id
     }
 
@@ -2541,6 +2551,7 @@ NodeDeleted { id, .. } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.node_added(node_id);
         node_id
     }
 
@@ -2922,6 +2933,7 @@ NodeDeleted { id, .. } => {
         }
 
         self.journal(crate::graph::event::Mutation::NodeDeleted(id));
+        self.structure_log.rewritten();
         Ok(node)
     }
 
@@ -3011,6 +3023,7 @@ NodeDeleted { id, .. } => {
         }
 
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.rewritten();
         Ok(true)
     }
 
@@ -3172,6 +3185,7 @@ NodeDeleted { id, .. } => {
         }
 
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.rewritten();
         Ok(())
     }
 
@@ -3228,6 +3242,7 @@ NodeDeleted { id, .. } => {
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.structure_log.edge_added(edge_id);
         Ok(edge_id)
     }
 
@@ -3331,6 +3346,7 @@ NodeDeleted { id, .. } => {
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.structure_log.edge_added(edge_id);
         Ok(edge_id)
     }
 
@@ -3440,6 +3456,7 @@ NodeDeleted { id, .. } => {
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.structure_log.edge_added(edge_id);
         Ok(edge_id)
     }
 
@@ -3746,6 +3763,7 @@ NodeDeleted { id, .. } => {
         self.catalog.on_edge_deleted(edge.source, &src_labels, &edge.edge_type, edge.target, &tgt_labels);
 
         self.journal(crate::graph::event::Mutation::EdgeDeleted(id));
+        self.structure_log.rewritten();
         Ok(edge)
     }
 
@@ -5027,6 +5045,17 @@ NodeDeleted { id, .. } => {
     /// How many times data may have changed: the epoch, less housekeeping.
     /// Equal readings mean no node, relationship, label or property changed in
     /// between. See `data_changes`.
+    /// The nodes and relationships added since a point, and whether anything
+    /// was removed (ALGO-14).
+    pub fn structure_log(&self) -> &super::structure_log::StructureLog {
+        &self.structure_log
+    }
+
+    /// The incremental algorithms' saved state (ALGO-14).
+    pub fn incremental_states(&self) -> &crate::algo::incremental::IncrementalStates {
+        &self.incremental
+    }
+
     /// The memo `snapshot::content_hash::cached_content_hash` keeps.
     pub(crate) fn content_hash_memo(&self) -> &std::sync::Mutex<Option<(u64, String)>> {
         &self.content_hash_memo
@@ -6602,6 +6631,7 @@ NodeDeleted { id, .. } => {
     /// Clear all data from the graph
     pub fn clear(&mut self) {
         self.invalidate_statistics_cache();
+        self.structure_log.rewritten();
         self.snapshot_sources.clear();
         self.snapshot_sources_stale = false;
         self.structure_registry.clear();
@@ -7606,6 +7636,7 @@ NodeDeleted { id, .. } => {
     pub fn insert_recovered_node(&mut self, node: Node) {
         self.bump_epoch();
         let node_id = node.id;
+        self.structure_log.node_added(node_id);
         let idx = node_id.as_u64() as usize;
 
         // Ensure storage capacity
@@ -7660,6 +7691,7 @@ NodeDeleted { id, .. } => {
         if !self.has_node(target) {
             return Err(GraphError::InvalidEdgeTarget(target));
         }
+        self.structure_log.edge_added(edge_id);
 
         // Update adjacency lists (sorted insert)
         {
