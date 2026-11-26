@@ -44,3 +44,8 @@ ndarray = "0.15"
 tokio = { version = "1.35", features = ["full"] }
 # Serves the engine's own HTTP router in-process for the NLQ round-trip test.
 axum = "0.7"
+# Decode what `export` returns (#2267). The versions and features the engine
+# already locks, so this adds no crate to the build.
+arrow = { version = "60", default-features = false, features = ["ipc"] }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap"] }
+bytes = "1"

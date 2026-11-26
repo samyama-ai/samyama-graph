@@ -59,7 +59,7 @@ pub use client::SamyamaClient;
 pub use embedded::{EmbeddedClient, NlqSettings};
 pub use remote::{ConnectionConfig, RemoteClient, RowStream};
 pub use error::{SamyamaError, SamyamaResult};
-pub use models::{QueryResult, SdkNode, SdkEdge, ServerStatus, StorageStats};
+pub use models::{ExportFormat, QueryResult, SdkNode, SdkEdge, ServerStatus, StorageStats};
 
 // ============================================================
 // Extension traits (EmbeddedClient only)
