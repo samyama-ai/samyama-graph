@@ -130,8 +130,8 @@ fn peek_header_rejects_empty_and_foreign_files() {
 #[test]
 fn an_unsupported_version_is_refused() {
     let mut store = GraphStore::new();
-    let err = import_tenant(&mut store, &gz(&[header(3, &[])])[..]).unwrap_err();
-    assert!(err.to_string().contains("expected 1 or 2, got 3"), "{err}");
+    let err = import_tenant(&mut store, &gz(&[header(4, &[])])[..]).unwrap_err();
+    assert!(err.to_string().contains("expected 1, 2 or 3, got 4"), "{err}");
 }
 
 // ------------------------------------------------------------------

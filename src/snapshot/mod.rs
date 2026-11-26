@@ -1566,6 +1566,14 @@ fn import_tenant_inner(
                         }
                     }
                 }
+                // `Node::set_property` above stamps `updated_at` with `now`,
+                // so the snapshot's value is put back after the properties:
+                // restored before them, a node with an array, map, vector or
+                // temporal property came back claiming to have been updated
+                // at import time.
+                if let Some(node) = store.get_node_mut(new_id) {
+                    node.updated_at = snap_node.updated_at;
+                }
                 // Register in dedup index
                 for &key in dedup_keys {
                     for property in dedup_properties(key, &snap_labels) {

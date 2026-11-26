@@ -357,7 +357,7 @@ fn dedup_import_against_v3_matches_v2() {
     let merge = |bytes: Vec<u8>| {
         let mut target = import(&v2(&base));
         let stats =
-            snapshot::import_tenant_with_dedup(&mut target, bytes.as_slice(), &["Person:name"])
+            snapshot::import_tenant_with_dedup(&mut target, bytes.as_slice(), &["Person.name"])
                 .expect("dedup import");
         (
             stats.node_count,
@@ -435,7 +435,8 @@ fn a_plain_parquet_reader_reads_the_columns() {
     use arrow::datatypes::{Float32Type, Int64Type, UInt64Type};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-    let bytes = v3(&rich());
+    let g = rich();
+    let bytes = v3(&g);
     let members = untar(&bytes);
     assert_eq!(members[0].0, "manifest.json");
     let manifest: serde_json::Value = serde_json::from_slice(&members[0].1).unwrap();
@@ -458,7 +459,16 @@ fn a_plain_parquet_reader_reads_the_columns() {
         .column_by_name("_id")
         .unwrap()
         .as_primitive::<UInt64Type>();
-    assert_eq!(ids.values().to_vec(), vec![0, 1]);
+    // The ids the store gave the two Person-only nodes, whatever the
+    // allocator starts at.
+    let mut want: Vec<u64> = g
+        .all_nodes()
+        .iter()
+        .filter(|n| n.labels.len() == 1 && n.labels.iter().all(|l| l.as_str() == "Person"))
+        .map(|n| n.id.as_u64())
+        .collect();
+    want.sort();
+    assert_eq!(ids.values().to_vec(), want);
 
     let integer = batch
         .column_by_name("integer")
