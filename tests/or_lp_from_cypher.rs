@@ -112,9 +112,9 @@ fn the_powerco_transportation_problem_costs_1020() {
     let cost = [[8, 6, 10, 9], [9, 12, 13, 7], [14, 9, 16, 5]];
     let var = |i: usize, j: usize| format!("x{}{}", i + 1, j + 1);
     let mut objective = Vec::new();
-    for i in 0..3 {
-        for j in 0..4 {
-            objective.push(format!("{}: {}", var(i, j), cost[i][j]));
+    for (i, row) in cost.iter().enumerate() {
+        for (j, c) in row.iter().enumerate() {
+            objective.push(format!("{}: {c}", var(i, j)));
         }
     }
     let mut constraints = Vec::new();

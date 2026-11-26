@@ -354,7 +354,10 @@ pub fn solve(
     // last iterate is not an answer.
     let report_point =
         has_point && matches!(status, LinearStatus::Optimal | LinearStatus::TimeLimit);
-    let values = report_point.then(|| solved.get_solution().columns().to_vec());
+    // `+ 0.0` turns HiGHS's -0.0 into 0.0, which is what a caller reads it as.
+    let values = report_point.then(|| {
+        solved.get_solution().columns().iter().map(|v| v + 0.0).collect::<Vec<f64>>()
+    });
     let objective = values.as_ref().map(|x| {
         x.iter()
             .zip(&model.objective)
