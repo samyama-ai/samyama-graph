@@ -77,7 +77,19 @@ ok "snap revert back to $first, data intact"
 samyama --help >/dev/null || fail "the samyama CLI does not run"
 ok "the samyama CLI runs"
 
-denied=$(sudo journalctl -k --since "$since" --no-pager 2>/dev/null | grep -c 'apparmor="DENIED".*snap\.samyama' || true)
-[ "$denied" = 0 ] || { sudo journalctl -k --since "$since" --no-pager | grep 'apparmor="DENIED".*snap\.samyama' | head -20 >&2; fail "$denied AppArmor denials"; }
-ok "no AppArmor denials"
+# Two reads are probes with a fallback, and strict confinement refuses them
+# without breaking anything, so they are not counted:
+#   * /sys/fs/cgroup/.../cpu.max -- Rust's available_parallelism() asks for the
+#     cgroup's CPU quota, and without it uses the affinity mask's CPU count;
+#   * /sys/devices/.../queue/logical_block_size -- RocksDB asks the data
+#     directory's block size for alignment, and without it uses 4096. Reading
+#     it is what hardware-observe grants, which a store install does not
+#     connect on its own.
+# Any other denial fails.
+benign='name="/sys/fs/cgroup/[^"]*/cpu\.max"|name="/sys/devices/[^"]*/queue/logical_block_size"'
+denials() { sudo journalctl -k --since "$since" --no-pager 2>/dev/null | grep 'apparmor="DENIED".*snap\.samyama' || true; }
+skipped=$(denials | grep -cE "$benign" || true)
+denied=$(denials | grep -vcE "$benign" || true)
+[ "$denied" = 0 ] || { denials | grep -vE "$benign" | head -20 >&2; fail "$denied AppArmor denials"; }
+ok "no AppArmor denials (${skipped} refused probe reads with a fallback not counted)"
 echo "PASS $(basename "$snap")"
