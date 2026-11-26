@@ -78,6 +78,13 @@ parse-cache entry, which is kept on purpose; every later run keeps 0.
    memory: it can allocate its whole intermediate result before it is
    refused.
 
+   *Addressed in #2273, figures above not yet re-measured.* Sort and `WITH`
+   now pull their input 4,096 rows at a time, not 65,536, as aggregation has
+   since #2274 (finding 3), and all three check the deadline after every
+   batch rather than every tenth (a sort never did), so a stopped query holds
+   about one batch. `tests/query_time_limit_bounds_memory.rs` asserts the
+   bound as a ratio of peaks.
+
 3. **An aggregate over an expansion materialises the expansion.** `count(b)`
    over a 1-hop pattern returns one row and peaks at 13.9 MB, about 46 bytes
    for each of the 300,000 edges it counts. A streaming count needs a few
