@@ -163,6 +163,13 @@ fn required_role_is_admin_for_management_and_write_for_imports() {
     );
     assert_eq!(required_role(&Method::POST, "/api/import/csv"), Role::Write);
     assert_eq!(required_role(&Method::POST, "/api/enrich"), Role::Write);
+    // #1716. Retraction is destructive and takes a client-supplied selection
+    // query, so it is an Admin route. `/api/verify` promotes model-written
+    // values into live properties and materializes edges, so it is a write --
+    // it used to fall through to `Read`, which means a Read credential that
+    // could verify before now gets a 403.
+    assert_eq!(required_role(&Method::POST, "/api/retract"), Role::Admin);
+    assert_eq!(required_role(&Method::POST, "/api/verify"), Role::Write);
     assert_eq!(
         required_role(&Method::POST, "/api/vector/indexes"),
         Role::Write
@@ -309,6 +316,111 @@ async fn the_audit_log_records_writes_with_their_subject_and_skips_reads() {
     assert_eq!(lines[1]["subject"], "unauthenticated");
     assert_eq!(lines[1]["status"], 401);
     assert!(!text.contains("CREATE"), "the body must never be recorded");
+}
+
+#[tokio::test]
+async fn the_audit_log_records_what_an_agent_retraction_changed() {
+    // AI-11 (#1716) asks for entries a change can be diffed from. The entry
+    // for an ordinary write says only that one happened; the one for an agent
+    // lifecycle route has to say what it did.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("audit.log");
+    let log = Arc::new(AuditLog::open(&path).unwrap());
+    let s = store();
+    let pump = crate::agent::enrich::seed_promoted_enrichment(&mut *s.write().await).0;
+    let app = HttpServer::new(Arc::clone(&s), 0)
+        .with_credentials(vec![cred(&format!("svc:{D}"))])
+        .with_audit_log(Arc::clone(&log))
+        .router();
+
+    send(
+        app.clone(),
+        post_json(
+            "/api/query",
+            r#"{"query":"CREATE (:A)"}"#,
+            Some("Bearer test"),
+        ),
+    )
+    .await;
+    let (status, _, body) = send(
+        app,
+        post_json(
+            "/api/retract",
+            r#"{"query":"MATCH (p:Pump) RETURN p"}"#,
+            Some("Bearer test"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2, "{text}");
+
+    // The ordinary write is unchanged by this: its statement carries the data
+    // and stays out of the log (#2081), which is why the agent routes are the
+    // narrow exception rather than the log recording every body.
+    let ordinary = &lines[0];
+    assert_eq!(ordinary["path"], "/api/query");
+    for field in ["statement", "node_ids", "edge_ids", "before", "after"] {
+        assert!(
+            ordinary.get(field).is_none(),
+            "an ordinary write records no `{field}`: {text}"
+        );
+    }
+
+    let change = &lines[1];
+    assert_eq!(change["path"], "/api/retract");
+    assert_eq!(change["status"], 200);
+    assert_eq!(change["subject"], "svc");
+    assert_eq!(
+        change["statement"], "MATCH (p:Pump) RETURN p",
+        "the selection statement, so the entry names what was chosen: {text}"
+    );
+    assert!(
+        change["node_ids"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!(pump.as_u64())),
+        "{text}"
+    );
+    assert!(
+        !change["edge_ids"].as_array().unwrap().is_empty(),
+        "the generated edge that was removed: {text}"
+    );
+
+    // The part a diff is computed from. An entry whose two sides are equal
+    // records that something was called, not that anything changed, which is
+    // the state the row was failing on.
+    assert_ne!(change["before"], change["after"], "{text}");
+    let before_nodes = change["before"]["nodes"].as_array().unwrap();
+    assert!(
+        before_nodes
+            .iter()
+            .any(|n| n["properties"].get("vendor").is_some()),
+        "the before side holds the value that was withdrawn: {text}"
+    );
+    assert!(
+        !change["before"]["edges"].as_array().unwrap().is_empty(),
+        "{text}"
+    );
+    let after_nodes = change["after"]["nodes"].as_array().unwrap();
+    assert_eq!(
+        after_nodes.len(),
+        1,
+        "the node, still carrying its quarantined evidence: {text}"
+    );
+    assert!(
+        after_nodes[0]["properties"].get("vendor").is_none(),
+        "{text}"
+    );
+    assert!(
+        change["after"]["edges"].as_array().unwrap().is_empty(),
+        "{text}"
+    );
 }
 
 #[test]

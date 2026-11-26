@@ -259,6 +259,10 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
             json("no fields", "/api/verify", r#"{}"#),
             json("broken JSON", "/api/verify", BROKEN),
         ],
+        ("POST", "/api/retract") => vec![
+            json("no fields", "/api/retract", r#"{}"#),
+            json("broken JSON", "/api/retract", BROKEN),
+        ],
         ("POST", "/api/nlq") => vec![
             json("no fields", "/api/nlq", r#"{}"#),
             json("broken JSON", "/api/nlq", BROKEN),

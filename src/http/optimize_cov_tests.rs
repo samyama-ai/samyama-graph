@@ -1065,3 +1065,37 @@ fn checking_the_answer_is_not_billed_to_the_budget() {
     );
     assert_eq!(out.stopped_by, StopReason::Iterations);
 }
+
+/// A fixed-size benchmark refuses a `dim` it cannot honour (OPT-11, #1798).
+/// `uc2_dosing` is 6 variables whatever is asked; a request for 10000 used to
+/// run 6 and answer 200, so the caller could not tell it was not scaled.
+#[tokio::test]
+async fn a_fixed_size_benchmark_refuses_a_dim_it_cannot_honour() {
+    for (algorithm, benchmark, size) in
+        [("nsga2", "uc2_dosing", 6), ("nsga2", "zdt1", 30), ("nsga2", "dtlz1", 7)]
+    {
+        let body = format!(
+            r#"{{"algorithm":"{algorithm}","benchmark":"{benchmark}","population_size":4,"iterations":1,"dim":10000}}"#
+        );
+        let (s, m) = post(app(), "/optimize/solve", &body).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{benchmark}: {m}");
+        assert!(
+            m.contains(&format!("fixed size of {size} variables")) && m.contains("10000"),
+            "{benchmark}: {m}"
+        );
+        // Its own size is not a change, so it is still accepted.
+        let body = format!(
+            r#"{{"algorithm":"{algorithm}","benchmark":"{benchmark}","population_size":4,"iterations":1,"dim":{size}}}"#
+        );
+        let (s, m) = post(app(), "/optimize/solve", &body).await;
+        assert_eq!(s, StatusCode::OK, "{benchmark} at its own size: {m}");
+    }
+    // A single-objective benchmark is defined at any size and still takes one.
+    let (s, m) = post(
+        app(),
+        "/optimize/solve",
+        r#"{"algorithm":"jaya","benchmark":"sphere","population_size":4,"iterations":1,"dim":10000}"#,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{m}");
+}

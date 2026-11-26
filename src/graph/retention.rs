@@ -124,13 +124,13 @@ pub async fn sweep_once(
     persistence: Option<&crate::persistence::PersistenceManager>,
     tenant: &str,
 ) -> usize {
-    if store.read().await.retention_rules().is_empty() {
+    if crate::store_lock::read(store).await.retention_rules().is_empty() {
         return 0;
     }
     if persistence.is_some() && crate::persistence::health::is_degraded() {
         return 0;
     }
-    let mut guard = store.write().await;
+    let mut guard = crate::store_lock::write(store).await;
     if persistence.is_some() {
         guard.enable_write_log();
     }

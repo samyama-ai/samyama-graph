@@ -314,7 +314,7 @@ impl PersistenceManager {
 
         tokio::spawn(async move {
             let (vector_index, property_index) = {
-                let guard = store.read().await;
+                let guard = crate::store_lock::read(&store).await;
                 (Arc::clone(&guard.vector_index), Arc::clone(&guard.property_index))
             };
             GraphStore::start_background_indexer_with_store(
@@ -515,10 +515,14 @@ impl PersistenceManager {
         store: &GraphStore,
         mutations: &[crate::graph::event::Mutation],
     ) -> Result<usize, PersistenceError> {
-        // Counted here, the one path both auto-commit statements and
-        // transaction commits take, so `/metrics` cannot miss one (#2080).
-        // An empty log is a read or a no-op write, not a persist.
+        // The one path auto-commit statements and transaction commits both
+        // take to disk, so its USDT probes see every persist (#2219), and
+        // `/metrics` counts it here so it cannot miss one (#2080). An empty
+        // log is a read or a no-op write, not a persist.
+        crate::usdt::persist_start(mutations.len());
+        let started = std::time::Instant::now();
         let outcome = self.apply_mutations_uncounted(tenant, store, mutations);
+        crate::usdt::persist_done(mutations.len(), started.elapsed(), outcome.is_err());
         if !mutations.is_empty() {
             health::record_persist(mutations.len(), outcome.is_ok());
         }
