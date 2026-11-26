@@ -736,3 +736,55 @@ fn worker_from_env_refuses_an_unset_or_unknown_provider() {
         assert!(err.contains("NLQ_PROVIDER"), "{err}");
     }
 }
+
+// ------------------------------------------------------------ what calls cost (#1732)
+
+fn ollama_counted(answer: &str, prompt: u64, completion: u64) -> (u16, String) {
+    (
+        200,
+        serde_json::json!({ "response": answer, "prompt_eval_count": prompt, "eval_count": completion }).to_string(),
+    )
+}
+
+#[tokio::test]
+async fn the_worker_sums_what_its_calls_cost() {
+    let srv = MockHttp::serve(vec![
+        ollama_counted(r#"{"value":"A pump."}"#, 100, 7),
+        ollama_counted(r#"{"value":"UNKNOWN"}"#, 90, 3),
+    ]);
+    let gap = GapEvent { node_id: 1, label: "Asset".into(), property: "description".into(), materialize: None };
+    let w = worker(&srv.base_url);
+    assert_eq!(w.spent().calls, 0);
+    assert!(w.fill(&gap, &[]).await.is_some());
+    assert!(w.fill(&gap, &[]).await.is_none(), "a decline still cost a call");
+    let spent = w.spent();
+    assert_eq!(spent.calls, 2);
+    assert_eq!((spent.prompt_tokens, spent.completion_tokens), (Some(190), Some(10)));
+    assert_eq!(spent.usage().total_tokens, Some(200));
+    assert!(spent.latency > std::time::Duration::ZERO);
+    assert_eq!(w.model(), "m1");
+}
+
+#[tokio::test]
+async fn one_uncounted_call_makes_the_total_unknown_not_smaller() {
+    let srv = MockHttp::serve(vec![ollama_counted(r#"{"value":"A pump."}"#, 100, 7), ollama(r#"{"value":"A valve."}"#)]);
+    let gap = GapEvent { node_id: 1, label: "Asset".into(), property: "description".into(), materialize: None };
+    let w = worker(&srv.base_url);
+    w.fill(&gap, &[]).await;
+    w.fill(&gap, &[]).await;
+    let spent = w.spent();
+    assert_eq!(spent.calls, 2);
+    assert_eq!((spent.prompt_tokens, spent.completion_tokens), (None, None), "{spent:?}");
+    assert_eq!(spent.usage().total_tokens, None);
+}
+
+#[tokio::test]
+async fn a_failed_call_counts_and_leaves_the_tokens_unknown() {
+    let gap = GapEvent { node_id: 1, label: "Asset".into(), property: "description".into(), materialize: None };
+    let w = worker(&dead_base_url());
+    assert!(w.fill(&gap, &[]).await.is_none());
+    let spent = w.spent();
+    assert_eq!(spent.calls, 1);
+    assert_eq!(spent.prompt_tokens, None);
+}
+

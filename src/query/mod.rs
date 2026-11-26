@@ -152,6 +152,21 @@ impl CacheStats {
     }
 }
 
+/// Whether reads are planned by the graph-native, cost-based planner (#1729).
+///
+/// On by default: it is the planner that enumerates candidate plans and
+/// reports their cost (`Candidates evaluated`, `Chosen plan cost`), which the
+/// plan diagram (VIS-06) and EXPLAIN's cost block read, and a default server
+/// used to show none of it. `SAMYAMA_GRAPH_NATIVE=false` (or `0`) falls back to
+/// the rule-based planner, for a workload that plans worse under the new one.
+/// Read on every query, so it can be changed without a restart.
+pub fn graph_native_enabled() -> bool {
+    !matches!(
+        std::env::var("SAMYAMA_GRAPH_NATIVE").as_deref().map(str::trim),
+        Ok("false" | "0" | "off" | "no")
+    )
+}
+
 /// Query engine - high-level interface for executing queries
 ///
 /// Includes an LRU AST cache that eliminates repeated parsing overhead
@@ -304,6 +319,9 @@ impl QueryEngine {
         succeeded: bool,
         is_write: bool,
     ) {
+        // Every statement ends here, run or refused, so its USDT probe does
+        // too (#2219).
+        crate::usdt::query_done(query_str, elapsed, rows, !succeeded, is_write);
         let ms = elapsed.as_millis() as u64;
         let slow = self.slow_query_ms != 0 && ms >= self.slow_query_ms;
 
@@ -523,6 +541,7 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        crate::usdt::query_start(query_str, false);
         let _in_flight = crate::query::metrics::in_flight();
         let parse_started = std::time::Instant::now();
         let mut query = self.parse_to_run(query_str)?;
@@ -544,7 +563,7 @@ impl QueryEngine {
             query = Arc::new(own);
         }
 
-        let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
+        let mut executor = if graph_native_enabled() {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
                 executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
             ))
@@ -613,10 +632,11 @@ impl QueryEngine {
         sink: &mut dyn FnMut(&[String], Vec<executor::Record>) -> Result<(), String>,
         time_limit: Option<std::time::Duration>,
     ) -> Result<StreamedResult, Box<dyn std::error::Error>> {
+        crate::usdt::query_start(query_str, false);
         let _in_flight = crate::query::metrics::in_flight();
         let query = self.parse_to_run(query_str)?;
 
-        let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
+        let mut executor = if graph_native_enabled() {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
                 executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
             ))
@@ -720,6 +740,9 @@ impl QueryEngine {
                 // A hit is a query answered, and it returned before anything
                 // was counted: `/metrics` showed fewer queries than were served
                 // and a latency histogram of misses only (#2080).
+                // Served without running, so its start is reported here, at
+                // once before its end (#2219).
+                crate::usdt::query_start(query_str, false);
                 self.log_if_slow(query_str, started.elapsed(), hit.records.len(), true, false);
                 return Ok((hit.clone(), true));
             }
@@ -872,6 +895,7 @@ impl QueryEngine {
         params: &BoundParams,
         time_limit: Option<std::time::Duration>,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        crate::usdt::query_start(query_str, true);
         let _in_flight = crate::query::metrics::in_flight();
         let query = self.parse_to_run(query_str)?;
         let deadline = self.deadline(time_limit);
