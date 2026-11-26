@@ -118,6 +118,8 @@
 pub mod auth;
 pub mod logging;
 pub mod sandbox;
+pub mod usdt;
+pub mod store_lock;
 pub mod healthcheck;
 #[cfg(feature = "otel")]
 pub mod otel;
