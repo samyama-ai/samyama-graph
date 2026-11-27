@@ -3137,7 +3137,7 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "point.distance", "point.withinbbox", "properties", "radians", "rand", "randomuuid",
     "range", "relationships", "rels", "replace", "reverse", "right", "round", "rtrim",
     "sign", "sin", "sinh", "size", "split", "sqrt", "startnode", "stdev", "stdevp",
-    "substring", "subsumes", "tail", "tan", "tanh", "time", "time.truncate",
+    "substring", "subsumes", "tail", "tan", "tanh", "temporal.within", "time", "time.truncate",
     "timestamp", "toboolean", "tobooleanornull", "tofloat", "tofloatornull", "toint",
     "tointeger", "tointegerornull", "tolower", "tolowercase", "tostring",
     "tostringornull", "toupper", "touppercase", "trim", "type", "valuetype",
@@ -3335,6 +3335,7 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("point.withinbbox", 3),
     ("feature.value", 2),
     ("feature.vector", 2),
+    ("temporal.within", 2),
     ("vector.similarity.cosine", 2),
     ("vector.similarity.euclidean", 2),
     ("vector.similarity.maxsim", 2),
@@ -4857,6 +4858,59 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             let a = as_point(&args[0], "point.distance")?;
             let b = as_point(&args[1], "point.distance")?;
             Ok(Value::Property(PropertyValue::Float(point_distance(&a, &b)?)))
+        }
+        // `x WITHIN d` (NDS-03b, #1665): `x` lies in `[now - d, now]`. A
+        // list is a series, true when any sample does; a sample is a time or a
+        // `[time, value, ...]` list. Three-valued like every comparison: an
+        // undecidable sample (null, or a time that does not compare with now)
+        // makes a "no" into null, never into a silent false.
+        "temporal.within" => {
+            let window = match &args[1] {
+                Value::Null | Value::Property(PropertyValue::Null) => return Ok(Value::Null),
+                Value::Property(d @ PropertyValue::Duration { .. }) => d.clone(),
+                other => {
+                    return Err(ExecutionError::TypeError(format!(
+                        "WITHIN takes a duration on its right, e.g. `x WITHIN duration({{days: 7}})`; \
+                         got {other:?}"
+                    )))
+                }
+            };
+            let now = eval_function("datetime", &[], store)?;
+            let since = eval_binary_op(&BinaryOp::Sub, now.clone(), Value::Property(window))?;
+            let in_window = |t: Value| -> ExecutionResult<Option<bool>> {
+                let after = eval_binary_op(&BinaryOp::Ge, t.clone(), since.clone())?;
+                let before = eval_binary_op(&BinaryOp::Le, t, now.clone())?;
+                Ok(match (after, before) {
+                    (Value::Property(PropertyValue::Boolean(a)), Value::Property(PropertyValue::Boolean(b))) => Some(a && b),
+                    _ => None,
+                })
+            };
+            let sample_time = |v: &PropertyValue| -> Value {
+                match v {
+                    PropertyValue::Array(xs) => xs.first().cloned().map(Value::Property).unwrap_or(Value::Null),
+                    other => Value::Property(other.clone()),
+                }
+            };
+            let answer = match &args[0] {
+                Value::Null | Value::Property(PropertyValue::Null) => None,
+                Value::Property(PropertyValue::Array(samples)) => {
+                    let mut unknown = false;
+                    let mut hit = false;
+                    for s in samples {
+                        match in_window(sample_time(s))? {
+                            Some(true) => {
+                                hit = true;
+                                break;
+                            }
+                            Some(false) => {}
+                            None => unknown = true,
+                        }
+                    }
+                    if hit { Some(true) } else if unknown { None } else { Some(false) }
+                }
+                other => in_window(other.clone())?,
+            };
+            Ok(answer.map_or(Value::Null, |b| Value::Property(PropertyValue::Boolean(b))))
         }
         "point.withinbbox" => {
             let p = as_point(&args[0], "point.withinBBox")?;

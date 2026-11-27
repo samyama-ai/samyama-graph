@@ -549,11 +549,15 @@ mul_div_mod_op = { "*" | "/" | "%" }
 add_sub_op = { "+" | "-" }
 comparison_op = { "<=" | "<>" | ">=" | "<" | ">" | "==" | "=~" | "=" | "!=" | ^"STARTS" ~ ^"WITH" | ^"ENDS" ~ ^"WITH" | ^"CONTAINS" }
 in_op = @{ ^"IN" ~ !(ASCII_ALPHANUMERIC | "_") }
+// `x WITHIN <duration>` (NDS-03b, #1665): `x` -- a time, or a series of
+// `[time, value]` samples -- falls in the last `<duration>`. Lowered in the
+// parser to `temporal.within(x, <duration>)`.
+within_op = @{ ^"WITHIN" ~ !(ASCII_ALPHANUMERIC | "_") }
 and_op = @{ ^"AND" ~ !(ASCII_ALPHANUMERIC | "_") }
 or_op = @{ ^"OR" ~ !(ASCII_ALPHANUMERIC | "_") }
 xor_op = @{ ^"XOR" ~ !(ASCII_ALPHANUMERIC | "_") }
 
-binary_op = _{ pow_op | mul_div_mod_op | add_sub_op | comparison_op | in_op | and_op | xor_op | or_op }
+binary_op = _{ pow_op | mul_div_mod_op | add_sub_op | comparison_op | within_op | in_op | and_op | xor_op | or_op }
 
 unary_op = { "-" }
 not_op = @{ ^"NOT" ~ !(ASCII_ALPHANUMERIC | "_") }
