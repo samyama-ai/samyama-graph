@@ -542,6 +542,43 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        self.execute_read(query_str, store, params, time_limit, dialect, None)
+    }
+
+    /// A read confined to a named subgraph (#337): the query sees only the
+    /// view's nodes and the relationships between them.
+    ///
+    /// The scope is enforced by the plan's operators -- see
+    /// [`executor::QueryPlanner::with_subgraph`] -- so the query text is run
+    /// as written. A write is refused, as is anything the operators cannot
+    /// confine.
+    pub fn execute_in_subgraph(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+        time_limit: Option<std::time::Duration>,
+        subgraph: &executor::operator::SubgraphScopeRef,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        self.execute_read(
+            query_str,
+            store,
+            params,
+            time_limit,
+            crate::query::ast::Dialect::Cypher,
+            Some(subgraph),
+        )
+    }
+
+    fn execute_read(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+        time_limit: Option<std::time::Duration>,
+        dialect: crate::query::ast::Dialect,
+        subgraph: Option<&executor::operator::SubgraphScopeRef>,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         crate::usdt::query_start(query_str, false);
         let _in_flight = crate::query::metrics::in_flight();
         let parse_started = std::time::Instant::now();
@@ -564,7 +601,12 @@ impl QueryEngine {
             query = Arc::new(own);
         }
 
-        let mut executor = if graph_native_enabled() {
+        let mut executor = if let Some(scope) = subgraph {
+            QueryExecutor::with_planner(
+                store,
+                executor::planner::QueryPlanner::new().with_subgraph(Arc::clone(scope)),
+            )
+        } else if graph_native_enabled() {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
                 executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
             ))

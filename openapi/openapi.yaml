@@ -193,6 +193,17 @@ paths:
         Returns the full schema of the graph database including node types with
         property keys/types, edge types with source/target labels, indexes,
         constraints, and basic statistics.
+
+        With `subgraph`, the same response restricted to that named subgraph:
+        only its labels and relationship types are named, counts are of its
+        members, and `subgraph` is set to its name.
+      parameters:
+        - name: subgraph
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Describe this named subgraph instead of the whole graph
       responses:
         '200':
           description: Graph schema
@@ -200,6 +211,150 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SchemaResponse'
+        '404':
+          description: No named subgraph has that name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/subgraphs:
+    get:
+      operationId: listSubgraphs
+      summary: List the named subgraphs of the tenant graph
+      description: |
+        Every named subgraph, with its definition and the number of nodes and
+        relationships in its view now.
+      responses:
+        '200':
+          description: The named subgraphs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [subgraphs, count]
+                properties:
+                  subgraphs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Subgraph'
+                  count:
+                    type: integer
+        '403':
+          description: The subject may not read the tenant graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      operationId: createSubgraph
+      summary: Define a named subgraph
+      description: |
+        A named subgraph is a persisted, read-only view of the tenant graph: the
+        nodes carrying one of `labels` (and, for a label with a `where`
+        predicate, satisfying it) and the relationships of `edge_types` whose
+        two endpoints are both in the view. Query it by passing its name as
+        `graph` to `POST /api/query`. The definition is stored in the graph's
+        index catalog, so it survives a restart and travels in a snapshot.
+        Requires write access to the tenant graph.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubgraphDefinition'
+      responses:
+        '201':
+          description: The subgraph was defined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subgraph'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: The subject may not write to the tenant graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: A subgraph with that name already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Writes are refused because an earlier one did not reach disk
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/subgraphs/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getSubgraph
+      summary: One named subgraph
+      responses:
+        '200':
+          description: The subgraph's definition and the size of its view
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Subgraph'
+        '403':
+          description: The subject may not read the tenant graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No named subgraph has that name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      operationId: deleteSubgraph
+      summary: Drop a named subgraph
+      description: |
+        Removes the definition. The nodes and relationships it showed are not
+        touched. Requires write access to the tenant graph.
+      responses:
+        '200':
+          description: The subgraph was dropped
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [dropped]
+                properties:
+                  dropped:
+                    type: string
+        '403':
+          description: The subject may not write to the tenant graph
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No named subgraph has that name
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Writes are refused because an earlier one did not reach disk
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/algorithms/catalog:
     get:
@@ -243,7 +398,8 @@ paths:
                         category:
                           type: string
                           enum: [centrality, community, path, link_prediction, similarity,
-                                 structure, graph_metric, temporal, embedding, optimization]
+                                 structure, graph_metric, temporal, embedding, sampling,
+                                 optimization, dataset]
                         description:
                           type: string
                           description: What the algorithm computes, in one sentence.
@@ -1358,6 +1514,9 @@ paths:
         surfaced nodes, fill each with a single LLM call, and quarantine the result
         under `_enrichment` with provenance. Honest-decline: an UNKNOWN answer writes
         nothing. Promotion into the live property happens only at `/api/verify`.
+        With `--audit-log`, successful changes record the selection statement,
+        affected node and edge IDs, and before/after entity snapshots. These may contain
+        graph values, so protect the audit file as sensitive data.
       requestBody:
         required: true
         content:
@@ -1420,7 +1579,21 @@ paths:
         Walk quarantined `_enrichment` values, promote each whose confidence meets
         the policy trust floor into the live property, and materialise any declared
         subgraph edges (for example MONITORS edges to FailureMode nodes). Values
-        below the floor stay pending.
+        below the floor stay pending. With `--audit-log`, successful changes record
+        the selection statement, affected node and edge IDs, and before/after entity
+        snapshots; protect the audit file as sensitive data.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  description: Read-only Cypher query whose surfaced nodes are verified.
       responses:
         '400':
           $ref: '#/components/responses/BadRequest'
@@ -1439,6 +1612,59 @@ paths:
                     type: integer
                   still_pending:
                     type: integer
+  /api/retract:
+    post:
+      operationId: retractEnrichment
+      summary: Withdraw model-generated changes from selected nodes
+      description: |
+        Run a read-only Cypher query to select nodes, then remove only values,
+        edges, and orphaned target nodes marked as model-generated by enrichment.
+        Ordinary graph data is preserved. This operation is destructive and
+        requires an Admin credential. When `--audit-log` is enabled, the audit
+        entry includes the selection statement, affected node and edge IDs, and before/
+        after entity snapshots. The statement and snapshots may contain graph
+        values, so protect the audit file as sensitive data. The quarantined
+        evidence remains and returns to `pending_verification`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  description: Read-only Cypher query whose surfaced nodes are retracted.
+      responses:
+        '200':
+          description: Retraction completed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [selected_node_ids, report]
+                properties:
+                  selected_node_ids:
+                    type: array
+                    items:
+                      type: integer
+                  report:
+                    type: object
+                    properties:
+                      nodes_processed:
+                        type: integer
+                      properties_removed:
+                        type: integer
+                      edges_removed:
+                        type: integer
+                      nodes_removed:
+                        type: integer
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          description: Writes are refused because persistence is degraded
   /api/nlq:
     post:
       operationId: naturalLanguageQuery
@@ -2270,6 +2496,49 @@ components:
             What the engine will use: the explicit conventions plus those
             detected from the data.
 
+    SubgraphDefinition:
+      type: object
+      required: [name, labels]
+      properties:
+        name:
+          type: string
+          maxLength: 64
+          description: >-
+            Letters, digits, `_` and `-`, starting with a letter or `_`. Not
+            `default`.
+        labels:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: Node labels in the view
+        edge_types:
+          type: array
+          items:
+            type: string
+          description: >-
+            Relationship types in the view. A relationship is in the view when
+            its type is listed and both its endpoints are in the view. Empty
+            means the view has no relationships.
+        where:
+          type: object
+          additionalProperties:
+            type: string
+          description: >-
+            Label -> predicate a node must satisfy to be in the view through
+            that label, over its properties by bare name, e.g.
+            `{"Trial": "status = 'Recruiting'"}`.
+    Subgraph:
+      allOf:
+        - $ref: '#/components/schemas/SubgraphDefinition'
+        - type: object
+          properties:
+            nodes:
+              type: integer
+              description: Nodes in the view now
+            relationships:
+              type: integer
+              description: Relationships in the view now
     ErrorResponse:
       type: object
       properties:
