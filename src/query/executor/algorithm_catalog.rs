@@ -31,7 +31,8 @@ pub enum AlgorithmCategory {
     /// Draws part of the graph, as a GNN trainer's minibatches (ML-02).
     Sampling,
     Optimization,
-    /// Prepares a training dataset: leakage-safe splits and their check (ML-05).
+    /// Prepares or audits a training dataset: leakage-safe splits and their
+    /// check (ML-05), and benchmark contamination (ML-12).
     Dataset,
 }
 
@@ -175,6 +176,7 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
     // `splitLeakage` reads a stored split back and lists every leak across it.
     read("algo.split", &["algo.trainTestSplit"], Dataset, &["node", "split", "group"]),
     read("algo.splitLeakage", &["algo.leakageCheck"], Dataset, &["node1", "node2", "split1", "split2", "reason"]),
+    read("algo.contamination", &["algo.ngramOverlap", "algo.contaminationCheck"], Dataset, &["corpus", "benchmark", "shared", "ngrams", "overlap"]),
     // Optimisation. Every solve yields the result envelope (OPT-09):
     // `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and
     // `total_time_ms`. A single-objective solve also yields `history`; a
@@ -588,6 +590,16 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         opt("perStratum", T::Integer),
         key("seed", T::Integer, D::Integer(42)),
     ]),
+    // Benchmark contamination (ML-12, #1762). `benchmarkProperty` defaults to
+    // `property`.
+    ("algo.contamination", &[
+        Param { name: "corpusLabel", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
+        Param { name: "benchmarkLabel", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
+        key("property", T::String, D::String("text")),
+        opt("benchmarkProperty", T::String),
+        at_least(key("n", T::Integer, D::Integer(8)), 1.0, B::Refused),
+        above(key("minOverlap", T::Float, D::Float(0.5)), 0.0, B::Refused),
+    ]),
 ];
 
 /// What each algorithm computes, one sentence, by catalogue name (#2013).
@@ -675,6 +687,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.sample.egoNetwork", "The seed nodes and every node within hops of them, each at its smallest distance."),
     ("algo.sample.randomWalk", "The first size distinct nodes a random walk from the seed nodes visits, restarting at a seed with restartProbability; seeded."),
     ("algo.sample.stratified", "The same share of each label group of nodes, by fraction or perStratum; seeded."),
+    ("algo.contamination", "The pairs of a corpus text and a benchmark item where at least minOverlap of the benchmark item's word n-grams appear in the text, as a check that a training corpus has not seen a test set."),
 ];
 
 impl AlgorithmEntry {

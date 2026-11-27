@@ -478,6 +478,24 @@ ratio, and placing them largest first keeps the overshoot to one group per split
 |---|---|---|---|---|---|---|---|
 | Train/val/test split | split, trainTestSplit | entity: weak components of `edgeType`, direction ignored; community: Louvain's symmetrised graph; time, source, random: edges unused | Ignored | entity: a self-loop links a record to itself, so it changes no group | Each component, community or source is a group of its own; an isolated node is a group of one | Groups are shuffled by `seed`, placed largest first, each into the split furthest below its target, the earlier split on a tie; time: ordered by time then node id, and equal times share a split | Ratios must sum to 1; `[train, test]` or `[train, val, test]`. Reproducible from `seed` |
 | Split leakage check | splitLeakage, leakageCheck | entity: walks `edgeType` in both directions up to `hops` (default 3); community: Louvain recomputed on the graph as it is now; time, source: edges unused | Ignored | entity: a self-loop is walked like any edge and never pairs a node with itself | Nodes in different components are never a leak; every node in scope must hold a split, or the call is refused | Rows ordered by node ids; community and source report one row per group and pair of splits it spans, with its smallest node on each side | None: one row per leak, so `count(*)` is the leakage figure; an equal time across a boundary is not a leak |
+| Benchmark contamination | contamination, ngramOverlap, contaminationCheck | No edges: it compares the text property of the `corpusLabel` nodes with that of the `benchmarkLabel` nodes | Ignored | Not applicable; a node with both labels is never paired with itself | Not applicable: every corpus text is compared with every benchmark item; an empty text (no tokens) never matches; a label with no nodes, or a node without a string text, is refused | Rows by overlap, highest first, then corpus node id, then benchmark node id | `overlap` = the benchmark item's distinct word n-grams found in the corpus text / all of its distinct n-grams, in (0, 1]; text lower-cased and split on every non-alphanumeric character; an item shorter than `n` tokens is one gram, its whole sequence |
+
+`contamination` checks the other direction (ML-12): whether a training corpus
+already contains the items of a test set. The benchmark is whatever is loaded
+under `benchmarkLabel`; none ships with the engine. A pair is reported when at
+least `minOverlap` (default 0.5) of the benchmark item's word `n`-grams
+(default 8) occur in the corpus text, so a question quoted verbatim inside a
+long document scores 1.0.
+
+```cypher graph=benchmark-contamination
+CALL algo.contamination({corpusLabel: 'Doc', benchmarkLabel: 'Question',
+                         property: 'text', n: 8, minOverlap: 0.5})
+YIELD corpus, benchmark, shared, ngrams, overlap
+RETURN count(DISTINCT benchmark) AS seenQuestions;
+```
+
+Exact overlap only: a paraphrase shares no long n-grams and is not found, and
+a small `n` (2 or 3) reports common phrases rather than copying.
 
 ## Not a graph algorithm
 
