@@ -182,15 +182,16 @@ fn summary(e: &CatalogEntry) -> J {
     })
 }
 
-/// Does `e` match every word of `q`, over its question and paraphrases?
+/// Does every word of `q` appear in `e`'s question, or every word in one of
+/// its paraphrases? Each is a whole phrasing of the question, so words are not
+/// pooled across them: "cases" from the question and "country" from a
+/// paraphrase do not together make a match.
 fn matches(e: &CatalogEntry, q: &str) -> bool {
-    let text = std::iter::once(&e.question)
+    let words: Vec<String> = q.split_whitespace().map(str::to_lowercase).collect();
+    std::iter::once(&e.question)
         .chain(&e.paraphrases)
         .map(|s| s.to_lowercase())
-        .collect::<Vec<_>>()
-        .join("\n");
-    q.split_whitespace()
-        .all(|w| text.contains(&w.to_lowercase()))
+        .any(|text| words.iter().all(|w| text.contains(w.as_str())))
 }
 
 #[derive(Debug, Deserialize)]
@@ -380,7 +381,7 @@ pub async fn run_handler(
             None => return not_found(&id),
         }
     };
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
     let batch = match run_template_in(&store, &entry, &req.params, RunMode::Api) {
         Ok(b) => b,
         Err(e) => return refusal(status_of(&e), e.code(), e.to_string(), e.fields()),

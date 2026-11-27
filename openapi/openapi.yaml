@@ -1454,8 +1454,8 @@ paths:
       operationId: listQueries
       summary: List and search the graph's catalog entries
       description: >
-        `q` keeps entries whose question or paraphrases contain every word of
-        it, case-insensitively. Each entry carries its parameters, so a client
+        `q` keeps entries whose question, or one of whose paraphrases,
+        contains every word of it, case-insensitively. Each entry carries its parameters, so a client
         can draw a form without a second request.
       parameters:
         - name: q
