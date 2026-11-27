@@ -19177,6 +19177,9 @@ impl AlgorithmOperator {
         ("sample.stratified", "it groups nodes by their labels, which a projection does not keep"),
         ("stratifiedsample", "it groups nodes by their labels, which a projection does not keep"),
         ("stratifiedsampling", "it groups nodes by their labels, which a projection does not keep"),
+        ("contamination", "it compares node text properties, which a projection does not keep"),
+        ("ngramoverlap", "it compares node text properties, which a projection does not keep"),
+        ("contaminationcheck", "it compares node text properties, which a projection does not keep"),
         ("or.constrainedshortestpath", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
         ("or.shortestpathwithconstraints", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
     ];
@@ -20707,6 +20710,115 @@ impl AlgorithmOperator {
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// `algo.contamination({corpusLabel, benchmarkLabel, ...})` -- which corpus
+    /// texts contain a benchmark item, by word n-gram overlap (ML-12, #1762).
+    ///
+    /// The benchmark is whatever the caller loaded under `benchmarkLabel`: no
+    /// benchmark ships with the engine. One row per (corpus text, benchmark
+    /// item) pair whose overlap is at least `minOverlap`: `corpus`,
+    /// `benchmark`, `shared` (benchmark n-grams found in the corpus text),
+    /// `ngrams` (the benchmark item's n-grams) and `overlap` (their ratio).
+    /// See `samyama_graph_algorithms::contamination` for normalisation, short
+    /// items and the ordering.
+    ///
+    /// Refused rather than guessed: a label that matches no node (a typo would
+    /// otherwise report a clean corpus), and a node of either label whose text
+    /// property is missing or not a string.
+    fn execute_contamination(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const CALL: &str = "algo.contamination";
+        Self::reject_unknown_config_keys(
+            &self.args,
+            CALL,
+            &["benchmarkLabel", "benchmarkProperty", "corpusLabel", "minOverlap", "n", "property"],
+        )?;
+        let cfg = self.config_map();
+        let required = |key: &str, what: &str| -> ExecutionResult<String> {
+            Self::config_string(&cfg, CALL, key)?.ok_or_else(|| {
+                ExecutionError::bad_argument(format!("{CALL}: `{key}` is required: {what}"))
+            })
+        };
+        let n = match cfg.get("n") {
+            None => crate::algo::DEFAULT_NGRAM,
+            Some(PropertyValue::Integer(n)) if *n >= 1 => *n as usize,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `n` must be an integer of at least 1, got {other:?}"
+                )))
+            }
+        };
+        let min_overlap = match cfg.get("minOverlap") {
+            None => 0.5,
+            Some(PropertyValue::Float(f)) if *f > 0.0 && *f <= 1.0 => *f,
+            Some(PropertyValue::Integer(1)) => 1.0,
+            Some(other) => {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: `minOverlap` must be above 0 and at most 1, got {other:?}"
+                )))
+            }
+        };
+        let corpus_label = required("corpusLabel", "the label of the texts to check (training data)")?;
+        let benchmark_label = required("benchmarkLabel", "the label of the benchmark items to look for")?;
+        let property = Self::config_string(&cfg, CALL, "property")?.unwrap_or_else(|| "text".to_string());
+        let benchmark_property = Self::config_string(&cfg, CALL, "benchmarkProperty")?
+            .unwrap_or_else(|| property.clone());
+
+        let texts = |label: &str, property: &str, side: &str| -> ExecutionResult<Vec<(u64, String)>> {
+            let mut ids: Vec<u64> = store
+                .get_nodes_by_label(&Label::new(label))
+                .into_iter()
+                .map(|n| n.id.as_u64())
+                .collect();
+            if ids.is_empty() {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: no node has the {side} label `{label}`; a misspelt label would \
+                     otherwise report a clean corpus"
+                )));
+            }
+            ids.sort_unstable();
+            let mut out = Vec::with_capacity(ids.len());
+            let mut missing = Vec::new();
+            for id in ids {
+                match store.node_property(NodeId::new(id), property) {
+                    Some(PropertyValue::String(s)) => out.push((id, s)),
+                    None | Some(PropertyValue::Null) => missing.push(id),
+                    Some(other) => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "{CALL}: `{property}` on {side} node {id} is {other:?}, not a string"
+                        )))
+                    }
+                }
+            }
+            if !missing.is_empty() {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{CALL}: {} of {} :{label} node(s) have no `{property}` (first: {:?}); set it, \
+                     or narrow the label, so no {side} text is left out without anyone noticing",
+                    missing.len(),
+                    missing.len() + out.len(),
+                    &missing[..missing.len().min(5)]
+                )));
+            }
+            Ok(out)
+        };
+        let corpus = texts(&corpus_label, &property, "corpus")?;
+        let benchmark = texts(&benchmark_label, &benchmark_property, "benchmark")?;
+        fn as_refs(v: &[(u64, String)]) -> Vec<(u64, &str)> {
+            v.iter().map(|(id, s)| (*id, s.as_str())).collect()
+        }
+
+        let rows =
+            crate::algo::ngram_contamination(&as_refs(&corpus), &as_refs(&benchmark), n, min_overlap);
+        for c in rows {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "corpus", c.corpus);
+            self.bind_node(store, &mut rec, "benchmark", c.benchmark);
+            rec.bind("shared".to_string(), Value::Property(PropertyValue::Integer(c.shared as i64)));
+            rec.bind("ngrams".to_string(), Value::Property(PropertyValue::Integer(c.ngrams as i64)));
+            rec.bind("overlap".to_string(), Value::Property(PropertyValue::Float(c.overlap)));
+            self.results.push(rec);
         }
         Ok(())
     }
@@ -23700,6 +23812,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "reciprocity" => self.execute_reciprocity(store)?,
                 "split" | "traintestsplit" => self.execute_split(store)?,
                 "splitleakage" | "leakagecheck" => self.execute_split_leakage(store)?,
+                "contamination" | "ngramoverlap" | "contaminationcheck" => self.execute_contamination(store)?,
                 // An embedding reaches here only with `write: false` (#1736):
                 // without it the refusal above has already fired.
                 "fastrp" | "node2vec" => self.execute_embedding_stream(store)?,
@@ -23829,6 +23942,7 @@ impl PhysicalOperator for AlgorithmOperator {
                 "reciprocity" => self.execute_reciprocity(store)?,
                 "split" | "traintestsplit" => self.execute_split(store)?,
                 "splitleakage" | "leakagecheck" => self.execute_split_leakage(store)?,
+                "contamination" | "ngramoverlap" | "contaminationcheck" => self.execute_contamination(store)?,
                 _ => return Err(Self::unknown_algorithm(&self.name)),
             }
             // Before the write-back, so a call refused here writes nothing.
