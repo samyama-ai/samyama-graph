@@ -119,9 +119,9 @@ impl RowBatch {
         self.rows
     }
 
-    /// Whether nothing is staged.
+    /// Whether nothing is staged: no row, and no change-feed record (#2025).
     pub fn is_empty(&self) -> bool {
-        self.rows == 0
+        self.rows == 0 && self.inner.is_empty()
     }
 }
 
@@ -276,25 +276,76 @@ impl PersistentStorage {
         let key = Self::node_key(tenant, node_id);
 
         match self.db.get_cf(&cf, key)? {
-            Some(value) => {
-                let stored: StoredNode = bincode::deserialize(&value)?;
-                let properties: PropertyMap = bincode::deserialize(&stored.properties)?;
-
-                let node = Node {
-                    id: NodeId::new(stored.id),
-                    version: 1,
-                    labels: stored.labels.into_iter()
-                        .map(|s| crate::graph::Label::new(s))
-                        .collect(),
-                    properties,
-                    created_at: stored.created_at,
-                    updated_at: stored.updated_at,
-                };
-
-                Ok(Some(node))
-            }
+            Some(value) => Ok(Some(Self::decode_node(&value)?)),
             None => Ok(None),
         }
+    }
+
+    /// A node from its stored bytes.
+    fn decode_node(value: &[u8]) -> StorageResult<Node> {
+        let stored: StoredNode = bincode::deserialize(value)?;
+        let properties: PropertyMap = bincode::deserialize(&stored.properties)?;
+        Ok(Node {
+            id: NodeId::new(stored.id),
+            version: 1,
+            labels: stored.labels.into_iter().map(crate::graph::Label::new).collect(),
+            properties,
+            created_at: stored.created_at,
+            updated_at: stored.updated_at,
+        })
+    }
+
+    /// An edge from its stored bytes.
+    fn decode_edge(value: &[u8]) -> StorageResult<Edge> {
+        let stored: StoredEdge = bincode::deserialize(value)?;
+        let properties: PropertyMap = bincode::deserialize(&stored.properties)?;
+        Ok(Edge {
+            id: EdgeId::new(stored.id),
+            version: 1,
+            source: NodeId::new(stored.source),
+            target: NodeId::new(stored.target),
+            edge_type: crate::graph::EdgeType::new(stored.edge_type),
+            properties,
+            created_at: stored.created_at,
+        })
+    }
+
+    /// The stored rows of `ids`, in one batched read, in the order of `ids`
+    /// (#2025). What [`Self::rows_exist`] reads, decoded: the change feed
+    /// needs each row's state *before* a write, to say which labels and
+    /// properties the write changed, and the stored row is that state.
+    pub fn nodes_stored(&self, tenant: &str, ids: &[u64]) -> StorageResult<Vec<Option<Node>>> {
+        self.rows_stored(false, tenant, ids)?
+            .into_iter()
+            .map(|v| v.map(|b| Self::decode_node(&b)).transpose())
+            .collect()
+    }
+
+    /// [`Self::nodes_stored`] for edges.
+    pub fn edges_stored(&self, tenant: &str, ids: &[u64]) -> StorageResult<Vec<Option<Edge>>> {
+        self.rows_stored(true, tenant, ids)?
+            .into_iter()
+            .map(|v| v.map(|b| Self::decode_edge(&b)).transpose())
+            .collect()
+    }
+
+    fn rows_stored(&self, edges: bool, tenant: &str, ids: &[u64]) -> StorageResult<Vec<Option<Vec<u8>>>> {
+        #[cfg(test)]
+        ROW_READS.with(|c| c.set(c.get() + 1));
+        let name = if edges { "edges" } else { "nodes" };
+        let cf = self
+            .db
+            .cf_handle(name)
+            .ok_or_else(|| StorageError::ColumnFamily(name.to_string()))?;
+        let keys: Vec<Vec<u8>> = ids
+            .iter()
+            .map(|&id| if edges { Self::edge_key(tenant, id) } else { Self::node_key(tenant, id) })
+            .collect();
+        self.db
+            .batched_multi_get_cf(&cf, &keys, false)
+            .into_iter()
+            .map(|r| Ok(r?.map(|v| v.to_vec())))
+            .collect()
     }
 
     /// Which of `ids` already have a stored row, in one batched read (#1109).
@@ -375,22 +426,7 @@ impl PersistentStorage {
         let key = Self::edge_key(tenant, edge_id);
 
         match self.db.get_cf(&cf, key)? {
-            Some(value) => {
-                let stored: StoredEdge = bincode::deserialize(&value)?;
-                let properties: PropertyMap = bincode::deserialize(&stored.properties)?;
-
-                let edge = Edge {
-                    id: EdgeId::new(stored.id),
-                    version: 1,
-                    source: NodeId::new(stored.source),
-                    target: NodeId::new(stored.target),
-                    edge_type: crate::graph::EdgeType::new(stored.edge_type),
-                    properties,
-                    created_at: stored.created_at,
-                };
-
-                Ok(Some(edge))
-            }
+            Some(value) => Ok(Some(Self::decode_edge(&value)?)),
             None => Ok(None),
         }
     }
@@ -465,13 +501,120 @@ impl PersistentStorage {
     /// per row (#1666). Atomic: all of the batch's rows land or none do. The
     /// batch is empty afterwards and can be staged into again.
     pub fn commit_rows(&self, batch: &mut RowBatch) -> StorageResult<()> {
-        if batch.rows == 0 {
+        if batch.is_empty() {
             return Ok(());
         }
         let staged = std::mem::take(&mut batch.inner);
         batch.rows = 0;
         self.db.write_opt(staged, &self.write_opts)?;
         Ok(())
+    }
+
+    // ---- Change feed (#2025) -------------------------------------------
+    //
+    // In the `default` column family, which nothing else writes: every engine
+    // opens it, so a directory with a change feed in it still opens in an
+    // engine from before the feed, which ignores these keys. A new column
+    // family would have made that directory unopenable by it.
+    //
+    // Keys are `cdc/e/` or `cdc/m/`, the tenant's length as a big-endian u32,
+    // the tenant, and for an event its offset as a big-endian u64. The length
+    // prefix is what keeps one tenant's range from holding another's: tenant
+    // ids are not validated (#2108), and with a bare prefix `a` would own the
+    // events of `a/b`. Big-endian, so key order is offset order.
+
+    fn cdc_prefix(kind: &[u8], tenant: &str) -> Vec<u8> {
+        let mut k = Vec::with_capacity(kind.len() + 4 + tenant.len() + 8);
+        k.extend_from_slice(kind);
+        k.extend_from_slice(&(tenant.len() as u32).to_be_bytes());
+        k.extend_from_slice(tenant.as_bytes());
+        k
+    }
+
+    fn cdc_event_key(tenant: &str, offset: u64) -> Vec<u8> {
+        let mut k = Self::cdc_prefix(b"cdc/e/", tenant);
+        k.extend_from_slice(&offset.to_be_bytes());
+        k
+    }
+
+    fn cdc_meta_key(tenant: &str) -> Vec<u8> {
+        Self::cdc_prefix(b"cdc/m/", tenant)
+    }
+
+    fn default_cf(&self) -> StorageResult<&rocksdb::ColumnFamily> {
+        self.db
+            .cf_handle("default")
+            .ok_or_else(|| StorageError::ColumnFamily("default".to_string()))
+    }
+
+    /// Stage one change event, to land in the same RocksDB write as the rows
+    /// it describes.
+    pub fn stage_change_event(
+        &self,
+        batch: &mut RowBatch,
+        tenant: &str,
+        offset: u64,
+        event: &[u8],
+    ) -> StorageResult<()> {
+        let cf = self.default_cf()?;
+        batch.inner.put_cf(&cf, Self::cdc_event_key(tenant, offset), event);
+        Ok(())
+    }
+
+    /// Stage the feed's position for `tenant`.
+    pub fn stage_change_meta(&self, batch: &mut RowBatch, tenant: &str, meta: &[u8]) -> StorageResult<()> {
+        let cf = self.default_cf()?;
+        batch.inner.put_cf(&cf, Self::cdc_meta_key(tenant), meta);
+        Ok(())
+    }
+
+    /// Stage the removal of `tenant`'s events with offsets in `from..to`.
+    pub fn stage_change_trim(&self, batch: &mut RowBatch, tenant: &str, from: u64, to: u64) -> StorageResult<()> {
+        if from >= to {
+            return Ok(());
+        }
+        let cf = self.default_cf()?;
+        batch
+            .inner
+            .delete_range_cf(&cf, Self::cdc_event_key(tenant, from), Self::cdc_event_key(tenant, to));
+        Ok(())
+    }
+
+    /// The feed's stored position for `tenant`, if it has one.
+    pub fn change_meta(&self, tenant: &str) -> StorageResult<Option<Vec<u8>>> {
+        let cf = self.default_cf()?;
+        Ok(self.db.get_cf(&cf, Self::cdc_meta_key(tenant))?)
+    }
+
+    /// Up to `limit` of `tenant`'s events with offsets above `after`, oldest
+    /// first, as `(offset, bytes)`.
+    pub fn change_events(&self, tenant: &str, after: u64, limit: usize) -> StorageResult<Vec<(u64, Vec<u8>)>> {
+        let cf = self.default_cf()?;
+        let from = Self::cdc_event_key(tenant, after.saturating_add(1));
+        let mut to = Self::cdc_prefix(b"cdc/e/", tenant);
+        to.extend_from_slice(&[0xff; 9]);
+        let mut opts = rocksdb::ReadOptions::default();
+        opts.set_iterate_upper_bound(to);
+        let prefix_len = Self::cdc_prefix(b"cdc/e/", tenant).len();
+        let mut out = Vec::new();
+        for item in self.db.iterator_cf_opt(
+            &cf,
+            opts,
+            rocksdb::IteratorMode::From(&from, rocksdb::Direction::Forward),
+        ) {
+            if out.len() >= limit {
+                break;
+            }
+            let (key, value) = item?;
+            // Exactly prefix + offset; anything else is not this tenant's.
+            if key.len() != prefix_len + 8 {
+                continue;
+            }
+            let mut be = [0u8; 8];
+            be.copy_from_slice(&key[prefix_len..]);
+            out.push((u64::from_be_bytes(be), value.to_vec()));
+        }
+        Ok(out)
     }
 
     /// Create a snapshot

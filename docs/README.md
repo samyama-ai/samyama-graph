@@ -51,6 +51,7 @@ eight of eighteen documents (#1450).
 
 - **[ACID-GUARANTEES.md](./ACID-GUARANTEES.md)** — the transaction model: MVCC, the logical WAL, what durability `SAMYAMA_FSYNC` does and does not buy, and why there is no Raft replication to rely on.
 - **[FAILURE-MODES.md](./FAILURE-MODES.md)** — how the engine behaves when things go wrong.
+- **[CHANGE-DATA-CAPTURE.md](./CHANGE-DATA-CAPTURE.md)** — the durable per-tenant change feed: turning it on, reading `GET /api/cdc/events`, the event shapes, and what is guaranteed about order, commits, restarts and retention.
 - **[QUERY-MEMORY.md](./QUERY-MEMORY.md)** — heap a Cypher query uses while it runs: peak per workload, what is released after success, failure and timeout, behaviour under concurrency, and the CI regression gate.
 - **[SOC2-CONTROL-SET.md](./SOC2-CONTROL-SET.md)** — SOC 2 gap analysis (documented, not certified): access control, audit, change management, backup and incident response, each control with its evidence and its gap.
 - **[BI-CONNECTIVITY.md](./BI-CONNECTIVITY.md)** — connecting BI tools.

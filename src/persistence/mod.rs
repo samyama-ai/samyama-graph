@@ -50,6 +50,7 @@
 //! used to say the WAL was written first and replayed on start-up; neither has
 //! been true (#1592).
 
+pub mod cdc;
 pub mod format;
 pub mod health;
 pub mod storage;
@@ -62,6 +63,7 @@ pub use tenant::{
     ConnectionSlot, ResourceQuotas, ResourceUsage, Tenant, TenantError, TenantManager, TenantResult,
     AutoEmbedConfig, NLQConfig, AgentConfig, ToolConfig, LLMProvider,
 };
+pub use cdc::{ChangePage, ChangeReadError};
 pub use wal::{Wal, WalEntry, WalError, WalResult};
 pub use writer::{PersistedWriteError, PersistedWriter};
 
@@ -96,6 +98,16 @@ pub struct PersistenceManager {
     tenants: Arc<TenantManager>,
     /// Make the next `apply_mutations` fail. See that method.
     fail_next_apply: std::sync::atomic::AtomicBool,
+    /// The change feed (#2025); off until a retention is set.
+    cdc: cdc::ChangeFeed,
+}
+
+/// Each touched row as it was stored before a persist, for the change feed
+/// to diff against (#2025).
+#[derive(Default)]
+struct Before {
+    nodes: std::collections::HashMap<u64, Node>,
+    edges: std::collections::HashMap<u64, Edge>,
 }
 
 impl PersistenceManager {
@@ -141,7 +153,84 @@ impl PersistenceManager {
             wal: Arc::new(std::sync::Mutex::new(wal)),
             tenants: Arc::new(tenants),
             fail_next_apply: std::sync::atomic::AtomicBool::new(false),
+            cdc: cdc::ChangeFeed::default(),
         })
+    }
+
+    /// Turn the change feed on, keeping the newest `events` events per
+    /// tenant, or off with 0 (#2025). Off by default: see `cdc.rs`.
+    pub fn set_cdc_retention(&self, events: u64) {
+        self.cdc.set_retention(events);
+    }
+
+    /// Events the change feed keeps per tenant; 0 when it is off.
+    pub fn cdc_retention(&self) -> u64 {
+        self.cdc.retention()
+    }
+
+    /// Woken after every persist that added to the change feed, for a reader
+    /// that waits for the next event rather than polling.
+    pub fn change_notify(&self) -> &tokio::sync::Notify {
+        self.cdc.notify()
+    }
+
+    /// The feed's committed position for `tenant`.
+    fn feed_meta(&self, tenant: &str) -> Result<cdc::FeedMeta, PersistenceError> {
+        self.cdc.meta_or_load(tenant, || match self.storage.change_meta(tenant)? {
+            Some(bytes) => Ok(bincode::deserialize(&bytes)?),
+            None => Ok(cdc::FeedMeta::default()),
+        })
+    }
+
+    /// Up to `limit` of `tenant`'s committed change events with offsets above
+    /// `after`, oldest first (#2025).
+    ///
+    /// `after = 0` reads from the beginning. When events after `after` have
+    /// already been trimmed this says so, with the oldest offset still held,
+    /// instead of returning the events that remain: a reader that resumed
+    /// past a gap would have a copy that silently disagrees with the graph.
+    pub fn read_changes(
+        &self,
+        tenant: &str,
+        after: u64,
+        limit: usize,
+    ) -> Result<cdc::ChangePage, cdc::ChangeReadError> {
+        use cdc::ChangeReadError;
+        if self.cdc.retention() == 0 {
+            return Err(ChangeReadError::Disabled);
+        }
+        let storage_err = |e: PersistenceError| ChangeReadError::Storage(e.to_string());
+        let meta = self.feed_meta(tenant).map_err(storage_err)?;
+        let trimmed = |m: &cdc::FeedMeta| ChangeReadError::Trimmed {
+            after,
+            oldest: m.first_offset,
+            latest: m.next_offset - 1,
+        };
+        if after.saturating_add(1) < meta.first_offset {
+            return Err(trimmed(&meta));
+        }
+        let rows = self
+            .storage
+            .change_events(tenant, after, limit.min(cdc::MAX_LIMIT))
+            .map_err(|e| ChangeReadError::Storage(e.to_string()))?;
+        // A trim can land between the position read above and the events: if
+        // the first event is past `after + 1`, or the position has moved past
+        // it, the reader would otherwise get a page with a hole in front.
+        let now = self.feed_meta(tenant).map_err(storage_err)?;
+        let first_returned = rows.first().map(|(o, _)| *o);
+        if after.saturating_add(1) < now.first_offset
+            || first_returned.is_some_and(|o| o > after.saturating_add(1) && o > now.first_offset)
+        {
+            return Err(trimmed(&now));
+        }
+        let mut events = Vec::with_capacity(rows.len());
+        for (_, bytes) in &rows {
+            events.push(
+                serde_json::from_slice(bytes).map_err(|e| ChangeReadError::Storage(e.to_string()))?,
+            );
+        }
+        let latest = (now.next_offset - 1).max(rows.last().map(|(o, _)| *o).unwrap_or(0));
+        Ok(cdc::ChangePage { events, oldest: now.first_offset, latest })
     }
 
     /// Force the WAL's sync mode, overriding `SAMYAMA_FSYNC`.
@@ -497,12 +586,44 @@ impl PersistenceManager {
         // (#1109). It used to be a `get_node` per row, which read and decoded a
         // row only to learn whether it was there. Ids are unique after
         // coalescing, so no row of the batch can change another's answer.
+        //
+        // With the change feed on, the probe keeps the rows it reads (#2025):
+        // the stored row is the state before this persist, and the feed's
+        // events are the difference between it and the store. It is the same
+        // single batched read per kind of row.
+        let feed_on = self.cdc.retention() > 0 && !order.is_empty();
+        if feed_on {
+            // Creates and updates first, nodes before edges; then edge
+            // deletes before node deletes. A reader applying the events in
+            // order never sees an edge to a node it does not have. Stable, so
+            // the order within each group is the order of first appearance.
+            order.sort_by_key(|k| match (k.0, last[k]) {
+                (false, false) => 0,
+                (true, false) => 1,
+                (true, true) => 2,
+                (false, true) => 3,
+            });
+        }
+        let mut before = Before::default();
         let mut exists: HashMap<(bool, u64), bool> = HashMap::with_capacity(order.len());
         for edges in [false, true] {
             let ids: Vec<u64> = order.iter().filter(|k| k.0 == edges).map(|k| k.1).collect();
-            if !ids.is_empty() {
+            if ids.is_empty() {
+                continue;
+            }
+            if !feed_on {
                 let found = self.storage.rows_exist(tenant, edges, &ids)?;
                 exists.extend(ids.into_iter().zip(found).map(|(id, f)| ((edges, id), f)));
+            } else if edges {
+                for (id, row) in ids.iter().zip(self.storage.edges_stored(tenant, &ids)?) {
+                    exists.insert((true, *id), row.is_some());
+                    before.edges.extend(row.map(|r| (*id, r)));
+                }
+            } else {
+                for (id, row) in ids.iter().zip(self.storage.nodes_stored(tenant, &ids)?) {
+                    exists.insert((false, *id), row.is_some());
+                    before.nodes.extend(row.map(|r| (*id, r)));
+                }
             }
         }
 
@@ -522,7 +643,9 @@ impl PersistenceManager {
         let per_row = !self.tenants.admits_batch(tenant, new_nodes, new_edges);
 
         let mut usage = UsageDelta::default();
-        let result = self.write_batch(tenant, store, &order, &last, &exists, per_row, &mut usage);
+        let before = feed_on.then_some(&before);
+        let result =
+            self.write_batch(tenant, store, &order, &last, &exists, before, per_row, &mut usage);
         // Counted even when a row failed: every row before it is on disk.
         let flushed = usage.flush(&self.tenants, tenant);
         let written = result?;
@@ -565,29 +688,91 @@ impl PersistenceManager {
         order: &[(bool, u64)],
         last: &std::collections::HashMap<(bool, u64), bool>,
         exists: &std::collections::HashMap<(bool, u64), bool>,
+        before: Option<&Before>,
         per_row: bool,
         usage: &mut UsageDelta,
     ) -> Result<usize, PersistenceError> {
         let mut wal = wal::lock(&self.wal);
+        // The feed's position is read under the WAL lock, which every persist
+        // holds, so two persists of one tenant cannot take the same offsets.
+        let mut feed = match before {
+            Some(_) => Some(cdc::TxCursor::new(
+                tenant,
+                self.feed_meta(tenant)?,
+                self.cdc.retention(),
+            )),
+            None => None,
+        };
         let mut rows = storage::RowBatch::default();
-        let result =
-            self.stage_rows(tenant, store, order, last, exists, per_row, usage, &mut wal, &mut rows);
+        let result = self.stage_rows(
+            tenant, store, order, last, exists, before, per_row, usage, &mut wal, &mut rows, &mut feed,
+        );
+        // The persist is complete: its last event says so. Not on a failure,
+        // whose events stop where its rows do.
+        if result.is_ok() {
+            if let Some((offset, event)) = feed.as_ref().and_then(|f| f.commit_marker()) {
+                self.storage
+                    .stage_change_event(&mut rows, tenant, offset, &serde_json::to_vec(&event).map_err(std::io::Error::from)?)?;
+            }
+        }
         // Committed whether or not a row failed: the rows staged before the
         // failure are the ones the old per-row writes had already put on disk.
         // Their records first.
-        let committed = self.commit_logged(&mut wal, &mut rows);
+        let committed = self.commit_logged(&mut wal, &mut rows, &mut feed);
+        if feed.as_ref().is_some_and(|f| f.wrote) {
+            self.cdc.notify().notify_waiters();
+        }
         let written = result?;
         committed?;
         Ok(written)
     }
 
     /// Sync the WAL, then commit the staged rows: the order a crash must see.
-    fn commit_logged(&self, wal: &mut Wal, rows: &mut storage::RowBatch) -> Result<(), PersistenceError> {
+    ///
+    /// The change feed's events are in `rows` with the rows they describe;
+    /// its new position and any trim are staged here, so they land in the
+    /// same write, and the position is recorded as committed only after it.
+    fn commit_logged(
+        &self,
+        wal: &mut Wal,
+        rows: &mut storage::RowBatch,
+        feed: &mut Option<cdc::TxCursor>,
+    ) -> Result<(), PersistenceError> {
         if rows.is_empty() {
             return Ok(());
         }
+        if let Some(f) = feed.as_mut().filter(|f| f.meta != f.committed) {
+            if let Some((from, to)) = f.trim() {
+                self.storage.stage_change_trim(rows, &f.tenant, from, to)?;
+            }
+            self.storage
+                .stage_change_meta(rows, &f.tenant, &bincode::serialize(&f.meta)?)?;
+        }
         wal.sync()?;
         self.storage.commit_rows(rows)?;
+        if let Some(f) = feed.as_mut() {
+            if f.meta != f.committed {
+                f.wrote = true;
+            }
+            f.committed = f.meta;
+            self.cdc.committed(&f.tenant, f.meta);
+        }
+        Ok(())
+    }
+
+    /// Stamp a row's change events and stage them beside it.
+    fn stage_changes(
+        &self,
+        rows: &mut storage::RowBatch,
+        feed: &mut Option<cdc::TxCursor>,
+        events: impl FnOnce() -> Vec<serde_json::Value>,
+    ) -> Result<(), PersistenceError> {
+        let Some(f) = feed.as_mut() else { return Ok(()) };
+        for body in events() {
+            let (offset, event) = f.stamp(body);
+            let bytes = serde_json::to_vec(&event).map_err(std::io::Error::from)?;
+            self.storage.stage_change_event(rows, &f.tenant, offset, &bytes)?;
+        }
         Ok(())
     }
 
@@ -603,15 +788,17 @@ impl PersistenceManager {
         order: &[(bool, u64)],
         last: &std::collections::HashMap<(bool, u64), bool>,
         exists: &std::collections::HashMap<(bool, u64), bool>,
+        before: Option<&Before>,
         per_row: bool,
         usage: &mut UsageDelta,
         wal: &mut Wal,
         rows: &mut storage::RowBatch,
+        feed: &mut Option<cdc::TxCursor>,
     ) -> Result<usize, PersistenceError> {
         let mut written = 0usize;
         for &key in order {
             if rows.len() >= Self::ROWS_PER_COMMIT {
-                self.commit_logged(wal, rows)?;
+                self.commit_logged(wal, rows, feed)?;
             }
             let (is_edge, id) = key;
             let deleted = last[&key];
@@ -641,6 +828,9 @@ impl PersistenceManager {
                             properties,
                         })?;
                         self.storage.stage_put_node(rows, tenant, node)?;
+                        self.stage_changes(rows, feed, || {
+                            cdc::node_events(id, before.and_then(|b| b.nodes.get(&id)), Some(node))
+                        })?;
                         if !existed {
                             usage.nodes.step(1);
                         }
@@ -654,6 +844,9 @@ impl PersistenceManager {
                             node_id: id,
                         })?;
                         self.storage.stage_delete_node(rows, tenant, id)?;
+                        self.stage_changes(rows, feed, || {
+                            cdc::node_events(id, before.and_then(|b| b.nodes.get(&id)), None)
+                        })?;
                         usage.nodes.step(-1);
                         written += 1;
                     }
@@ -673,6 +866,9 @@ impl PersistenceManager {
                             properties,
                         })?;
                         self.storage.stage_put_edge(rows, tenant, &edge)?;
+                        self.stage_changes(rows, feed, || {
+                            cdc::edge_events(id, before.and_then(|b| b.edges.get(&id)), Some(&edge))
+                        })?;
                         if !existed {
                             usage.edges.step(1);
                         }
@@ -686,6 +882,9 @@ impl PersistenceManager {
                             edge_id: id,
                         })?;
                         self.storage.stage_delete_edge(rows, tenant, id)?;
+                        self.stage_changes(rows, feed, || {
+                            cdc::edge_events(id, before.and_then(|b| b.edges.get(&id)), None)
+                        })?;
                         usage.edges.step(-1);
                         written += 1;
                     }
@@ -760,9 +959,35 @@ impl PersistenceManager {
     /// is already wrong cannot be corrected by subtracting from it.
     pub fn drop_graph(&self, tenant: &str) -> Result<(), PersistenceError> {
         self.storage.delete_graph(tenant)?;
+        self.record_graph_dropped(tenant)?;
         self.storage.flush()?;
         self.tenants.set_usage(tenant, "nodes", 0)?;
         self.tenants.set_usage(tenant, "edges", 0)?;
+        Ok(())
+    }
+
+    /// The change feed's record of a dropped graph (#2025): its events go
+    /// with it, its offsets do not restart, and one `graph_dropped` event
+    /// tells a reader to discard what it built from the ones before.
+    fn record_graph_dropped(&self, tenant: &str) -> Result<(), PersistenceError> {
+        let retention = self.cdc.retention();
+        if retention == 0 {
+            return Ok(());
+        }
+        let _wal = wal::lock(&self.wal);
+        let mut feed = cdc::TxCursor::new(tenant, self.feed_meta(tenant)?, retention);
+        let mut rows = storage::RowBatch::default();
+        self.storage
+            .stage_change_trim(&mut rows, tenant, feed.meta.first_offset, feed.meta.next_offset)?;
+        feed.meta.first_offset = feed.meta.next_offset;
+        let (offset, event) = feed.stamp(serde_json::json!({ "op": "graph_dropped", "commit": true }));
+        let bytes = serde_json::to_vec(&event).map_err(std::io::Error::from)?;
+        self.storage.stage_change_event(&mut rows, tenant, offset, &bytes)?;
+        self.storage
+            .stage_change_meta(&mut rows, tenant, &bincode::serialize(&feed.meta)?)?;
+        self.storage.commit_rows(&mut rows)?;
+        self.cdc.committed(tenant, feed.meta);
+        self.cdc.notify().notify_waiters();
         Ok(())
     }
 
