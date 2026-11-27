@@ -942,7 +942,7 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
 /// Named procedures outside `db.*`, offered as "did you mean" beside
 /// [`KNOWN_DB_PROCEDURES`] but not listed among the schema procedures when
 /// nothing is close (#2098).
-pub const KNOWN_OTHER_PROCEDURES: &[&str] = &["ai.rag.retrieve"];
+pub const KNOWN_OTHER_PROCEDURES: &[&str] = &["ai.rag.retrieve", "eval.checkConsistency"];
 
 /// The refusal for a procedure name nothing dispatches: a likely intended
 /// name when there is one, and otherwise where the procedures are.
@@ -4240,6 +4240,38 @@ impl QueryPlanner {
                 call_clause.arguments.clone(),
                 &yields,
             )?));
+        }
+
+        if call_clause.procedure_name == super::consistency_ops::NAME {
+            // One optional map of rules (EVAL-08, #1737), read once here so a
+            // mistyped rule is refused before anything runs.
+            let config = match call_clause.arguments.as_slice() {
+                [] => PropertyValue::Null,
+                [arg] => match super::operator::eval_expression(arg, &super::Record::new(), store)? {
+                    super::Value::Property(p) => p,
+                    _ => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "{}: takes one map of rules",
+                            super::consistency_ops::NAME
+                        )))
+                    }
+                },
+                _ => {
+                    return Err(ExecutionError::bad_argument(format!(
+                        "{}: takes one map of rules, e.g. `{{label: 'Person', temporal: [['born', 'died']]}}`",
+                        super::consistency_ops::NAME
+                    )))
+                }
+            };
+            let rules = super::consistency_ops::Rules::from_config(&config)?;
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(
+                super::consistency_ops::ConsistencyCheckOperator::new(rules, &yields)?,
+            ));
         }
 
         if call_clause.procedure_name == super::rag_ops::NAME {
