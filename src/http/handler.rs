@@ -4153,10 +4153,13 @@ fn agent_schema_target(
         }
         target.definitions.retain(|definition| !matches!(definition,
             IndexDefinition::FullText { name, .. } if name == &clause.index_name));
+        let Some(property) = clause.property_keys.into_iter().next() else {
+            return Err("agent schema proposals require one property for a full-text index".to_string());
+        };
         target.definitions.push(IndexDefinition::FullText {
             name: clause.index_name,
             label: clause.label.as_str().to_string(),
-            property: clause.property_keys.into_iter().next().unwrap(),
+            property,
         });
     } else if let Some(clause) = query.drop_fulltext_index_clause {
         target.definitions.retain(|definition| !matches!(definition,
@@ -4759,7 +4762,7 @@ pub async fn enrich_handler(
     // Read phase: nothing async is awaited while the store guard or the (non-Send) batch lives.
     let (gaps, ctxs) = {
         let store = crate::store_lock::read(&state.store).await;
-        let batch = match state.engine.execute(&statement, &*store) {
+        let batch = match state.engine.execute(&statement, &store) {
             Ok(b) => b,
             Err(e) => {
                 return (

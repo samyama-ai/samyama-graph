@@ -7479,7 +7479,7 @@ NodeDeleted { id, .. } => {
                 catalog.definitions.iter().filter_map(|definition| match definition {
                     IndexDefinition::Hierarchy { name, edge_types, reverse, measure_label, measure_property, aggregates } => {
                         let mut spec = crate::index::hierarchy::HierarchySpec::new(
-                            name.clone(), edge_types.iter().map(|edge_type| EdgeType::new(edge_type)).collect(),
+                            name.clone(), edge_types.iter().map(EdgeType::new).collect(),
                         );
                         spec.reverse = *reverse;
                         if let Some(property) = measure_property {
@@ -7636,7 +7636,7 @@ NodeDeleted { id, .. } => {
                 }
                 IndexDefinition::Hierarchy { name, edge_types, reverse, measure_label, measure_property, aggregates } => {
                     let mut spec = crate::index::hierarchy::HierarchySpec::new(
-                        name.clone(), edge_types.iter().map(|edge_type| EdgeType::new(edge_type)).collect(),
+                        name.clone(), edge_types.iter().map(EdgeType::new).collect(),
                     );
                     spec.reverse = *reverse;
                     if let Some(property) = measure_property {
@@ -8435,6 +8435,7 @@ mod tests {
         // once X stops bumping.
         const EXEMPT: &[(&str, &str)] = &[
             ("enable_write_log", "recording flag; the writes it records bump on their own path"),
+            ("truncate_write_log", "truncates audit bookkeeping after a rolled-back statement; it does not change graph data or query results"),
             ("begin_deferred_bulk_load", "raises the deferral counter; it changes when the held-back finish runs, not what any read returns -- every structure it holds back is guarded against being read short (#1807)"),
             ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
             ("set_write_admission", "stores the quota ceiling this statement is admitted under; it refuses writes, it does not change one (#1483)"),
