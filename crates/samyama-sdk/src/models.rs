@@ -77,3 +77,39 @@ pub struct StorageStats {
     /// Number of edges
     pub edges: u64,
 }
+
+/// The wire format of an exported query result (ML-01, #2267).
+///
+/// What `POST /api/query/export` answers in and what
+/// `EmbeddedClient::export` / `RemoteClient::export` return: the engine's own
+/// encoders (`samyama::export::to_ipc` and `to_parquet`) in both modes, so a
+/// result read in-process and one read over HTTP are the same bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// Arrow IPC *stream* format, `application/vnd.apache.arrow.stream`.
+    Arrow,
+    /// A Parquet file, Snappy-compressed.
+    Parquet,
+}
+
+impl ExportFormat {
+    /// The names the HTTP endpoint and the Python SDK accept.
+    pub const NAMES: [&'static str; 2] = ["arrow", "parquet"];
+
+    /// The name the HTTP endpoint takes in its `format` field.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ExportFormat::Arrow => "arrow",
+            ExportFormat::Parquet => "parquet",
+        }
+    }
+
+    /// Parse a format name, case-insensitively; `None` for anything else.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "arrow" => Some(ExportFormat::Arrow),
+            "parquet" => Some(ExportFormat::Parquet),
+            _ => None,
+        }
+    }
+}

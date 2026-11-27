@@ -10,15 +10,18 @@ script does not round-trip through a temporary file.
     tbl = table("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
     df = dataframe("MATCH (p:Person) RETURN p.name AS name", graph="people")
 
-Why this is HTTP and not the extension module
----------------------------------------------
+This module, or `SamyamaClient.query_arrow`
+-----------------------------------------
 
-The Arrow/Parquet export exists only on the HTTP surface -- neither
-`samyama-sdk` nor the pyo3 extension exposes it -- and reaching it from Python
-needs no compiled extension. That matters for testing: building the extension
-needs maturin and a full release compile, so the suites that depend on it are
-excluded from the pull-request lane. This module is importable and testable
-without any of that.
+The client now has the same thing (#2267): `SamyamaClient.query_arrow` returns
+a `pyarrow.Table` and `SamyamaClient.export` the raw bytes, and an *embedded*
+client does it in-process, with no server. Use those when you already have a
+client.
+
+This module stays for what it was written for: reaching a server's export from
+Python with no compiled extension at all -- plain `urllib`, importable and
+testable without maturin, which is why its suite runs in the pull-request lane
+and the extension's does not.
 
 `urllib.request` from the standard library, deliberately: the SDK's runtime
 dependencies are `fastmcp` and `pyyaml`, and a dataframe helper is a poor reason
