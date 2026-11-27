@@ -238,6 +238,14 @@ async fn over_http() {
     assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
     assert!(body["error"].as_str().unwrap_or("").contains(&format!("no algorithm call {id} is running")), "{body}");
 
+    // An id no call can have is the same JSON 404, not axum's plain-text 400
+    // for a path that is not a u64 (found by the api-fuzz gate).
+    for bad in ["-1", "abc", "18446744073709551616"] {
+        let (status, body) = send(&app, post(&format!("/api/algorithms/running/{bad}/cancel"), serde_json::json!({}))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{bad}: {body}");
+        assert!(body["error"].as_str().unwrap_or("").contains(&format!("no algorithm call {bad} is running")), "{bad}: {body}");
+    }
+
     // And the server goes on answering queries.
     let (status, body) = send(&app, post("/api/query", serde_json::json!({ "query": "MATCH (p:P) RETURN count(p) AS n" }))).await;
     assert_eq!(status, StatusCode::OK, "{body}");

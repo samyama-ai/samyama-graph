@@ -534,6 +534,7 @@ paths:
           description: An `id` from `GET /api/algorithms/running`.
           schema:
             type: integer
+            minimum: 0
       responses:
         '202':
           description: Cancel requested
@@ -548,7 +549,7 @@ paths:
                   cancel_requested:
                     type: boolean
         '404':
-          description: No algorithm call with that id is running (it never existed or has ended)
+          description: No algorithm call with that id is running (it never existed, has ended, or the id is not one a call can have)
           content:
             application/json:
               schema:

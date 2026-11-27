@@ -1759,12 +1759,20 @@ pub async fn running_algorithms_handler() -> impl IntoResponse {
 /// `Query cancelled: ...`; the server, the store and every other query carry
 /// on. 404: no call with that id is running -- it never existed or has
 /// already ended, and either way there is nothing to stop.
+///
+/// The id is read as text, as `POST /optimize/solve/{id}/cancel` reads its
+/// own. A `Path<u64>` answered `-1`, `abc` or a number past `u64::MAX` with
+/// axum's plain-text 400, which the spec does not document; none of them can
+/// name a running call, so each gets the same JSON 404 as an id that has
+/// ended.
 pub async fn cancel_running_algorithm_handler(
-    axum::extract::Path(id): axum::extract::Path<u64>,
+    axum::extract::Path(raw): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    if crate::query::running::cancel(id) {
+    let id = raw.parse::<u64>().ok();
+    if let Some(id) = id.filter(|&id| crate::query::running::cancel(id)) {
         (StatusCode::ACCEPTED, Json(json!({ "id": id, "cancel_requested": true })))
     } else {
+        let id = id.map_or(raw, |id| id.to_string());
         (
             StatusCode::NOT_FOUND,
             Json(json!({
