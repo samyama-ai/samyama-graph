@@ -35,14 +35,19 @@
 //! Arrow has no type for them, and inventing a flattening here would produce a
 //! column whose meaning depends on which query wrote it.
 
+#[cfg(feature = "arrow")]
 use std::sync::Arc;
 
+#[cfg(feature = "arrow")]
 use arrow::array::{
     ArrayRef, BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, NullArray, StringBuilder,
 };
+#[cfg(feature = "arrow")]
 use arrow::datatypes::{DataType, Field, Schema};
+#[cfg(feature = "arrow")]
 use arrow::record_batch::RecordBatch as ArrowBatch;
 
+#[cfg(feature = "arrow")]
 use crate::graph::PropertyValue;
 use crate::query::executor::record::{RecordBatch, Value};
 
@@ -62,10 +67,16 @@ pub enum ExportError {
     /// charged against the admission ceiling one row at a time.
     #[error("quota exceeded: {0}")]
     QuotaExceeded(String),
+    /// This build was made without the `arrow` feature (HW-05, #1623), as the
+    /// Edge build is, so it has no Arrow or Parquet code to run. Answered 501
+    /// over HTTP: the request is fine, this binary cannot serve it.
+    #[error("{0} is not in this build: it was built without the `arrow` feature, as the Edge build is; use CSV or GraphML, or a build with default features")]
+    NotInThisBuild(&'static str),
 }
 
 /// The Arrow type a single value would need, before unification.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg(feature = "arrow")]
 enum Kind {
     /// Absorbed by everything: a null fits in any column.
     Null,
@@ -85,6 +96,7 @@ enum Kind {
     Json,
 }
 
+#[cfg(feature = "arrow")]
 impl Kind {
     /// The narrowest kind that can hold both.
     fn unify(self, other: Kind) -> Kind {
@@ -109,6 +121,7 @@ impl Kind {
     }
 }
 
+#[cfg(feature = "arrow")]
 fn kind_of_property(p: &PropertyValue) -> Kind {
     match p {
         PropertyValue::Null => Kind::Null,
@@ -144,6 +157,7 @@ fn kind_of_property(p: &PropertyValue) -> Kind {
     }
 }
 
+#[cfg(feature = "arrow")]
 fn kind_of(v: &Value) -> Kind {
     match v {
         Value::Null => Kind::Null,
@@ -165,6 +179,7 @@ fn kind_of(v: &Value) -> Kind {
     }
 }
 
+#[cfg(feature = "arrow")]
 fn as_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Property(PropertyValue::Integer(i)) => Some(*i as f64),
@@ -173,6 +188,7 @@ fn as_f64(v: &Value) -> Option<f64> {
     }
 }
 
+#[cfg(feature = "arrow")]
 fn prop_as_f64(p: &PropertyValue) -> Option<f64> {
     match p {
         PropertyValue::Integer(i) => Some(*i as f64),
@@ -183,6 +199,7 @@ fn prop_as_f64(p: &PropertyValue) -> Option<f64> {
 
 /// The float sequence behind a value that a `List<Float64>` column holds, or
 /// `None` for a null.
+#[cfg(feature = "arrow")]
 fn float_list(v: &Value) -> Option<Vec<Option<f64>>> {
     match v {
         Value::Null | Value::Property(PropertyValue::Null) => None,
@@ -197,6 +214,7 @@ fn float_list(v: &Value) -> Option<Vec<Option<f64>>> {
     }
 }
 
+#[cfg(feature = "arrow")]
 fn int_list(v: &Value) -> Option<Vec<Option<i64>>> {
     let one = |p: &PropertyValue| match p {
         PropertyValue::Integer(i) => Some(*i),
@@ -218,6 +236,7 @@ fn int_list(v: &Value) -> Option<Vec<Option<i64>>> {
     }
 }
 
+#[cfg(feature = "arrow")]
 fn string_list(v: &Value) -> Option<Vec<Option<String>>> {
     let one = |p: &PropertyValue| match p {
         PropertyValue::String(s) => Some(s.clone()),
@@ -242,6 +261,7 @@ fn string_list(v: &Value) -> Option<Vec<Option<String>>> {
 }
 
 /// The text an `Utf8` column holds for a value whose kind is `Str`.
+#[cfg(feature = "arrow")]
 fn as_text(v: &Value) -> Option<String> {
     match v {
         Value::Null | Value::Property(PropertyValue::Null) => None,
@@ -337,6 +357,7 @@ fn json_of(v: &Value) -> serde_json::Value {
     }
 }
 
+#[cfg(feature = "arrow")]
 fn build_column(kind: Kind, values: &[Option<&Value>]) -> (DataType, ArrayRef) {
     match kind {
         Kind::Null => (
@@ -464,6 +485,7 @@ fn build_column(kind: Kind, values: &[Option<&Value>]) -> (DataType, ArrayRef) {
 ///
 /// Column order is the result's own; a column the records never bound is all
 /// null, which is what a projection of a missing property means in Cypher.
+#[cfg(feature = "arrow")]
 pub fn to_arrow(batch: &RecordBatch) -> Result<ArrowBatch, ExportError> {
     let mut fields = Vec::with_capacity(batch.columns.len());
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(batch.columns.len());
@@ -493,6 +515,7 @@ pub fn to_arrow(batch: &RecordBatch) -> Result<ArrowBatch, ExportError> {
 }
 
 /// The Arrow IPC *stream* format — what a client reads incrementally.
+#[cfg(feature = "arrow")]
 pub fn to_ipc(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
     let arrow_batch = to_arrow(batch)?;
     let mut buf: Vec<u8> = Vec::new();
@@ -510,6 +533,7 @@ pub fn to_ipc(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
 }
 
 /// The same batch as a Parquet file, Snappy-compressed.
+#[cfg(feature = "arrow")]
 pub fn to_parquet(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
     use parquet::arrow::ArrowWriter;
     use parquet::basic::Compression;
@@ -542,8 +566,42 @@ pub fn to_parquet(batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
 /// where that belongs, with the mapping written in the query.
 pub mod csv;
 pub mod graphml;
+
+/// Arrow IPC export in a build without the `arrow` feature: refused by name.
+#[cfg(not(feature = "arrow"))]
+pub fn to_ipc(_batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
+    Err(ExportError::NotInThisBuild("Arrow export"))
+}
+
+/// Parquet export in a build without the `arrow` feature: refused by name.
+#[cfg(not(feature = "arrow"))]
+pub fn to_parquet(_batch: &RecordBatch) -> Result<Vec<u8>, ExportError> {
+    Err(ExportError::NotInThisBuild("Parquet export"))
+}
+
+/// Parquet import in a build without the `arrow` feature: refused by name,
+/// before the store is touched.
+#[cfg(not(feature = "arrow"))]
+pub mod import {
+    use super::ExportError;
+    use crate::graph::GraphStore;
+
+    /// Never produced: there is nothing to import with.
+    #[derive(Debug, Default, serde::Serialize)]
+    pub struct ImportStats {}
+
+    pub fn parquet_to_nodes(
+        _store: &mut GraphStore,
+        _tenant: &str,
+        _label: &str,
+        _bytes: Vec<u8>,
+    ) -> Result<ImportStats, ExportError> {
+        Err(ExportError::NotInThisBuild("Parquet import"))
+    }
+}
 #[cfg(test)] #[path = "export_cov_tests.rs"] mod cov_tests;
 
+#[cfg(feature = "arrow")]
 pub mod import {
     use std::collections::HashMap;
 
