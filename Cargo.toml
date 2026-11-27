@@ -344,6 +344,14 @@ harness = false
 name = "vector_churn_benchmark"
 harness = false
 
+# Vector search at biomedical scale (#1281): concept- and article-level
+# embeddings, type-filtered search, memory, checkpoint size and the recall
+# cost of each quantization. Its pure logic is in
+# benches/biomedical_vector_common, tested by tests/biomedical_vectors.rs.
+[[bench]]
+name = "biomedical_vectors"
+harness = false
+
 [[bench]]
 name = "vector_distance"
 harness = false
