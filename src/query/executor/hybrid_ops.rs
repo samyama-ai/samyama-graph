@@ -69,6 +69,7 @@ pub const CONFIG_KEYS: &[&str] = &[
     "maxExpanded",
     "graphWeight",
     "decay",
+    "sourceProperty",
 ];
 
 /// The columns it yields.
@@ -85,7 +86,12 @@ pub const COLUMNS: &[&str] = &[
     "hops",
     "seed",
     "timings",
+    "provenance",
 ];
+
+/// The properties read, in order, for a hit's source URI when the call names
+/// none with `sourceProperty` (AI-08, #1707). The first one the node has wins.
+pub const SOURCE_PROPERTIES: &[&str] = &["source_uri", "sourceUri", "uri", "url", "source", "src"];
 
 /// The furthest `hops` may reach. The expansion is meant to be local; a
 /// larger radius is a traversal, which `MATCH` already writes.
@@ -139,6 +145,9 @@ pub struct HybridRequest {
     pub max_expanded: usize,
     pub graph_weight: f64,
     pub decay: f64,
+    /// The property holding each hit's source URI; `None` tries
+    /// `SOURCE_PROPERTIES` in order.
+    pub source_property: Option<String>,
 }
 
 impl Default for HybridRequest {
@@ -161,6 +170,7 @@ impl Default for HybridRequest {
             max_expanded: 100,
             graph_weight: 1.0,
             decay: 0.5,
+            source_property: None,
         }
     }
 }
@@ -700,6 +710,16 @@ pub fn request_from_args(
         }
         req.decay = d;
     }
+    req.source_property = match config.get("sourceProperty") {
+        None | Some(PropertyValue::Null) => None,
+        Some(PropertyValue::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+        Some(other) => {
+            return Err(bad(format!(
+                "`sourceProperty` is the name of the property holding a hit's source URI, \
+                 got {other:?}"
+            )))
+        }
+    };
     req.fusion = match config.get("fusion") {
         None | Some(PropertyValue::Null) => Fusion::Rrf,
         Some(PropertyValue::String(s)) if s.eq_ignore_ascii_case("rrf") => Fusion::Rrf,
@@ -749,6 +769,97 @@ pub fn request_from_args(
     Ok(req)
 }
 
+/// A hit's citation payload: the `provenance` column (AI-08, #1707).
+///
+/// Every row carries it unless the caller `YIELD`s other columns, so a caller
+/// who has never heard of the corpus's property names still gets enough to
+/// render a citation: which node, where it came from, how confident the
+/// search is in it and how it was found. The keys are always all present;
+/// what is unknown is null rather than missing, so a renderer reads one shape.
+///
+/// | key | value |
+/// |---|---|
+/// | `nodeId` | the node's id |
+/// | `labels` | its labels, sorted |
+/// | `source` | its source URI, or null if it has none |
+/// | `sourceProperty` | the property `source` was read from, or null |
+/// | `score` | the row's `score` |
+/// | `foundBy` | the row's `foundBy` |
+/// | `bm25Rank`, `vectorRank` | the row's ranks, null if not in that list |
+/// | `seedId`, `hops` | the seed it was reached from and how far; itself and 0 for a seed |
+/// | `index` | `{fulltext, vector}`: the indexes searched, null for one not used |
+pub fn provenance(
+    store: &GraphStore,
+    req: &HybridRequest,
+    hit: &HybridHit,
+) -> HashMap<String, PropertyValue> {
+    let string_or_null = |s: Option<String>| s.map_or(PropertyValue::Null, PropertyValue::String);
+    let int_or_null =
+        |x: Option<usize>| x.map_or(PropertyValue::Null, |n| PropertyValue::Integer(n as i64));
+    let tried: Vec<&str> = match &req.source_property {
+        Some(p) => vec![p.as_str()],
+        None => SOURCE_PROPERTIES.to_vec(),
+    };
+    let found = tried
+        .into_iter()
+        .find_map(|key| match store.node_property(hit.node, key) {
+            None | Some(PropertyValue::Null) => None,
+            Some(PropertyValue::String(s)) => Some((key, s)),
+            Some(other) => Some((key, other.to_string())),
+        });
+    let mut labels: Vec<String> = store
+        .get_node(hit.node)
+        .map(|n| n.labels.iter().map(|l| l.as_str().to_string()).collect())
+        .unwrap_or_default();
+    labels.sort();
+    let vector_index = req.vector_index.as_ref().map(|v| match v {
+        VectorIndexRef::Name(n) => n.clone(),
+        VectorIndexRef::On { label, property } => format!("{label}.{property}"),
+    });
+    let index: HashMap<String, PropertyValue> = [
+        (
+            "fulltext".to_string(),
+            string_or_null(req.fulltext_index.clone()),
+        ),
+        ("vector".to_string(), string_or_null(vector_index)),
+    ]
+    .into_iter()
+    .collect();
+    [
+        ("nodeId", PropertyValue::Integer(hit.node.as_u64() as i64)),
+        (
+            "labels",
+            PropertyValue::Array(labels.into_iter().map(PropertyValue::String).collect()),
+        ),
+        (
+            "source",
+            string_or_null(found.as_ref().map(|(_, s)| s.clone())),
+        ),
+        (
+            "sourceProperty",
+            string_or_null(found.map(|(k, _)| k.to_string())),
+        ),
+        ("score", PropertyValue::Float(hit.score)),
+        (
+            "foundBy",
+            PropertyValue::Array(
+                hit.found_by()
+                    .into_iter()
+                    .map(|s| PropertyValue::String(s.to_string()))
+                    .collect(),
+            ),
+        ),
+        ("bm25Rank", int_or_null(hit.bm25.map(|b| b.0))),
+        ("vectorRank", int_or_null(hit.vector.map(|v| v.0))),
+        ("seedId", PropertyValue::Integer(hit.seed.as_u64() as i64)),
+        ("hops", PropertyValue::Integer(hit.hops as i64)),
+        ("index", PropertyValue::Map(index)),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect()
+}
+
 /// `db.hybrid.search` as a physical operator.
 pub struct HybridSearchOperator {
     args: Vec<Expression>,
@@ -756,6 +867,8 @@ pub struct HybridSearchOperator {
     columns: Vec<(&'static str, String)>,
     rows: Option<std::vec::IntoIter<HybridHit>>,
     timings: StageTimings,
+    /// The evaluated request, kept for the `provenance` column.
+    req: Option<HybridRequest>,
 }
 
 impl HybridSearchOperator {
@@ -791,10 +904,11 @@ impl HybridSearchOperator {
             columns,
             rows: None,
             timings: StageTimings::default(),
+            req: None,
         })
     }
 
-    fn row(&self, hit: HybridHit) -> Record {
+    fn row(&self, store: &GraphStore, hit: HybridHit) -> Record {
         let int_or_null = |x: Option<usize>| {
             x.map_or(Value::Null, |n| {
                 Value::Property(PropertyValue::Integer(n as i64))
@@ -821,6 +935,10 @@ impl HybridSearchOperator {
                 )),
                 "hops" => Value::Property(PropertyValue::Integer(hit.hops as i64)),
                 "seed" => Value::NodeRef(hit.seed),
+                "provenance" => Value::Property(PropertyValue::Map(match &self.req {
+                    Some(req) => provenance(store, req, &hit),
+                    None => HashMap::new(),
+                })),
                 _ => Value::Property(PropertyValue::Map(self.timings.to_map())),
             };
             r.bind(var.clone(), value);
@@ -836,16 +954,15 @@ impl PhysicalOperator for HybridSearchOperator {
             let result = hybrid_search(store, &req)?;
             self.timings = result.timings;
             self.rows = Some(result.hits.into_iter());
+            self.req = Some(req);
         }
-        Ok(self
-            .rows
-            .as_mut()
-            .and_then(|r| r.next())
-            .map(|hit| self.row(hit)))
+        let hit = self.rows.as_mut().and_then(|r| r.next());
+        Ok(hit.map(|hit| self.row(store, hit)))
     }
 
     fn reset(&mut self) {
         self.rows = None;
+        self.req = None;
     }
 
     fn describe(&self) -> OperatorDescription {
