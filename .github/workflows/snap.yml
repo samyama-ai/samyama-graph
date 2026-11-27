@@ -1,0 +1,83 @@
+name: Snap
+
+# Builds the samyama snap (#2203) for amd64 and arm64, installs each under
+# strict confinement and checks it (ops/packaging/snap-smoke.sh), and, when
+# called by tag-release.yml with `publish: true`, publishes it.
+#
+# Runs on a pull request that changes the snap, by hand, and from the release
+# workflow. Not a required check: it is path-filtered (see ci.yml, #1865).
+#
+# Publishing needs the SNAPCRAFT_STORE_CREDENTIALS secret, exported with
+# `snapcraft export-login --snaps=samyama --channels=stable,candidate,edge -`
+# by an account that owns the `samyama` name. Without it the build and the
+# smoke test still run, and the publish step says it was skipped.
+
+on:
+  pull_request:
+    paths:
+      - "snap/**"
+      - "ops/packaging/snap-smoke.sh"
+      - ".github/workflows/snap.yml"
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: The ref to build (the release tag)
+        type: string
+        required: true
+      publish:
+        description: Publish to the stable channel after the smoke test
+        type: boolean
+        default: false
+    secrets:
+      SNAPCRAFT_STORE_CREDENTIALS:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  snap:
+    name: snap (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Build
+        id: build
+        uses: snapcore/action-build@v1
+
+      - name: Install it and check it under strict confinement
+        run: ops/packaging/snap-smoke.sh "${{ steps.build.outputs.snap }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: samyama-snap-${{ matrix.arch }}
+          path: ${{ steps.build.outputs.snap }}
+          if-no-files-found: error
+
+      # Stable, because a release tag is what calls this with publish: true
+      # and the snap has just passed the smoke test on this architecture.
+      - name: Publish to stable
+        if: ${{ inputs.publish }}
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SNAPCRAFT_STORE_CREDENTIALS:-}" ]; then
+            echo "::warning::SNAPCRAFT_STORE_CREDENTIALS is not set; built and tested, not published"
+            exit 0
+          fi
+          sudo snap install snapcraft --classic
+          snapcraft upload --release=stable "${{ steps.build.outputs.snap }}"
