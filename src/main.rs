@@ -83,6 +83,7 @@ async fn async_main(argv: Vec<String>, sandboxed: Option<samyama::sandbox::Appli
     match argv.get(1).map(|s| s.as_str()) {
         Some("verify") => std::process::exit(cmd_verify(&argv)),
         Some("catalog-build") => std::process::exit(cmd_catalog_build(&argv)),
+        Some("eval-gen") => std::process::exit(cmd_eval_gen(&argv)),
         Some("catalog-gate") => std::process::exit(cmd_catalog_gate(&argv)),
         Some("auth-token") => std::process::exit(cmd_auth_token(&argv)),
         Some("snapshot-key") => std::process::exit(cmd_snapshot_key()),
@@ -1363,6 +1364,106 @@ fn cmd_verify(argv: &[String]) -> i32 {
         println!("  {} of {total} entries failed", failed.len().max(1));
         1
     }
+}
+
+/// `samyama eval-gen <snapshot.sgsnap> --out <eval.sgqueries> [--count N] [--seed S]`
+///
+/// Generates an evaluation set from the snapshot's graph (ML-14, #1772):
+/// templated questions with gold answers the engine computed, difficulty
+/// labels and unanswerable items, as a question catalog `verify` can re-check.
+/// Exits 0 when the file was written, even short of `--count` (the report says
+/// why); 64 on usage, 66 if the snapshot cannot be opened, 74 if the output
+/// cannot be written, 1 on any other failure.
+fn cmd_eval_gen(argv: &[String]) -> i32 {
+    const USAGE: &str = "usage: samyama eval-gen <snapshot.sgsnap> --out <eval.sgqueries> \
+                         [--count N] [--seed S]";
+    let flag = |name: &str| argv.iter().position(|a| a == name).and_then(|i| argv.get(i + 1));
+    let Some(snapshot) = argv.get(2).filter(|s| !s.starts_with("--")) else {
+        eprintln!("{USAGE}");
+        return 64;
+    };
+    let Some(out) = flag("--out") else {
+        eprintln!("eval-gen needs --out <eval.sgqueries>\n{USAGE}");
+        return 64;
+    };
+    let number = |name: &str| -> Result<Option<u64>, String> {
+        flag(name)
+            .map(|raw| raw.parse::<u64>().map_err(|_| format!("{name} {raw:?} is not a whole number >= 0")))
+            .transpose()
+    };
+    let mut opts = samyama::snapshot::eval_gen::EvalGenOptions::default();
+    match (number("--count"), number("--seed")) {
+        (Ok(count), Ok(seed)) => {
+            if let Some(c) = count {
+                opts.count = c as usize;
+            }
+            if let Some(s) = seed {
+                opts.seed = s;
+            }
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("{e}\n{USAGE}");
+            return 64;
+        }
+    }
+
+    let file = match std::fs::File::open(snapshot) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("could not open {snapshot}: {e}");
+            return 66;
+        }
+    };
+    let mut store = GraphStore::new();
+    if let Err(e) = samyama::snapshot::import_tenant(&mut store, file) {
+        eprintln!("could not restore {snapshot}: {e}");
+        return 1;
+    }
+    let set = match samyama::snapshot::eval_gen::generate(&store, &opts) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("could not generate from {snapshot}: {e}");
+            return 1;
+        }
+    };
+    let mut catalog = set.catalog;
+    catalog.tenant = std::fs::File::open(snapshot)
+        .ok()
+        .and_then(|f| samyama::snapshot::peek_header(f).ok())
+        .map(|h| h.tenant);
+    let json = match serde_json::to_string_pretty(&catalog) {
+        Ok(j) => j,
+        Err(e) => {
+            eprintln!("could not serialise the set: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = std::fs::write(out, &json) {
+        eprintln!("could not write {out}: {e}");
+        return 74;
+    }
+    let r = &set.report;
+    println!("wrote {out}: {} of {} questions (seed {})", r.generated, r.requested, opts.seed);
+    for (d, n) in &r.by_difficulty {
+        println!("  {d:<13} {n}");
+    }
+    println!("  {:<13} {}", "unanswerable", r.unanswerable);
+    for (t, n) in &r.by_template {
+        println!("    {t:<34} {n}");
+    }
+    println!("  {} candidate(s) tried and not kept", r.rejected);
+    for s in &r.shortfall {
+        println!("  short: {s}");
+    }
+    let problems = samyama::snapshot::verify::kg08_conformance(&catalog);
+    if problems.is_empty() {
+        println!("  KG-08: meets the catalog shape (>=30 questions, difficulty labels, unanswerable items)");
+    } else {
+        for p in problems {
+            println!("  KG-08: {p}");
+        }
+    }
+    0
 }
 
 /// `samyama catalog-build <snapshot.sgsnap> --queries <queries.json> --out <catalog> [--link] [--release]`

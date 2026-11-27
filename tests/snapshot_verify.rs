@@ -114,6 +114,7 @@ fn an_all_empty_run_fails_even_when_expectations_match() {
             unanswerable: true,
             params: vec![],
             work: None,
+            answer: None,
         }],
     };
     let report = verify(&store, &catalog).expect("verify");

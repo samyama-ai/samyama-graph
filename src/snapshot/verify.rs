@@ -172,6 +172,13 @@ pub struct CatalogEntry {
     /// run it unbounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work: Option<u64>,
+    /// The answer itself, as `{"columns": [...], "rows": [[...], ...]}`, for a
+    /// catalog used as an evaluation set (ML-14, #1772). `rows` and `hash`
+    /// prove a restore; they cannot score a model's reply, which needs the
+    /// values. Written by `samyama eval-gen`; absent from a catalog built by
+    /// `catalog-build`, which does not need it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer: Option<serde_json::Value>,
 }
 
 /// How many times the recorded work a call may do before it is refused.
@@ -586,6 +593,7 @@ pub fn build_catalog(
             unanswerable: is_unanswerable,
             params: q.params.clone(),
             work: Some(work),
+            answer: None,
         });
     }
     Ok(QueryCatalog {
