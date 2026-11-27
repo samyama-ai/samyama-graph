@@ -465,6 +465,25 @@ async fn every_mutating_route_needs_more_than_read() {
     );
 }
 
+/// The running algorithms are every tenant's, and a cancel stops one whoever
+/// started it, so both are an operator's: a read or write credential is
+/// refused before the handler runs (#1693).
+#[tokio::test]
+async fn watching_and_cancelling_running_algorithms_is_admin_only() {
+    for roles in [":roles=read", ":roles=write"] {
+        let creds = role_credentials(roles);
+        let s = status_of(app(creds.clone()), get("/api/algorithms/running", Some(TOKEN))).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{roles}: the running list let a non-admin through");
+        let s = status_of(app(creds), post_json("/api/algorithms/running/1/cancel", serde_json::json!({}))).await;
+        assert_eq!(s, StatusCode::FORBIDDEN, "{roles}: cancel let a non-admin through");
+    }
+    let admin = role_credentials(":roles=admin");
+    assert_eq!(status_of(app(admin.clone()), get("/api/algorithms/running", Some(TOKEN))).await, StatusCode::OK);
+    // Admin reaches the handler: no such call, so 404, not 403.
+    let s = status_of(app(admin), post_json("/api/algorithms/running/999999999/cancel", serde_json::json!({}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
 #[tokio::test]
 async fn a_write_credential_writes_but_cannot_manage_tenants() {
     let creds = role_credentials(":roles=write");

@@ -1743,6 +1743,47 @@ pub async fn slowlog_reset_handler() -> impl IntoResponse {
     Json(json!({ "cleared": crate::query::slowlog::reset() }))
 }
 
+/// `GET /api/algorithms/running` — every graph algorithm call in progress, with
+/// how far it has got (ALGO-12, #1693).
+///
+/// `phase` says what `done` of `total` counts: nodes read into the algorithm's
+/// graph view, then the algorithm's own iterations or sweeps. Answered without
+/// the store lock, so it answers while the algorithm it reports on holds it.
+pub async fn running_algorithms_handler() -> impl IntoResponse {
+    Json(json!({ "running": crate::query::running::list() }))
+}
+
+/// `POST /api/algorithms/running/{id}/cancel` — stop one algorithm call.
+///
+/// 202: the call stops at its next progress report and its query fails with
+/// `Query cancelled: ...`; the server, the store and every other query carry
+/// on. 404: no call with that id is running -- it never existed or has
+/// already ended, and either way there is nothing to stop.
+///
+/// The id is read as text, as `POST /optimize/solve/{id}/cancel` reads its
+/// own. A `Path<u64>` answered `-1`, `abc` or a number past `u64::MAX` with
+/// axum's plain-text 400, which the spec does not document; none of them can
+/// name a running call, so each gets the same JSON 404 as an id that has
+/// ended.
+pub async fn cancel_running_algorithm_handler(
+    axum::extract::Path(raw): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let id = raw.parse::<u64>().ok();
+    if let Some(id) = id.filter(|&id| crate::query::running::cancel(id)) {
+        (StatusCode::ACCEPTED, Json(json!({ "id": id, "cancel_requested": true })))
+    } else {
+        let id = id.map_or(raw, |id| id.to_string());
+        (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!(
+                    "no algorithm call {id} is running; GET /api/algorithms/running lists the ones that are"
+                )
+            })),
+        )
+    }
+}
+
 /// Handler for graph schema introspection
 /// How many nodes of a label `/api/schema` reads to work out which properties
 /// it has. A property graph lets two nodes of a label carry different keys, so

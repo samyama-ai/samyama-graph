@@ -208,6 +208,12 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
             bare("a negative limit", "/api/slowlog?limit=-1"),
         ],
         ("DELETE", "/api/slowlog") => vec![bare("reset", "/api/slowlog")],
+        // ALGO-12 (#1693): nothing is running in the test server, so the list
+        // is empty and a cancel finds no call -- the 404 the document lists.
+        ("GET", "/api/algorithms/running") => vec![bare("running", "/api/algorithms/running")],
+        ("POST", "/api/algorithms/running/{id}/cancel") => {
+            vec![bare("no such call", "/api/algorithms/running/987654321/cancel")]
+        }
         ("POST", "/api/sparql") => vec![
             json("a SELECT", "/api/sparql", r#"{"query": "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"}"#),
             json("an ASK", "/api/sparql", r#"{"query": "ASK { ?s ?p ?o }"}"#),
