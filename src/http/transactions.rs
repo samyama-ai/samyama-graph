@@ -221,27 +221,28 @@ pub async fn commit_handler(
         // so a key used for something else leaves it open to be committed
         // without the header.
         if let Some(key) = &key {
-            let txn = sessions.get_mut(&id).expect("checked above");
-            let seen = txn.guard.idempotency().lookup(
-                "default",
-                key,
-                &commit_fingerprint(),
-                crate::idempotency::now_ms(),
-                crate::idempotency::ttl(),
-            );
-            match seen {
-                crate::idempotency::Lookup::Miss => {}
-                crate::idempotency::Lookup::Conflict => {
-                    return super::handler::answer_seen(seen).expect("a conflict has a reply");
+            // Open: the `None` arm above returned.
+            let seen = match sessions.get_mut(&id) {
+                Some(txn) => txn.guard.idempotency().lookup(
+                    "default",
+                    key,
+                    &commit_fingerprint(),
+                    crate::idempotency::now_ms(),
+                    crate::idempotency::ttl(),
+                ),
+                None => crate::idempotency::Lookup::Miss,
+            };
+            // A replay means this transaction re-runs one that committed under
+            // the key: its writes would be the second copy. Roll them back and
+            // give the first commit's reply. A conflict leaves it open.
+            let replay = matches!(seen, crate::idempotency::Lookup::Replay(_));
+            if let Some(reply) = super::handler::answer_seen(seen) {
+                if replay {
+                    if let Some(txn) = sessions.remove(&id) {
+                        roll_back(txn);
+                    }
                 }
-                // This transaction re-runs one that committed under the key:
-                // its writes would be the second copy. Roll them back and give
-                // the first commit's reply.
-                crate::idempotency::Lookup::Replay(_) => {
-                    let txn = sessions.remove(&id).expect("checked above");
-                    roll_back(txn);
-                    return super::handler::answer_seen(seen).expect("a replay has a reply");
-                }
+                return reply;
             }
         }
         sessions.remove(&id).expect("checked above")

@@ -250,15 +250,14 @@ impl CommandHandler {
                 crate::idempotency::now_ms(),
                 crate::idempotency::ttl(),
             );
-            match seen {
-                crate::idempotency::Lookup::Miss => {}
-                crate::idempotency::Lookup::Conflict => {
-                    return Err(Self::answer_seen(seen).expect("a conflict has a reply"));
+            let replay = matches!(seen, crate::idempotency::Lookup::Replay(_));
+            if let Some(reply) = Self::answer_seen(seen) {
+                if !replay {
+                    // A conflict: refused, and the transaction is left open.
+                    return Err(reply);
                 }
-                crate::idempotency::Lookup::Replay(_) => {
-                    let _ = self.rollback_transaction_on(store);
-                    return Ok(Self::answer_seen(seen).expect("a replay has a reply"));
-                }
+                let _ = self.rollback_transaction_on(store);
+                return Ok(reply);
             }
         }
         Ok(self.commit_keyed_on(store, key.as_deref()))

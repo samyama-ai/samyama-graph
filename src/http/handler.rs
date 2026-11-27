@@ -1548,8 +1548,8 @@ async fn keyed_write(
                 store
                     .idempotency()
                     .lookup(&payload.graph, key, &fingerprint, idem::now_ms(), ttl);
-            if seen != idem::Lookup::Miss {
-                return Err(seen);
+            if let Some(reply) = answer_seen(seen) {
+                return Err(Box::new(reply));
             }
             let started = std::time::Instant::now();
             let result = state.engine.execute_mut_with_params_within(
@@ -1584,7 +1584,7 @@ async fn keyed_write(
         .await;
     match outcome {
         Ok((status, body)) => json_bytes(status, body),
-        Err(seen) => answer_seen(seen).expect("a miss is not returned as Err"),
+        Err(reply) => *reply,
     }
 }
 
