@@ -6817,6 +6817,31 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
             let k4 = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
             return (algo_graph(4, &k4, None).0, vec![]);
         }
+        // The path with positions (x, x^2, x) under a 3D structure, so
+        // every node can be routed and 0 - 2 is a close, unjoined pair.
+        "structural.astar" | "structural.stress" | "structural.spatiallouvain" => {
+            use crate::index::structure::{ManifoldSpec, StructuralConvention};
+            path.structure_registry.upsert(StructuralConvention {
+                name: "pos".to_string(),
+                label: Some("V".to_string()),
+                manifold: ManifoldSpec::Euclidean3d {
+                    x_prop: "x".to_string(),
+                    y_prop: "y".to_string(),
+                    z_prop: "x".to_string(),
+                    unit: "unit".to_string(),
+                    sequence_prop: None,
+                    group_by_prop: None,
+                    contact_radius: Some(5.0),
+                },
+                visual_preset: None,
+                measure_prop: None,
+            });
+            if canonical == "structural.astar" {
+                vec![node(0), node(3)]
+            } else {
+                vec![]
+            }
+        }
         "or.solve" => {
             return (
                 solve_store(),

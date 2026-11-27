@@ -479,6 +479,65 @@ ratio, and placing them largest first keeps the overshoot to one group per split
 | Train/val/test split | split, trainTestSplit | entity: weak components of `edgeType`, direction ignored; community: Louvain's symmetrised graph; time, source, random: edges unused | Ignored | entity: a self-loop links a record to itself, so it changes no group | Each component, community or source is a group of its own; an isolated node is a group of one | Groups are shuffled by `seed`, placed largest first, each into the split furthest below its target, the earlier split on a tie; time: ordered by time then node id, and equal times share a split | Ratios must sum to 1; `[train, test]` or `[train, val, test]`. Reproducible from `seed` |
 | Split leakage check | splitLeakage, leakageCheck | entity: walks `edgeType` in both directions up to `hops` (default 3); community: Louvain recomputed on the graph as it is now; time, source: edges unused | Ignored | entity: a self-loop is walked like any edge and never pairs a node with itself | Nodes in different components are never a leak; every node in scope must hold a split, or the call is refused | Rows ordered by node ids; community and source report one row per group and pair of splits it spans, with its smallest node on each side | None: one row per leak, so `count(*)` is the leakage figure; an equal time across a boundary is not a leak |
 
+## Structure-aware (positions in space)
+
+For graphs whose nodes have 3D or geographic positions, declared with
+`CREATE STRUCTURE INDEX` or detected (#2037):
+
+```cypher
+CREATE STRUCTURE INDEX pdb ON :Residue(x, y, z) CONTACT_RADIUS 8.0
+```
+
+```cypher
+CALL algo.structural.astar(1, 42, {structure: 'pdb', cost: 'length'}) YIELD path, hops, length, direct, stretch, expanded, expandedUnguided
+```
+
+```cypher
+CALL algo.structural.stress({structure: 'pdb', radius: 8.0}) YIELD source, target, distance, pathLength, hops, stretch
+```
+
+- **`algo.structural.astar(source, target, {...})`** is the shortest path, guided
+  by the straight line to the target. `cost: 'length'` (the default) minimises
+  total distance, each relationship as long as the straight line between its
+  ends; `cost: 'hops'` minimises relationships, guided by the straight-line
+  distance over the longest relationship. Either way the path is a shortest
+  one: the guide only decides the order nodes are looked at. `expanded` is the
+  number of nodes the guided search looked at, and `expandedUnguided` the
+  number the same search looked at without a guide, on the same call.
+- **`algo.structural.stress({...})`** returns every pair of nodes within
+  `radius` of each other that no relationship joins, with the shortest path
+  between them through the graph. `stretch` is that path's length over the
+  straight line: 1 means the graph goes straight there, 10 means a ten-times
+  detour. Pairs no path joins come first, with `pathLength`, `hops` and
+  `stretch` null -- a close pair the graph cannot connect at all is the
+  strongest sign of a missing link.
+
+- **`algo.structural.spatialLouvain({...})`** is Louvain against a null
+  model that expects near nodes to link more: `P_ij = k_i k_j f(d_ij)`, with
+  the deterrence `f` measured from the graph in `bins` distance bands (default
+  20), so the model expects exactly as many edges at each distance as there
+  are (Expert et al., PNAS 2011). Communities are groups more connected than
+  their distances explain, rather than the spatial blobs ordinary Louvain
+  tends to find. On Expert's benchmark with about 23 links per node it found
+  two groups mixed in space exactly (NMI 1.00) where `algo.louvain` scored
+  0.69; on a sparse graph (5 per node) neither does, and on a dense one both
+  do. It gives every pair a value, so it is limited to 2,000 positioned nodes.
+
+All three walk or group **only nodes with a position** under the structure, over relationships
+between two such nodes (`edgeType` narrows them further). A node without a
+position could be a shortcut the guide cannot measure, which would make a path
+that is not shortest look shortest. Distances are the structure's own:
+Euclidean in its units for 3D, great-circle metres plus elevation for
+geographic positions. Hierarchy and space-time structures have no such
+distance and are refused. `structure` may be left out when the graph has
+exactly one 3D or geographic structure.
+
+| Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
+|---|---|---|---|---|---|---|---|
+| Structure-guided shortest path | structural.astar | Undirected by default; `undirected: false` follows relationships as stored | The straight-line length between a relationship's ends (`cost: 'length'`), or 1 per relationship (`cost: 'hops'`); property weights are not read | Walked at length 0; never on a shortest path | No row when no path joins source and target | Equal routes: the one reached by the lower-priority, longer-so-far entry, then the lower node index, the same on every run | `stretch` = path length / straight-line distance, null when source and target coincide |
+| Spatial Louvain | structural.spatialLouvain | Undirected: a relationship either way joins a pair once | Ignored: the null model counts pairs, so property weights are not read | Ignored | Each component is grouped on its own; an isolated node is its own community | Nodes are moved in id order and ties go to the lower community id, so the same graph gives the same communities; ids are numbered from 0 in order of first appearance | `modularity` is spatial modularity: (edges inside communities - their expected number under the measured deterrence) / 2m; null with no relationships |
+| Structural stress | structural.stress | Undirected: closeness in space is symmetric | Straight-line lengths, as above | Ignored: a node is never paired with itself; coincident nodes are skipped | Pairs no path joins are returned first, with null `pathLength`, `hops`, `stretch` | Unreachable first, then highest stretch, then node ids | `stretch` = shortest path length / straight-line distance, at least 1 |
+
 ## Not a graph algorithm
 
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |

@@ -894,15 +894,20 @@ impl SgiIndex {
             }
         }
 
+        // Only positioned nodes are walked. A step to a node with no position
+        // used to cost 1.0 -- one unit of whatever the coordinates are in --
+        // and its bound was 0, so a path through it could undercut a real
+        // shortest one and the "shortest" path returned was not (#2037).
         let neighbors = |u: NodeId| -> Vec<NodeId> {
             let mut nbrs = Vec::new();
+            let positioned = |n: &NodeId| self.rank_of.contains_key(n);
             for e in store.get_outgoing_edges(u) {
-                if edge_types.is_none_or(|ets| ets.contains(&e.edge_type)) {
+                if edge_types.is_none_or(|ets| ets.contains(&e.edge_type)) && positioned(&e.target) {
                     nbrs.push(e.target);
                 }
             }
             for e in store.get_incoming_edges(u) {
-                if edge_types.is_none_or(|ets| ets.contains(&e.edge_type)) {
+                if edge_types.is_none_or(|ets| ets.contains(&e.edge_type)) && positioned(&e.source) {
                     nbrs.push(e.source);
                 }
             }
@@ -1394,5 +1399,50 @@ mod tests {
             .expect("path exists");
         assert_eq!(astar.hops, 11);
         assert_eq!(astar.path_node_ids.len(), 12);
+    }
+
+    /// A shortcut through a node with no position is not walked (#2037).
+    ///
+    /// It used to cost one coordinate unit per step, whatever the units were,
+    /// with a bound of 0, so two steps through it undercut a 30-unit backbone
+    /// and the path returned was neither shortest nor even measurable.
+    #[test]
+    fn astar_does_not_walk_through_a_node_without_a_position() {
+        let mut store = GraphStore::new();
+        let ids: Vec<NodeId> = (0..4)
+            .map(|i| {
+                let n = store.create_node("Residue");
+                for (k, v) in [("x", i as f64 * 10.0), ("y", 0.0), ("z", 0.0)] {
+                    store.set_node_property("default", n, k, PropertyValue::Float(v)).unwrap();
+                }
+                n
+            })
+            .collect();
+        for w in ids.windows(2) {
+            store.create_edge(w[0], w[1], "BOND").unwrap();
+        }
+        let hub = store.create_node("Residue");
+        store.create_edge(ids[0], hub, "BOND").unwrap();
+        store.create_edge(hub, ids[3], "BOND").unwrap();
+        let convention = StructuralConvention {
+            name: "line".to_string(),
+            label: Some("Residue".to_string()),
+            manifold: ManifoldSpec::Euclidean3d {
+                x_prop: "x".to_string(),
+                y_prop: "y".to_string(),
+                z_prop: "z".to_string(),
+                unit: "unit".to_string(),
+                sequence_prop: None,
+                group_by_prop: None,
+                contact_radius: None,
+            },
+            visual_preset: None,
+            measure_prop: None,
+        };
+        let sgi = SgiIndex::build(&store, convention);
+        let path = sgi.astar_shortest_path(&store, ids[0], ids[3], None).expect("the backbone joins them");
+        assert!(!path.path_node_ids.contains(&hub.as_u64()), "{path:?}");
+        assert_eq!(path.hops, 3);
+        assert!((path.manifold_path_length - 30.0).abs() < 1e-9);
     }
 }
