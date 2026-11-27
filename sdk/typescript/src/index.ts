@@ -17,4 +17,11 @@ export type {
   ConstraintInfo,
   CsvImportResult,
   JsonImportResult,
+  NodeIconStyle,
+  EdgeIconStyle,
+  IconStyle,
+  IconStyleSource,
+  IconStyleResponse,
+  IconReport,
+  PutIconsResult,
 } from "./types.js";

@@ -91,6 +91,7 @@ async fn async_main(argv: Vec<String>, sandboxed: Option<samyama::sandbox::Appli
         Some("pii-scan") => std::process::exit(cmd_pii_scan(&argv)),
         Some("queries") => std::process::exit(cmd_queries(&argv)),
         Some("snapshot-read-only") => std::process::exit(cmd_snapshot_read_only(&argv)),
+        Some("snapshot-icons") => std::process::exit(cmd_snapshot_icons(&argv)),
         Some("results-build") => std::process::exit(cmd_results_build(&argv)),
         Some("convert") => std::process::exit(cmd_convert(&argv)),
         Some("healthcheck") => std::process::exit(cmd_healthcheck(&argv).await),
@@ -380,6 +381,151 @@ fn cmd_snapshot_read_only(argv: &[String]) -> i32 {
                     "no longer read-only; any linked results were unlinked"
                 }
             );
+            0
+        }
+        Err(e) => {
+            eprintln!("could not rewrite {snapshot}: {e}");
+            74
+        }
+    }
+}
+
+/// `samyama snapshot-icons <snapshot.sgsnap> --init | --from <style.json> | --clear`
+///
+/// Writes the graph's node style into the header (#2029), the same way
+/// `snapshot-read-only` does: only the header is rewritten. `--init` gives
+/// every label in the header's schema today's default colour and icon, keeping
+/// any label the style already has, so running it again after labels are added
+/// never moves the others. `--from` writes the given `samyama.icons/1` style,
+/// refusing it if anything in it is invalid. `--clear` removes the style.
+fn cmd_snapshot_icons(argv: &[String]) -> i32 {
+    use samyama::snapshot::icons::{IconStyle, MAX_STYLE_BYTES};
+    const USAGE: &str =
+        "usage: samyama snapshot-icons <snapshot.sgsnap> --init | --from <style.json> | --clear";
+    let Some(snapshot) = argv.get(2).filter(|s| !s.starts_with("--")) else {
+        eprintln!("{USAGE}");
+        return 64;
+    };
+    let init = argv.iter().any(|a| a == "--init");
+    let clear = argv.iter().any(|a| a == "--clear");
+    let from = argv
+        .iter()
+        .position(|a| a == "--from")
+        .map(|i| argv.get(i + 1));
+    if usize::from(init) + usize::from(clear) + usize::from(from.is_some()) != 1 {
+        eprintln!("{USAGE}");
+        return 64;
+    }
+    let given = match from {
+        None => None,
+        Some(None) => {
+            eprintln!("{USAGE}");
+            return 64;
+        }
+        Some(Some(path)) => {
+            let read = std::fs::metadata(path)
+                .map_err(|e| e.to_string())
+                .and_then(|m| {
+                    if m.len() > MAX_STYLE_BYTES as u64 {
+                        Err(format!(
+                            "{} bytes; a style may be at most {MAX_STYLE_BYTES}",
+                            m.len()
+                        ))
+                    } else {
+                        std::fs::read(path).map_err(|e| e.to_string())
+                    }
+                })
+                .and_then(|b| serde_json::from_slice(&b).map_err(|e| e.to_string()));
+            let raw: serde_json::Value = match read {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("could not read {path}: {e}");
+                    return 66;
+                }
+            };
+            match IconStyle::strict(&raw) {
+                Ok(s) => Some(s),
+                Err(problems) => {
+                    eprintln!("{path} is not a valid style; nothing was written:");
+                    for p in problems {
+                        eprintln!("  {p}");
+                    }
+                    return 65;
+                }
+            }
+        }
+    };
+
+    let mut report = None;
+    let rewritten = rewrite_header(snapshot, |h| {
+        let names = |key: &str| -> Vec<String> {
+            let mut v: Vec<String> = h
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|s| s.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            v.sort_unstable();
+            v
+        };
+        let (labels, edge_types) = (names("labels"), names("edge_types"));
+        let style = if clear {
+            None
+        } else if init {
+            let existing = h.get("icons").map(IconStyle::read);
+            Some(IconStyle::initial(&labels, existing.as_ref()))
+        } else {
+            given
+        };
+        match style {
+            None => {
+                h.remove("icons");
+            }
+            Some(s) => {
+                let json = serde_json::to_value(&s)?;
+                let size = serde_json::to_vec(&json)?.len();
+                if size > MAX_STYLE_BYTES {
+                    return Err(format!(
+                        "the style would be {size} bytes; at most {MAX_STYLE_BYTES} are allowed"
+                    )
+                    .into());
+                }
+                report = Some(s.report("header", &labels, &edge_types));
+                h.insert("icons".into(), json);
+            }
+        }
+        Ok(())
+    });
+    match rewritten {
+        Ok(_) => {
+            match report {
+                None => println!("{snapshot}: style removed"),
+                Some(r) => {
+                    println!(
+                        "{snapshot}: style written; {} of {} labels styled",
+                        r.styled,
+                        r.styled + r.unstyled.len()
+                    );
+                    if !r.unstyled.is_empty() {
+                        println!("  unstyled: {}", r.unstyled.join(", "));
+                    }
+                    if !r.unknown_labels.is_empty() {
+                        println!(
+                            "  not in this snapshot's schema (ignored on import): {}",
+                            r.unknown_labels.join(", ")
+                        );
+                    }
+                    if !r.unknown_edge_types.is_empty() {
+                        println!(
+                            "  relationship types not in the schema (ignored on import): {}",
+                            r.unknown_edge_types.join(", ")
+                        );
+                    }
+                }
+            }
             0
         }
         Err(e) => {

@@ -142,6 +142,54 @@ export interface JsonImportResult {
   label: string;
 }
 
+/** How one node label is drawn (samyama.icons/1, #2029). Every field is optional. */
+export interface NodeIconStyle {
+  /** `#RRGGBB` */
+  color?: string;
+  /** An icon name, `lucide:<Name>`. */
+  icon?: string;
+  /** The property shown as the node's text. */
+  caption?: string;
+}
+
+/** How one relationship type is drawn. */
+export interface EdgeIconStyle {
+  color?: string;
+}
+
+/** A graph's node style, as `PUT /api/icons` takes it. */
+export interface IconStyle {
+  format?: "samyama.icons/1";
+  nodes?: Record<string, NodeIconStyle>;
+  edges?: Record<string, EdgeIconStyle>;
+}
+
+/** Where a graph's style came from. */
+export type IconStyleSource = "header" | "api" | "none";
+
+/** `GET /api/icons`: empty maps and `source: "none"` when the graph has no style. */
+export interface IconStyleResponse {
+  format: "samyama.icons/1";
+  nodes: Record<string, NodeIconStyle>;
+  edges: Record<string, EdgeIconStyle>;
+  source: IconStyleSource;
+}
+
+/** What a style covers of the graph's schema; also in a snapshot import's response. */
+export interface IconReport {
+  source: IconStyleSource;
+  styled: number;
+  unstyled: string[];
+  unknown_labels: string[];
+  unknown_edge_types: string[];
+  warnings: string[];
+}
+
+/** `PUT /api/icons`: the style as stored, and what it covers. */
+export interface PutIconsResult extends IconStyleResponse {
+  icons: IconReport;
+}
+
 /** Options for creating a client */
 export interface ClientOptions {
   /** Base URL for HTTP transport (default: http://localhost:8080) */

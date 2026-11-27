@@ -7,6 +7,9 @@ import type {
   NlqResponse,
   CsvImportResult,
   JsonImportResult,
+  IconStyle,
+  IconStyleResponse,
+  PutIconsResult,
 } from "./types.js";
 
 /**
@@ -451,6 +454,37 @@ export class HttpTransport {
   /** Get graph schema via GET /api/schema */
   async schema(opts?: RequestOptions): Promise<GraphSchema> {
     return this.json<GraphSchema>("/api/schema", {}, opts, "safe");
+  }
+
+  /** The graph's node style via GET /api/icons (#2029) */
+  async getIcons(graph: string = "default", opts?: RequestOptions): Promise<IconStyleResponse> {
+    return this.json<IconStyleResponse>(
+      `/api/icons?graph=${encodeURIComponent(graph)}`,
+      {},
+      opts,
+      "safe",
+    );
+  }
+
+  /**
+   * Replace the graph's node style via PUT /api/icons (#2029). Any invalid
+   * entry refuses the whole style; an empty style clears it. Needs write access.
+   */
+  async putIcons(
+    style: IconStyle,
+    graph: string = "default",
+    opts?: RequestOptions,
+  ): Promise<PutIconsResult> {
+    return this.json<PutIconsResult>(
+      `/api/icons?graph=${encodeURIComponent(graph)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(style),
+      },
+      opts,
+      "safe",
+    );
   }
 
   /** Generic POST request returning typed JSON response */

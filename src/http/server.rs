@@ -215,7 +215,7 @@ pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::a
     {
         return Role::Write;
     }
-    if *method == Method::PUT && path == "/api/structure" {
+    if *method == Method::PUT && (path == "/api/structure" || path == "/api/icons") {
         return Role::Write;
     }
     // Defining or dropping a named subgraph changes the tenant graph's
@@ -1141,6 +1141,12 @@ impl HttpServer {
             .route("/api/hierarchies/:name/cues", post(hierarchy_cues_handler))
             .route("/api/structure", get(get_structure_handler).put(put_structure_handler))
             .route("/api/structure/cues", post(structure_cues_handler))
+            .route(
+                "/api/icons",
+                get(super::icons::get_icons_handler)
+                    .put(super::icons::put_icons_handler)
+                    .layer(DefaultBodyLimit::max(super::icons::PUT_BODY_LIMIT)),
+            )
             .route("/api/snapshot/export", post(export_snapshot_handler))
             .route("/api/snapshot/import", post(restore_snapshot_handler)
                 .layer(DefaultBodyLimit::max(SNAPSHOT_IMPORT_BODY_LIMIT)))

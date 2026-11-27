@@ -10,6 +10,7 @@ pub mod vector;
 pub mod structure;
 pub mod subgraphs;
 pub mod sparql;
+pub mod icons;
 
 pub use server::HttpServer;
 

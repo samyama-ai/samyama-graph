@@ -1352,6 +1352,12 @@ pub struct GraphStore {
     /// Structural manifold conventions & geometric index registry (#2035, #2036)
     pub structure_registry: Arc<crate::index::structure::StructureRegistry>,
 
+    /// The graph's node style (#2029) and where it came from: `header`,
+    /// `api` or `none`. Kept in memory; a snapshot export writes it into the
+    /// header, and an import replaces it.
+    icon_style: Option<crate::snapshot::icons::IconStyle>,
+    icon_style_source: &'static str,
+
     /// Named graph projections (ALGO-05): views kept for repeated analytics.
     /// In memory only; see `crate::graph::projection`.
     pub graph_projections: Arc<crate::graph::projection::GraphProjections>,
@@ -1521,6 +1527,8 @@ impl GraphStore {
             index_catalog_dirty: std::sync::atomic::AtomicBool::new(false),
             hierarchy_index: Arc::new(HierarchyIndexManager::new()),
             structure_registry: Arc::new(crate::index::structure::StructureRegistry::new()),
+            icon_style: None,
+            icon_style_source: "none",
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
             features: Arc::new(crate::graph::feature::FeatureRegistry::new()),
             retention: Default::default(),
@@ -5697,6 +5705,31 @@ NodeDeleted { id, .. } => {
         self.label_index.keys().collect()
     }
 
+    /// The graph's node style (#2029), if it has one.
+    pub fn icon_style(&self) -> Option<&crate::snapshot::icons::IconStyle> {
+        self.icon_style.as_ref()
+    }
+
+    /// Where the style came from: `header`, `api`, or `none` when there is
+    /// no style.
+    pub fn icon_style_source(&self) -> &'static str {
+        if self.icon_style.is_some() {
+            self.icon_style_source
+        } else {
+            "none"
+        }
+    }
+
+    /// Replaces the graph's style. An empty style is no style.
+    pub fn set_icon_style(
+        &mut self,
+        style: Option<crate::snapshot::icons::IconStyle>,
+        source: &'static str,
+    ) {
+        self.icon_style = style.filter(|s| !s.is_empty());
+        self.icon_style_source = source;
+    }
+
     /// Get all edge type names in the graph, sorted by name.
     ///
     /// The order is part of the contract (#1509). `edge_type_index` is a
@@ -6640,6 +6673,8 @@ NodeDeleted { id, .. } => {
         self.snapshot_sources.clear();
         self.snapshot_sources_stale = false;
         self.structure_registry.clear();
+        self.icon_style = None;
+        self.icon_style_source = "none";
         self.nodes.clear();
         self.edge_type_table.clear();
         self.edge_type_to_id.clear();
@@ -8008,6 +8043,7 @@ mod tests {
             ("commit_session_transaction", "drops the rollback journal, keeping every write already applied and already bumped; rollback_session_transaction, which does change rows, bumps (#1200 step 6)"),
             ("add_snapshot_sources", "records where the data came from, for the next export's header; no query reads it, and it must not bump: it records the current epoch to tell later writes apart (#1911)"),
             ("record_snapshot_sources", "records where the data came from, for the next export's header; no query reads it, and it must not bump: it records the current epoch to tell later writes apart (#1911)"),
+            ("set_icon_style", "replaces the graph's display style, which only GET /api/icons and a snapshot export read; no query returns it, so no cached result can go stale (#2029)"),
         ];
 
         let src = std::fs::read_to_string(concat!(
