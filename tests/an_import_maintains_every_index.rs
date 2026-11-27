@@ -149,6 +149,7 @@ fn import_app(
         persistence: None,
         snapshot_key: None,
         transactions: Default::default(),
+        query_catalogs: Default::default(),
     };
     let app = axum::Router::new()
         .route(

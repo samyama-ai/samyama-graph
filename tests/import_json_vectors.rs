@@ -27,6 +27,7 @@ fn import_app(store: GraphStore) -> (axum::Router, Arc<tokio::sync::RwLock<Graph
         persistence: None,
         snapshot_key: None,
         transactions: Default::default(),
+        query_catalogs: Default::default(),
     };
     let app = axum::Router::new()
         .route(

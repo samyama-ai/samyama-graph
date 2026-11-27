@@ -373,7 +373,182 @@ fn run_metered(
     Ok((batch, meter.produced()))
 }
 
+/// How an omitted parameter is treated by `run_template_in` (#2026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunMode {
+    /// An omitted parameter takes its declared sample. The CLI's behaviour:
+    /// `catalog run` with no values runs the entry as it was blessed.
+    Cli,
+    /// An omitted parameter is refused with `param_missing`. Over HTTP a
+    /// silent sample answers a question the caller did not ask --
+    /// `sv_country_region` without `iso` answering for whichever country the
+    /// sample names.
+    Api,
+}
+
+/// Why `run_template_in` refused a call, with the fields a client needs to
+/// mark the input that was wrong (#2026).
+///
+/// `Display` gives the message the CLI has always printed; `code` and
+/// `fields` give the structured form the HTTP API returns.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TemplateError {
+    /// A declared parameter with no value, in `RunMode::Api`.
+    ParamMissing { id: String, param: String },
+    /// A value for a parameter the entry does not declare.
+    ParamUnknown {
+        id: String,
+        param: String,
+        declared: Vec<String>,
+    },
+    /// A value whose type is not the declared one.
+    ParamType {
+        id: String,
+        param: String,
+        expected: String,
+        got: &'static str,
+        value: Box<serde_json::Value>,
+    },
+    /// A value outside the declared `enum_values`.
+    ParamNotAllowed {
+        id: String,
+        param: String,
+        value: serde_json::Value,
+        allowed: Vec<serde_json::Value>,
+    },
+    /// The run went past `work_ceiling` and was stopped.
+    WorkCeiling {
+        id: String,
+        limit: u64,
+        params: Vec<(String, serde_json::Value)>,
+        message: String,
+    },
+    /// The entry itself cannot be run: no recorded work, or a malformed shape.
+    Entry { id: String, message: String },
+    /// The query failed.
+    Query { id: String, message: String },
+}
+
+impl TemplateError {
+    /// The stable code a client matches on.
+    pub fn code(&self) -> &'static str {
+        match self {
+            TemplateError::ParamMissing { .. } => "param_missing",
+            TemplateError::ParamUnknown { .. } => "param_unknown",
+            TemplateError::ParamType { .. } => "param_type",
+            TemplateError::ParamNotAllowed { .. } => "param_not_allowed",
+            TemplateError::WorkCeiling { .. } => "work_ceiling",
+            TemplateError::Entry { .. } => "invalid_entry",
+            TemplateError::Query { .. } => "query_error",
+        }
+    }
+
+    /// The fields that name what was wrong, beside `code` and `error`.
+    pub fn fields(&self) -> serde_json::Map<String, serde_json::Value> {
+        use serde_json::json;
+        let mut m = serde_json::Map::new();
+        let mut put = |k: &str, v: serde_json::Value| {
+            m.insert(k.to_string(), v);
+        };
+        match self {
+            TemplateError::ParamMissing { param, .. } => put("param", json!(param)),
+            TemplateError::ParamUnknown {
+                param, declared, ..
+            } => {
+                put("param", json!(param));
+                put("declared", json!(declared));
+            }
+            TemplateError::ParamType {
+                param,
+                expected,
+                got,
+                ..
+            } => {
+                put("param", json!(param));
+                put("expected", json!(expected));
+                put("got", json!(got));
+            }
+            TemplateError::ParamNotAllowed { param, allowed, .. } => {
+                put("param", json!(param));
+                put("allowed", json!(allowed));
+            }
+            TemplateError::WorkCeiling { limit, params, .. } => {
+                put("limit", json!(limit));
+                put(
+                    "params",
+                    serde_json::Value::Object(params.iter().cloned().collect()),
+                );
+                put(
+                    "error_code",
+                    json!(crate::query::error_code::TEMPLATE_COST_EXCEEDED),
+                );
+            }
+            TemplateError::Entry { .. } | TemplateError::Query { .. } => {}
+        }
+        m
+    }
+}
+
+impl std::fmt::Display for TemplateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TemplateError::ParamMissing { id, param } => write!(
+                f,
+                "{id}: no value for parameter {param:?}. Every declared parameter \
+                 needs one; the sample is not used in its place."
+            ),
+            TemplateError::ParamUnknown {
+                id,
+                param,
+                declared,
+            } => write!(
+                f,
+                "{id}: no parameter named {param:?}. Declared: {}",
+                declared.join(", ")
+            ),
+            TemplateError::ParamType {
+                id,
+                param,
+                expected,
+                got,
+                value,
+            } => write!(
+                f,
+                "{id}: {param}: declared type {expected:?} but the value given, {value}, \
+                 is a {got}. A mis-declared type is not caught at execution -- a string \
+                 against an integer property returns zero rows and no error."
+            ),
+            TemplateError::ParamNotAllowed {
+                id,
+                param,
+                value,
+                allowed,
+            } => write!(
+                f,
+                "{id}: {param} = {value} is not one of the declared values {}",
+                serde_json::Value::Array(allowed.clone())
+            ),
+            TemplateError::WorkCeiling { message, .. } => f.write_str(message),
+            TemplateError::Entry { message, .. } => f.write_str(message),
+            TemplateError::Query { id, message } => write!(f, "{id}: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for TemplateError {}
+
 /// Run a catalog entry with caller-supplied parameter values (#1156).
+///
+/// `run_template_in` in `RunMode::Cli`, with the refusal as text. See there.
+pub fn run_template(
+    store: &GraphStore,
+    entry: &CatalogEntry,
+    values: &BTreeMap<String, serde_json::Value>,
+) -> Result<RecordBatch, String> {
+    run_template_in(store, entry, values, RunMode::Cli).map_err(|e| e.to_string())
+}
+
+/// Run a catalog entry with caller-supplied parameter values (#1156, #2026).
 ///
 /// This is the path by which a published template is *used*, as opposed to
 /// verified, so it is where the declared contract is enforced:
@@ -383,7 +558,8 @@ fn run_metered(
 ///   engine answers a string compared to an integer property with zero rows
 ///   and no error;
 /// * a value outside a declared enum is refused;
-/// * an omitted parameter takes its declared sample;
+/// * an omitted parameter takes its declared sample in `RunMode::Cli` and is
+///   refused in `RunMode::Api`;
 /// * the run is held to `work_ceiling(entry.work)` rows across all operators,
 ///   and refused, naming the values, if it goes past it -- so a legal value
 ///   that turns an index lookup into a scan of most of the graph cannot defeat
@@ -391,52 +567,74 @@ fn run_metered(
 ///
 /// An entry with no recorded work predates the ceiling and is refused rather
 /// than run unbounded. Rebuild the catalog to record it.
-pub fn run_template(
+pub fn run_template_in(
     store: &GraphStore,
     entry: &CatalogEntry,
     values: &BTreeMap<String, serde_json::Value>,
-) -> Result<RecordBatch, String> {
-    validate_entry_shape(&entry.id, &entry.cypher, &entry.params)?;
+    mode: RunMode,
+) -> Result<RecordBatch, TemplateError> {
+    let id = || entry.id.clone();
+    validate_entry_shape(&entry.id, &entry.cypher, &entry.params)
+        .map_err(|message| TemplateError::Entry { id: id(), message })?;
     let Some(recorded) = entry.work else {
-        return Err(format!(
-            "{}: the catalog records no work for this entry, so a call cannot be \
-             held to a ceiling. It was built before #1156; rebuild it with \
-             `samyama catalog-build`.",
-            entry.id
-        ));
+        return Err(TemplateError::Entry {
+            id: id(),
+            message: format!(
+                "{}: the catalog records no work for this entry, so a call cannot be \
+                 held to a ceiling. It was built before #1156; rebuild it with \
+                 `samyama catalog-build`.",
+                entry.id
+            ),
+        });
     };
     for name in values.keys() {
         if !entry.params.iter().any(|p| &p.name == name) {
-            return Err(format!(
-                "{}: no parameter named {name:?}. Declared: {}",
-                entry.id,
-                entry
-                    .params
-                    .iter()
-                    .map(|p| p.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            return Err(TemplateError::ParamUnknown {
+                id: id(),
+                param: name.clone(),
+                declared: entry.params.iter().map(|p| p.name.clone()).collect(),
+            });
         }
     }
     let mut bound = Vec::with_capacity(entry.params.len());
     for p in &entry.params {
         let mut spec = p.clone();
-        if let Some(v) = values.get(&p.name) {
-            spec.sample = v.clone();
+        match values.get(&p.name) {
+            Some(v) => {
+                spec.sample = v.clone();
+                // Checked here rather than through `to_property`, whose message
+                // is about the sample: the value at fault is the caller's.
+                if spec.to_property().is_err() {
+                    return Err(TemplateError::ParamType {
+                        id: id(),
+                        param: p.name.clone(),
+                        expected: p.kind.clone(),
+                        got: spec.sample_kind(),
+                        value: Box::new(v.clone()),
+                    });
+                }
+            }
+            None if mode == RunMode::Api => {
+                return Err(TemplateError::ParamMissing {
+                    id: id(),
+                    param: p.name.clone(),
+                })
+            }
+            None => {
+                spec.to_property().map_err(|e| TemplateError::Entry {
+                    id: id(),
+                    message: format!("{}: {e}", entry.id),
+                })?;
+            }
         }
-        // `to_property` checks the value against the declared type.
-        spec.to_property()
-            .map_err(|e| format!("{}: {e}", entry.id))?;
         if let Some(allowed) = &p.enum_values {
             if !allowed.contains(&spec.sample) {
-                return Err(format!(
-                    "{}: {} = {} is not one of the declared values {}",
-                    entry.id,
-                    p.name,
-                    spec.sample,
-                    serde_json::Value::Array(allowed.clone())
-                ));
+                return Err(TemplateError::ParamNotAllowed {
+                    id: id(),
+                    param: p.name.clone(),
+                    value: spec.sample.clone(),
+                    allowed: allowed.clone(),
+                });
             }
         }
         bound.push(spec);
@@ -446,12 +644,12 @@ pub fn run_template(
         .map(|(batch, _)| batch)
         .map_err(|e| {
             if e.contains(crate::query::error_code::TEMPLATE_COST_EXCEEDED) {
-                let given = bound
+                let given: Vec<(String, serde_json::Value)> = bound
                     .iter()
                     .filter(|p| values.contains_key(&p.name))
-                    .map(|p| format!("{} = {}", p.name, p.sample))
-                    .collect::<Vec<_>>();
-                format!(
+                    .map(|p| (p.name.clone(), p.sample.clone()))
+                    .collect();
+                let message = format!(
                     "{}: refused -- with {} this template does more than {ceiling} rows \
                      of work, the ceiling for it ({WORK_CEILING_FACTOR}x the {recorded} \
                      rows it did with its sample values, at least {MIN_WORK_CEILING}). \
@@ -462,14 +660,51 @@ pub fn run_template(
                     if given.is_empty() {
                         "its sample values".to_string()
                     } else {
-                        given.join(", ")
+                        given
+                            .iter()
+                            .map(|(k, v)| format!("{k} = {v}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     },
                     crate::query::error_code::TEMPLATE_COST_EXCEEDED
-                )
+                );
+                TemplateError::WorkCeiling {
+                    id: id(),
+                    limit: ceiling,
+                    params: given,
+                    message,
+                }
             } else {
-                format!("{}: {e}", entry.id)
+                TemplateError::Query {
+                    id: id(),
+                    message: e,
+                }
             }
         })
+}
+
+/// Refuse an entry whose query writes (#2026).
+///
+/// A catalog is uploaded content, and running one of its entries over HTTP
+/// needs only read permission, so an entry that could change the graph would
+/// let a reader write. Checked on the parsed query rather than by keyword, so a
+/// property named `created` or a string containing "DELETE" is not refused. A
+/// query that does not parse is refused too: what it would do is unknown.
+///
+/// `run_metered` already runs on a shared `&GraphStore` through the read-only
+/// executor, so a writing entry could not change the graph when run; this
+/// refuses it at import, where the uploader learns of it, rather than on every
+/// call.
+pub fn refuse_writing_entry(entry: &CatalogEntry) -> Result<(), String> {
+    match crate::query::parse_query(&entry.cypher) {
+        Ok(q) if !q.is_write() => Ok(()),
+        Ok(_) => Err(format!(
+            "{}: the query writes to the graph (CREATE, MERGE, SET, DELETE or REMOVE). \
+             A catalog entry is run by anyone who may read, so it may not write.",
+            entry.id
+        )),
+        Err(e) => Err(format!("{}: the query does not parse: {e}", entry.id)),
+    }
 }
 
 /// Refuse a query that is assembled rather than parameterized, and a parameter

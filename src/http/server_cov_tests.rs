@@ -180,6 +180,18 @@ fn required_role_is_admin_for_management_and_write_for_imports() {
     );
     assert_eq!(required_role(&Method::POST, "/api/query"), Role::Read);
     assert_eq!(required_role(&Method::GET, "/api/status"), Role::Read);
+    // A catalog is loaded by a writer and listed, read and run by a reader
+    // (#2026); its entries cannot write, which is checked at import.
+    assert_eq!(
+        required_role(&Method::POST, "/api/queries/import"),
+        Role::Write
+    );
+    assert_eq!(required_role(&Method::GET, "/api/queries"), Role::Read);
+    assert_eq!(required_role(&Method::GET, "/api/queries/x"), Role::Read);
+    assert_eq!(
+        required_role(&Method::POST, "/api/queries/x/run"),
+        Role::Read
+    );
     // A view polls this as it polls status: a reader's route (#1771).
     assert_eq!(required_role(&Method::GET, "/api/changes"), Role::Read);
 }
@@ -609,6 +621,7 @@ fn state(persistence: Option<Arc<crate::persistence::PersistenceManager>>) -> Ap
         persistence,
         snapshot_key: None,
         transactions: Default::default(),
+        query_catalogs: Default::default(),
     }
 }
 

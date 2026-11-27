@@ -142,6 +142,93 @@ export interface JsonImportResult {
   label: string;
 }
 
+/** A declared parameter of a catalog entry (#2026) */
+export interface CatalogParam {
+  name: string;
+  type: "int" | "float" | "string" | "bool";
+  sample: unknown;
+  enum_values: unknown[] | null;
+}
+
+/** A catalog entry as GET /api/queries lists it */
+export interface CatalogEntrySummary {
+  id: string;
+  question: string;
+  paraphrases: string[];
+  difficulty: string;
+  unanswerable: boolean;
+  params: CatalogParam[];
+}
+
+/** GET /api/queries/:id: the list fields plus the query and its ceiling */
+export interface CatalogEntryDetail extends CatalogEntrySummary {
+  cypher: string;
+  work: number | null;
+  work_ceiling: number | null;
+}
+
+/** GET /api/queries */
+export interface CatalogListResult {
+  total: number;
+  sha256: string;
+  results: CatalogEntrySummary[];
+}
+
+/** POST /api/queries/import */
+export interface CatalogImportResult {
+  loaded: number;
+  replaced: boolean;
+  sha256: string;
+  by_difficulty: { easy: number; medium: number; hard: number };
+  with_params: number;
+}
+
+/** POST /api/queries/:id/run */
+export interface CatalogRunResult {
+  columns: string[];
+  rows: unknown[][];
+  row_count: number;
+  /** More than 10,000 rows matched and only the first 10,000 are here. */
+  truncated: boolean;
+  work: number | null;
+  work_ceiling: number | null;
+  source: "computed";
+}
+
+/** The `queries` field of a snapshot import response */
+export interface CatalogLinkState {
+  /** The snapshot's header names a catalog. */
+  linked: boolean;
+  expected_file: string | null;
+  sha256: string | null;
+  /** It was sent and loaded; `linked && !loaded` means ask for the file. */
+  loaded: boolean;
+}
+
+/** A catalog refusal: the error, a stable code and the fields it names */
+export interface CatalogError extends ErrorResponse {
+  code:
+    | "param_missing"
+    | "param_unknown"
+    | "param_type"
+    | "param_not_allowed"
+    | "work_ceiling"
+    | "invalid_entry"
+    | "query_error"
+    | "query_not_found"
+    | "no_catalog"
+    | "catalog_mismatch"
+    | "invalid_catalog"
+    | "bad_upload";
+  param?: string;
+  declared?: string[];
+  expected?: unknown;
+  got?: unknown;
+  allowed?: unknown[];
+  limit?: number;
+  params?: Record<string, unknown>;
+}
+
 /** Options for creating a client */
 export interface ClientOptions {
   /** Base URL for HTTP transport (default: http://localhost:8080) */

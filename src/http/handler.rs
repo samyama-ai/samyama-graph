@@ -1207,7 +1207,7 @@ fn render_row(
 /// Rust debug text of the value, not the value (API-04, #1728). A list or map
 /// written only of literals did not show it, because the parser folds those
 /// into one property value; anything built from an expression did.
-fn render_value(
+pub(crate) fn render_value(
     val: &Value,
     full_props: &HashMap<u64, HashMap<String, PropertyValue>>,
     nodes: &mut HashMap<String, serde_json::Value>,
@@ -3621,8 +3621,10 @@ pub async fn restore_snapshot_handler(
     Query(params): Query<SnapshotImportParams>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    // Read the snapshot file from multipart
+    // Read the snapshot file from multipart, and the optional `.sgqueries`
+    // sidecar the header links to (#2026).
     let mut snapshot_data: Option<Vec<u8>> = None;
+    let mut queries_data: Option<Vec<u8>> = None;
 
     // A read error used to end this loop as the end of the form would, so an
     // upload past the body limit or cut off in transit was answered "No file
@@ -3633,11 +3635,16 @@ pub async fn restore_snapshot_handler(
             Ok(None) => break,
             Err(e) => return snapshot_multipart_refusal("Failed to read multipart request", e),
         };
-        if field.name().unwrap_or("") == "file" {
-            match field.bytes().await {
+        match field.name().unwrap_or("") {
+            "file" => match field.bytes().await {
                 Ok(bytes) => snapshot_data = Some(bytes.to_vec()),
                 Err(e) => return snapshot_multipart_refusal("Failed to read file", e),
-            }
+            },
+            "queries" => match field.bytes().await {
+                Ok(bytes) => queries_data = Some(bytes.to_vec()),
+                Err(e) => return snapshot_multipart_refusal("Failed to read queries", e),
+            },
+            _ => {}
         }
     }
 
@@ -3662,10 +3669,63 @@ pub async fn restore_snapshot_handler(
     // A header that cannot be read is left to the import below to report: the
     // peek's checks are a subset of the import's, so anything that fails here
     // fails there too, and nothing is written either way.
-    if let Ok(header) = crate::snapshot::peek_header_maybe_encrypted(
+    let peeked = crate::snapshot::peek_header_maybe_encrypted(
         std::io::Cursor::new(&data),
         state.snapshot_key.as_deref(),
-    ) {
+    )
+    .ok();
+    let queries_link = peeked.as_ref().and_then(|h| h.queries.clone());
+
+    // A sidecar is checked, and parsed, before anything is written: a catalog
+    // that is not the one the header names answers questions about some other
+    // graph, and refusing it after the import would leave the data replaced
+    // and the catalog gone.
+    let sidecar = match (&queries_data, &queries_link) {
+        (None, _) => None,
+        (Some(_), None) => {
+            return super::queries::refusal(
+                axum::http::StatusCode::CONFLICT,
+                "catalog_mismatch",
+                "a `queries` part was sent, but this snapshot's header links no catalog, \
+                 so there is nothing to check it against"
+                    .into(),
+                [("expected".to_string(), serde_json::Value::Null)]
+                    .into_iter()
+                    .collect(),
+            )
+        }
+        (Some(bytes), Some(link)) => {
+            if let Err(e) = crate::snapshot::verify::check_queries_ref(link, bytes) {
+                return super::queries::refusal(
+                    axum::http::StatusCode::CONFLICT,
+                    "catalog_mismatch",
+                    e,
+                    [
+                        ("expected".to_string(), json!(link.sha256)),
+                        (
+                            "got".to_string(),
+                            json!(crate::snapshot::verify::queries_sha256(bytes)),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                );
+            }
+            match super::queries::parse_catalog(bytes) {
+                Ok(c) => Some((bytes, c)),
+                Err(e) => {
+                    return super::queries::refusal(
+                        axum::http::StatusCode::BAD_REQUEST,
+                        "invalid_catalog",
+                        e,
+                        Default::default(),
+                    )
+                }
+            }
+        }
+    };
+
+    if let Some(header) = &peeked {
         if let Some(e) =
             state.quota_refuses(&default_graph(), header.node_count, header.edge_count)
         {
@@ -3785,6 +3845,20 @@ pub async fn restore_snapshot_handler(
                 None => (store_guard.rebuild_vector_index_full(), None),
             };
 
+            // The graph's data was replaced, so its catalog's questions are
+            // about a graph that is gone (#2026). The sidecar, checked above,
+            // takes its place.
+            let graph = default_graph();
+            super::queries::drop_catalog(&state.query_catalogs, &graph);
+            let loaded = sidecar
+                .map(|(bytes, c)| super::queries::install(&state.query_catalogs, &graph, bytes, c));
+            let queries = json!({
+                "linked": queries_link.is_some(),
+                "expected_file": queries_link.as_ref().map(|l| &l.file),
+                "sha256": queries_link.as_ref().map(|l| &l.sha256),
+                "loaded": loaded.is_some(),
+            });
+
             if let Some(pm) = &state.persistence {
                 if let Err(e) = pm.apply_mutations(&default_graph(), &store_guard, &journal) {
                     // The rows are in memory but not on disk. Said so here
@@ -3845,6 +3919,7 @@ pub async fn restore_snapshot_handler(
                     "failed": r.failed,
                     "conflicts": stats.index_conflicts,
                 })),
+                "queries": queries,
             }))
             .into_response()
         }
@@ -4351,6 +4426,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
         let app = Router::new()
             .route("/api/query", post(query_handler))
@@ -4414,6 +4490,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
         let app = Router::new()
             .route("/api/schema", get(schema_handler))
@@ -4469,6 +4546,7 @@ mod tests {
                 persistence: None,
             snapshot_key: None,
                 transactions: Default::default(),
+                query_catalogs: Default::default(),
             };
             let app = Router::new()
                 .route("/api/query", axum::routing::post(query_handler))
@@ -4594,6 +4672,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
         let engine = state.engine.clone();
         let app = Router::new()
@@ -4676,6 +4755,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
         let app = Router::new()
             .route("/api/query", axum::routing::post(query_handler))
@@ -4771,6 +4851,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         }
     }
 
@@ -5388,6 +5469,7 @@ mod tests {
             persistence: Some(std::sync::Arc::clone(&pm)),
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
         let app = Router::new()
             .route("/api/query", post(query_handler))
@@ -5442,6 +5524,7 @@ mod tests {
             persistence: Some(std::sync::Arc::clone(&pm)),
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         };
         (state, pm, dir)
     }

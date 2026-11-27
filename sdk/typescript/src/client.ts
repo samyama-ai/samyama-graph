@@ -7,6 +7,10 @@ import type {
   SampleResult,
   CsvImportResult,
   JsonImportResult,
+  CatalogImportResult,
+  CatalogListResult,
+  CatalogEntryDetail,
+  CatalogRunResult,
 } from "./types.js";
 import { HttpTransport } from "./http-client.js";
 
@@ -177,6 +181,38 @@ export class SamyamaClient {
     nodes: Record<string, unknown>[],
   ): Promise<JsonImportResult> {
     return this.http.importJson(label, nodes);
+  }
+
+  /** Load a `.sgqueries` catalog for a graph (#2026). Needs write permission. */
+  async importQueries(
+    catalog: string | Blob,
+    graph: string = "default",
+  ): Promise<CatalogImportResult> {
+    return this.http.importQueries(catalog, graph);
+  }
+
+  /** List catalog entries; `q` keeps those matching every word. */
+  async listQueries(
+    filter: { q?: string; difficulty?: string; graph?: string } = {},
+  ): Promise<CatalogListResult> {
+    return this.http.listQueries(filter);
+  }
+
+  /** One catalog entry, with its Cypher and work ceiling. */
+  async getQuery(id: string, graph: string = "default"): Promise<CatalogEntryDetail> {
+    return this.http.getQuery(id, graph);
+  }
+
+  /**
+   * Run a catalog entry. Every declared parameter needs a value; they are
+   * bound, never substituted into the query.
+   */
+  async runQuery(
+    id: string,
+    params: Record<string, unknown>,
+    graph: string = "default",
+  ): Promise<CatalogRunResult> {
+    return this.http.runQuery(id, params, graph);
   }
 
   /**

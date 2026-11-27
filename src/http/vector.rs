@@ -488,6 +488,7 @@ mod tests {
             persistence: None,
             snapshot_key: None,
             transactions: Default::default(),
+            query_catalogs: Default::default(),
         }
     }
 

@@ -7,6 +7,10 @@ import type {
   NlqResponse,
   CsvImportResult,
   JsonImportResult,
+  CatalogImportResult,
+  CatalogListResult,
+  CatalogEntryDetail,
+  CatalogRunResult,
 } from "./types.js";
 
 /**
@@ -506,6 +510,68 @@ export class HttpTransport {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ label, nodes }),
       },
+      opts,
+    );
+  }
+
+  /** Load a `.sgqueries` catalog via POST /api/queries/import (#2026) */
+  async importQueries(
+    catalog: string | Blob,
+    graph: string = "default",
+    opts?: RequestOptions,
+  ): Promise<CatalogImportResult> {
+    const formData = new FormData();
+    formData.append("graph", graph);
+    const blob =
+      typeof catalog === "string"
+        ? new Blob([catalog], { type: "application/json" })
+        : catalog;
+    formData.append("file", blob, "catalog.sgqueries");
+    return this.json<CatalogImportResult>(
+      "/api/queries/import",
+      { method: "POST", body: formData },
+      opts,
+    );
+  }
+
+  /** List and search catalog entries via GET /api/queries */
+  async listQueries(
+    filter: { q?: string; difficulty?: string; graph?: string } = {},
+    opts?: RequestOptions,
+  ): Promise<CatalogListResult> {
+    const qs = new URLSearchParams();
+    if (filter.q) qs.set("q", filter.q);
+    if (filter.difficulty) qs.set("difficulty", filter.difficulty);
+    if (filter.graph) qs.set("graph", filter.graph);
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return this.json<CatalogListResult>(`/api/queries${suffix}`, {}, opts, "safe");
+  }
+
+  /** One catalog entry via GET /api/queries/:id */
+  async getQuery(
+    id: string,
+    graph: string = "default",
+    opts?: RequestOptions,
+  ): Promise<CatalogEntryDetail> {
+    const qs = new URLSearchParams({ graph });
+    return this.json<CatalogEntryDetail>(
+      `/api/queries/${encodeURIComponent(id)}?${qs}`,
+      {},
+      opts,
+      "safe",
+    );
+  }
+
+  /** Run a catalog entry with bound values via POST /api/queries/:id/run */
+  async runQuery(
+    id: string,
+    params: Record<string, unknown>,
+    graph: string = "default",
+    opts?: RequestOptions,
+  ): Promise<CatalogRunResult> {
+    return this.post<CatalogRunResult>(
+      `/api/queries/${encodeURIComponent(id)}/run`,
+      { params, graph },
       opts,
     );
   }
