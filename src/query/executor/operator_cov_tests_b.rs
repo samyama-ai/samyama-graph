@@ -1189,7 +1189,8 @@ fn unknown_config_keys_are_refused_naming_the_rest() {
         "{e}"
     );
     assert!(
-        e.contains("This algorithm reads: damping, iterations"),
+        // `incremental` since ALGO-14 (#1697).
+        e.contains("This algorithm reads: damping, incremental, iterations"),
         "{e}"
     );
     let e = algo_err(&mut store, "algo.wcc", vec![lmap(&[("bogus", pint(1))])]);
@@ -6798,6 +6799,10 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
         "symptomexplanation" => vec![pairs(40)],
         "modularity" => vec![pairs(0)],
         "fastrp" | "node2vec" => vec![lmap(&[("embeddingDimension", pint(4))])],
+        "sample.neighbors" => vec![node(0), lmap(&[("fanout", PropertyValue::Array(vec![pint(-1)]))])],
+        "sample.forestfire" | "sample.randomwalk" => vec![node(0), lmap(&[("size", pint(2))])],
+        "sample.snowball" | "sample.egonetwork" => vec![node(0)],
+        "sample.stratified" => vec![lmap(&[("fraction", PropertyValue::Float(0.5))])],
         // A source, a target and a limit on a second relationship property;
         // every relationship here carries `w`.
         "or.constrainedshortestpath" => vec![
@@ -6832,6 +6837,17 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
                 store.set_node_property(TENANT, NodeId::new(id as u64), "split", side).unwrap();
             }
             let args = vec![lmap(&[("strategy", pstr("entity")), ("edgeType", pstr("E"))])];
+            return (store, args);
+        }
+        // A corpus text that quotes the benchmark item: one contaminated pair.
+        "contamination" => {
+            let mut store = GraphStore::new();
+            let q = "which river flows through the city of paris on its way to the sea";
+            for (label, text) in [("Doc", format!("an article that says {q} in passing")), ("Q", q.to_string())] {
+                let n = store.create_node(label);
+                store.set_node_property(TENANT, n, "text", text).unwrap();
+            }
+            let args = vec![lmap(&[("corpusLabel", pstr("Doc")), ("benchmarkLabel", pstr("Q"))])];
             return (store, args);
         }
         _ => vec![],

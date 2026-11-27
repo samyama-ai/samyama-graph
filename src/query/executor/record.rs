@@ -1470,13 +1470,13 @@ pub(crate) fn temporal_property(v: &PropertyValue, property: &str) -> Option<Pro
 }
 
 fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
-    use chrono::{Datelike, Timelike};
+    use crate::graph::civil;
     const DAY_NS: i64 = 86_400 * 1_000_000_000;
 
     // Split into the date part (days since epoch) and the time part (nanos
     // since midnight), each optional, and answer from those.
     let (days, tod, offset, zone) = match v {
-        PropertyValue::Date(d) => (Some(*d as i64), None, None, None),
+        PropertyValue::Date(d) => (Some(*d), None, None, None),
         PropertyValue::LocalTime(n) => (None, Some(*n), None, None),
         PropertyValue::Time { nanos, offset_seconds } => {
             (None, Some(*nanos), Some(*offset_seconds), None)
@@ -1499,34 +1499,34 @@ fn temporal_component(v: &PropertyValue, property: &str) -> PropertyValue {
         _ => return PropertyValue::Null,
     };
 
-    let date = days.and_then(|d| {
-        chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?.checked_add_signed(chrono::Duration::days(d))
-    });
+    // Calendar fields through `civil`, which covers openCypher's whole
+    // ±999,999,999-year range; `chrono` stopped at ±262,143 (#1009). A day
+    // number outside that range has no calendar fields, so they are null.
+    let date = days
+        .filter(|d| civil::day_in_range(*d))
+        .map(|d| (d, civil::civil_from_days(d)));
     let int = |x: i64| PropertyValue::Integer(x);
 
     match property {
-        "year" => date.map_or(PropertyValue::Null, |d| int(d.year() as i64)),
-        "month" => date.map_or(PropertyValue::Null, |d| int(d.month() as i64)),
-        "day" => date.map_or(PropertyValue::Null, |d| int(d.day() as i64)),
-        "quarter" => date.map_or(PropertyValue::Null, |d| int(((d.month() - 1) / 3 + 1) as i64)),
-        "dayOfQuarter" => date.map_or(PropertyValue::Null, |d| {
-            let qm = (d.month() - 1) / 3 * 3 + 1;
-            let start = chrono::NaiveDate::from_ymd_opt(d.year(), qm, 1);
-            start.map_or(PropertyValue::Null, |s| {
-                int(d.signed_duration_since(s).num_days() + 1)
-            })
+        "year" => date.map_or(PropertyValue::Null, |(_, (y, _, _))| int(y)),
+        "month" => date.map_or(PropertyValue::Null, |(_, (_, m, _))| int(m as i64)),
+        "day" => date.map_or(PropertyValue::Null, |(_, (_, _, d))| int(d as i64)),
+        "quarter" => date.map_or(PropertyValue::Null, |(_, (_, m, _))| int(((m - 1) / 3 + 1) as i64)),
+        "dayOfQuarter" => date.map_or(PropertyValue::Null, |(d, (y, m, _))| {
+            let qm = (m - 1) / 3 * 3 + 1;
+            int(d - civil::days_from_civil(y, qm, 1) + 1)
         }),
-        "week" => date.map_or(PropertyValue::Null, |d| int(d.iso_week().week() as i64)),
-        "weekYear" => date.map_or(PropertyValue::Null, |d| int(d.iso_week().year() as i64)),
+        "week" => date.map_or(PropertyValue::Null, |(d, _)| int(civil::iso_week(d).1 as i64)),
+        "weekYear" => date.map_or(PropertyValue::Null, |(d, _)| int(civil::iso_week(d).0)),
         // Cypher spells the **accessor** `weekDay` and the **constructor key**
         // `dayOfWeek`, for the same quantity. Only the constructor spelling was
         // here, so `d.weekDay` returned null -- indistinguishable from a
         // component the value does not have, which is what a date's `hour`
         // legitimately returns (#862).
-        "weekDay" | "dayOfWeek" => date.map_or(PropertyValue::Null, |d| {
-            int(d.weekday().number_from_monday() as i64)
-        }),
-        "ordinalDay" => date.map_or(PropertyValue::Null, |d| int(d.ordinal() as i64)),
+        "weekDay" | "dayOfWeek" => {
+            date.map_or(PropertyValue::Null, |(d, _)| int(civil::weekday(d) as i64))
+        }
+        "ordinalDay" => date.map_or(PropertyValue::Null, |(d, _)| int(civil::ordinal(d) as i64)),
 
         "hour" => tod.map_or(PropertyValue::Null, |n| int(n / 3_600_000_000_000)),
         "minute" => tod.map_or(PropertyValue::Null, |n| int(n / 60_000_000_000 % 60)),

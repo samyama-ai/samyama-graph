@@ -8,6 +8,7 @@ mod gpu_parity_coverage;
 #[cfg(all(test, feature = "gpu"))]
 mod gpu_parity_tests;
 pub mod pagerank;
+pub mod incremental;
 pub mod frontier;
 pub mod progress;
 pub mod community;
@@ -24,6 +25,8 @@ pub mod pca;
 pub mod centrality;
 pub mod centrality_extra;
 pub mod link_prediction;
+pub mod neighbour_sampling;
+pub mod subgraph_sampling;
 pub mod negative_sampling;
 pub mod community_detect;
 pub mod metrics;
@@ -32,11 +35,17 @@ pub mod traversal;
 pub mod temporal;
 pub mod embeddings;
 pub mod split;
+pub mod contamination;
 
 pub use common::{GraphView, NodeId};
-pub use constrained_path::{constrained_shortest_path, ConstrainedPath, ConstrainedPathError};
+pub use constrained_path::{
+    constrained_shortest_path, constrained_shortest_path_search, ConstrainedPath, ConstrainedPathError, ConstrainedSearch,
+};
 pub use pagerank::{page_rank, page_rank_with, PageRankConfig};
 pub use progress::{NoProgress, Progress, Stopped};
+pub use incremental::{
+    IncrementalDegree, IncrementalPageRank, IncrementalPageRankError, IncrementalWcc, RESIDUAL_TOLERANCE,
+};
 pub use community::{weakly_connected_components, WccResult, strongly_connected_components, SccResult};
 pub use pathfinding::{bfs, dijkstra, bfs_all_shortest_paths, PathResult};
 pub use flow::{edmonds_karp, FlowResult};
@@ -53,6 +62,12 @@ pub use centrality::{
     eigenvector_centrality, harmonic_centrality, ranked, Scores,
 };
 pub use link_prediction::{predict_links, score_one, LinkScore, PairScore};
+pub use neighbour_sampling::{
+    sample_neighbours, Direction as SampleDirection, Fanout, SampleError, SampleSpec, SampledEdge,
+};
+pub use subgraph_sampling::{
+    ego_network, forest_fire, random_walk_sample, snowball, stratified, Allocation as StratumAllocation,
+};
 pub use negative_sampling::{negative_samples, NegativeStrategy};
 pub use similarity_extra::{
     constraint, cosine_similarity, effective_size, node_similarity, overlap_coefficient,
@@ -92,6 +107,7 @@ pub use embeddings::{fastrp, node2vec, FastRpConfig, Node2VecConfig};
 #[cfg(test)]
 #[path = "lib_cov_tests.rs"]
 mod cov_tests;
+pub use contamination::{ngram_contamination, tokenize, Contamination, DEFAULT_NGRAM};
 pub use split::{assign_groups, entity_leaks, group_leaks, split_names, time_leaks, time_split, GroupLeak};
 #[cfg(test)]
 mod frontier_parity_tests;

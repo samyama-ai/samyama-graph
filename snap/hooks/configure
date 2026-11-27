@@ -1,0 +1,8 @@
+#!/bin/sh
+# `snap set samyama args="..."` needs a configure hook to exist. The flags are
+# read by the daemon at start; restart it to apply them.
+set -e
+args="$(snapctl get args)"
+case "$args" in
+    *--data-path*) echo "args: --data-path is fixed to \$SNAP_COMMON/data in the snap" >&2; exit 1 ;;
+esac
