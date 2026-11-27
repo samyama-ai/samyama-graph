@@ -2748,14 +2748,14 @@ fn temporal_arg_map(v: &Value) -> Option<std::collections::HashMap<String, Prope
 /// `None` for `LocalTime`/`Time`, which genuinely have no date — the caller
 /// turns that into a type error rather than substituting the epoch, because a
 /// substituted 1970-01-01 reads as a real answer (#689).
-fn date_part_of(v: &PropertyValue) -> Option<i32> {
+fn date_part_of(v: &PropertyValue) -> Option<i64> {
     match v {
         PropertyValue::Date(d) => Some(*d),
-        PropertyValue::LocalDateTime { secs, .. } => Some(secs.div_euclid(86_400) as i32),
+        PropertyValue::LocalDateTime { secs, .. } => Some(secs.div_euclid(86_400)),
         PropertyValue::ZonedDateTime { secs, offset_seconds, .. } => {
-            Some((secs + *offset_seconds as i64).div_euclid(86_400) as i32)
+            Some((secs + *offset_seconds as i64).div_euclid(86_400))
         }
-        PropertyValue::DateTime(ms) => Some(ms.div_euclid(86_400_000) as i32),
+        PropertyValue::DateTime(ms) => Some(ms.div_euclid(86_400_000)),
         _ => None,
     }
 }
@@ -2770,8 +2770,8 @@ fn date_part_of(v: &PropertyValue) -> Option<i32> {
 /// Seconds are the wider unit and cover ±292 *billion* years, so the days go
 /// through seconds and only the sub-day remainder is ever counted in
 /// nanoseconds (#814).
-fn day_and_nanos_to_secs(days: i32, nanos_of_day: i64) -> (i64, u32) {
-    let secs = days as i64 * 86_400 + nanos_of_day.div_euclid(1_000_000_000);
+fn day_and_nanos_to_secs(days: i64, nanos_of_day: i64) -> (i64, u32) {
+    let secs = days * 86_400 + nanos_of_day.div_euclid(1_000_000_000);
     (secs, nanos_of_day.rem_euclid(1_000_000_000) as u32)
 }
 
@@ -2784,25 +2784,25 @@ fn day_and_nanos_to_secs(days: i32, nanos_of_day: i64) -> (i64, u32) {
 /// means the calendar fields are not consulted — which is why this dispatches
 /// on which keys are present rather than defaulting each field.
 fn apply_date_overrides(
-    base: i32,
+    base: i64,
     map: &std::collections::HashMap<String, PropertyValue>,
-) -> Result<i32, ExecutionError> {
-    use chrono::Datelike;
+) -> Result<i64, ExecutionError> {
+    use crate::graph::civil;
     const KEYS: &[&str] = &[
         "year", "month", "day", "ordinalDay", "week", "dayOfWeek", "quarter", "dayOfQuarter",
     ];
     if !KEYS.iter().any(|k| map.contains_key(*k)) {
         return Ok(base);
     }
-    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
-    let cur = epoch
-        .checked_add_signed(chrono::Duration::days(base as i64))
-        .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
+    let (cur_year, cur_month, cur_day) = civil::civil_from_days(base);
     let g = |k: &str| map.get(k).and_then(|v| v.as_integer());
-    let year = g("year").unwrap_or(cur.year() as i64) as i32;
+    // A component outside u32 is no valid month, week or day; 0 makes the
+    // validated constructors refuse it rather than wrap it.
+    let small = |v: i64| u32::try_from(v).unwrap_or(0);
+    let year = g("year").unwrap_or(cur_year);
 
     let out = if let Some(ord) = g("ordinalDay") {
-        chrono::NaiveDate::from_yo_opt(year, ord as u32)
+        civil::from_yo(year, small(ord))
             .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid ordinalDay {ord}")))?
     } else if map.contains_key("week") || map.contains_key("dayOfWeek") {
         // In a week date the year is the **ISO week year**, which is not the
@@ -2813,38 +2813,38 @@ fn apply_date_overrides(
         //
         // An explicit `year` still wins, and is likewise read as the week year:
         // `{date: date('1816-12-31'), year: 1817, week: 2}` is 1817-W02.
-        let week_year = g("year").unwrap_or(cur.iso_week().year() as i64) as i32;
-        let week = g("week").unwrap_or(cur.iso_week().week() as i64) as u32;
-        let dow = g("dayOfWeek").unwrap_or(cur.weekday().number_from_monday() as i64) as u32;
-        chrono::NaiveDate::from_isoywd_opt(week_year, week, weekday_from_iso_num(dow))
+        let (cur_week_year, cur_week) = civil::iso_week(base);
+        let week_year = g("year").unwrap_or(cur_week_year);
+        let week = g("week").unwrap_or(cur_week as i64);
+        let dow = g("dayOfWeek").unwrap_or(civil::weekday(base) as i64);
+        civil::from_isoywd(week_year, small(week), small(dow))
             .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid week date {week_year}-W{week}-{dow}")))?
     } else if map.contains_key("quarter") || map.contains_key("dayOfQuarter") {
-        let q = g("quarter").unwrap_or(((cur.month() - 1) / 3 + 1) as i64);
+        let q = g("quarter").unwrap_or(((cur_month - 1) / 3 + 1) as i64);
         // The day within the quarter defaults to the **current** one, exactly
         // as `week`/`dayOfWeek` above default from `cur`. Defaulting to 1 made
         // `{date: <1984-11-11>, quarter: 3}` answer 1984-07-01 instead of
         // 1984-08-11: an override that names one component silently reset two
         // others, and the result is a perfectly ordinary date (#838).
-        let cur_quarter_start = chrono::NaiveDate::from_ymd_opt(
-            cur.year(),
-            ((cur.month() - 1) / 3) * 3 + 1,
-            1,
-        )
-        .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
-        let cur_day_of_quarter = cur.signed_duration_since(cur_quarter_start).num_days() + 1;
+        let cur_quarter_start =
+            civil::days_from_civil(cur_year, ((cur_month - 1) / 3) * 3 + 1, 1);
+        let cur_day_of_quarter = base - cur_quarter_start + 1;
         let d = g("dayOfQuarter").unwrap_or(cur_day_of_quarter);
-        let start = chrono::NaiveDate::from_ymd_opt(year, ((q - 1) * 3 + 1) as u32, 1)
+        let start = (1..=4)
+            .contains(&q)
+            .then(|| civil::from_ymd(year, ((q - 1) * 3 + 1) as u32, 1))
+            .flatten()
             .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid quarter {q}")))?;
         start
-            .checked_add_signed(chrono::Duration::days(d - 1))
+            .checked_add(d - 1)
             .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid dayOfQuarter {d}")))?
     } else {
-        let month = g("month").unwrap_or(cur.month() as i64) as u32;
-        let day = g("day").unwrap_or(cur.day() as i64) as u32;
-        chrono::NaiveDate::from_ymd_opt(year, month, day)
+        let month = g("month").unwrap_or(cur_month as i64);
+        let day = g("day").unwrap_or(cur_day as i64);
+        civil::from_ymd(year, small(month), small(day))
             .ok_or_else(|| ExecutionError::RuntimeError(format!("invalid date {year}-{month}-{day}")))?
     };
-    Ok(out.signed_duration_since(epoch).num_days() as i32)
+    Ok(out)
 }
 
 /// Apply a map's clock components on top of an already-selected time.
@@ -2875,11 +2875,6 @@ fn apply_time_overrides(
 }
 
 
-fn weekday_from_iso_num(dow: u32) -> chrono::Weekday {
-    use chrono::Weekday::*;
-    match dow { 1 => Mon, 2 => Tue, 3 => Wed, 4 => Thu, 5 => Fri, 6 => Sat, _ => Sun }
-}
-
 
 /// Nanoseconds-since-midnight of any temporal value that has a time part.
 fn time_part_of(v: &PropertyValue) -> Option<i64> {
@@ -2906,9 +2901,8 @@ fn time_part_of(v: &PropertyValue) -> Option<i64> {
 /// takes the date from `d` and the clock from the components.
 fn compose_date_and_time(
     map: &std::collections::HashMap<String, PropertyValue>,
-) -> Result<(i32, i64), ExecutionError> {
+) -> Result<(i64, i64), ExecutionError> {
     use crate::query::executor::temporal as tmp;
-    use chrono::Datelike;
 
     // A selected value is the *base*; individual components then override
     // parts of it. `{date: d, time: t, second: 42}` keeps 12:31 from `t` and
@@ -2988,16 +2982,14 @@ fn parse_naive_date_time(s: &str) -> Result<(i64, u32), ExecutionError> {
         Some((d, ti)) => (d, Some(ti)),
         None => (t, None),
     };
-    let days = tmp::parse_iso_date(date_part)? as i64;
+    let days = tmp::parse_iso_date(date_part)?;
     let nanos = match time_part {
         Some(ti) if !ti.is_empty() => tmp::parse_iso_time(ti)?,
         _ => 0,
     };
-    let total = days * 86_400 * 1_000_000_000 + nanos;
-    Ok((
-        total.div_euclid(1_000_000_000),
-        total.rem_euclid(1_000_000_000) as u32,
-    ))
+    // Through seconds, never nanoseconds: days in nanoseconds overflow i64
+    // ±292 years from 1970, and a date here may be ±999,999,999 years (#1009).
+    Ok(day_and_nanos_to_secs(days, nanos))
 }
 
 /// The `PropertyValue` inside a `Value`, when there is one.
@@ -4076,7 +4068,7 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
         "date" => {
             use crate::query::executor::temporal as tmp;
             if args.is_empty() {
-                let days = (statement_clock::now().timestamp() / 86_400) as i32;
+                let days = statement_clock::now().timestamp().div_euclid(86_400);
                 return Ok(Value::Property(PropertyValue::Date(days)));
             }
             match &args[0] {
@@ -5587,12 +5579,12 @@ fn zone_aligned_instants(a: &PropertyValue, b: &PropertyValue) -> Option<(i128, 
     let (day_a, day_b) = (da.or(db).unwrap_or(0), db.or(da).unwrap_or(0));
     // A clock-less value is midnight, which is what a bare `date` means.
     let (ta, tb) = (time_part_of(a).unwrap_or(0), time_part_of(b).unwrap_or(0));
-    let instant = |own: &Option<_>, other: &Option<_>, day: i32, nanos_of_day: i64| {
+    let instant = |own: &Option<_>, other: &Option<_>, day: i64, nanos_of_day: i64| {
         // Own zone first; the other's only when there is none of one's own.
         let spec: Option<crate::query::executor::temporal::TzSpec> =
             own.clone().or_else(|| other.clone());
         let offset = match &spec {
-            Some(s) => resolve_offset(s, day as i64, nanos_of_day).ok()?,
+            Some(s) => resolve_offset(s, day, nanos_of_day).ok()?,
             None => 0,
         };
         // Seconds carry the day, so a far-off year cannot overflow the way a
@@ -5697,7 +5689,6 @@ fn shift_temporal(
     seconds: i64,
     nanos: i64,
 ) -> Result<PropertyValue, ExecutionError> {
-    use chrono::Datelike;
     // A `Date` has no clock, so a duration's **sub-day part is dropped** rather
     // than applied — and dropped *before* the components are combined.
     //
@@ -5747,7 +5738,7 @@ fn shift_temporal(
         0i128
     } else {
         let day0 = match v {
-            PropertyValue::Date(d) => *d as i64,
+            PropertyValue::Date(d) => *d,
             PropertyValue::LocalDateTime { secs, .. } => secs.div_euclid(86_400),
             PropertyValue::ZonedDateTime { secs, offset_seconds, .. } => {
                 (secs + *offset_seconds as i64).div_euclid(86_400)
@@ -5757,17 +5748,11 @@ fn shift_temporal(
                 "cannot add months to a value with no date part".to_string(),
             )),
         };
-        let base = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
-            .and_then(|e| e.checked_add_signed(chrono::Duration::days(day0)))
-            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
-        let total = base.year() as i64 * 12 + (base.month0() as i64) + months;
-        let (y, m0) = (total.div_euclid(12), total.rem_euclid(12));
         // Clamp the day into the target month, which is what a calendar month
         // shift means: 31 Jan + 1 month is 28/29 Feb.
-        let last = days_in_month(y as i32, m0 as u32 + 1);
-        let shifted = chrono::NaiveDate::from_ymd_opt(y as i32, m0 as u32 + 1, base.day().min(last))
+        let shifted = crate::graph::civil::shift_months_clamped(day0, months)
             .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))?;
-        (shifted.signed_duration_since(base).num_days() as i128) * 86_400 * 1_000_000_000
+        ((shifted - day0) as i128) * 86_400 * 1_000_000_000
     };
 
     // A date-time in a **named** zone has no single offset, so the shift
@@ -5822,22 +5807,12 @@ fn shift_temporal(
     Ok(rebuild_temporal_like(v, total))
 }
 
-fn days_in_month(year: i32, month: u32) -> u32 {
-    let (ny, nm) = if month == 12 { (year + 1, 1) } else { (year, month + 1) };
-    let first = chrono::NaiveDate::from_ymd_opt(year, month, 1);
-    let next = chrono::NaiveDate::from_ymd_opt(ny, nm, 1);
-    match (first, next) {
-        (Some(a), Some(b)) => b.signed_duration_since(a).num_days() as u32,
-        _ => 31,
-    }
-}
-
 /// Put an epoch-nanosecond total back into the same type it came from, so a
 /// `Date` plus a duration is still a `Date`.
 fn rebuild_temporal_like(like: &PropertyValue, total_nanos: i128) -> PropertyValue {
     const DAY: i128 = 86_400 * 1_000_000_000;
     match like {
-        PropertyValue::Date(_) => PropertyValue::Date(total_nanos.div_euclid(DAY) as i32),
+        PropertyValue::Date(_) => PropertyValue::Date(total_nanos.div_euclid(DAY) as i64),
         PropertyValue::LocalTime(_) => {
             PropertyValue::LocalTime(total_nanos.rem_euclid(DAY) as i64)
         }
@@ -5880,7 +5855,7 @@ fn temporal_difference_calendar(
     a: &PropertyValue,
     b: &PropertyValue,
 ) -> Result<PropertyValue, ExecutionError> {
-    use chrono::Datelike;
+    use crate::graph::civil;
 
     // Only the components the two values **share** are compared. A date has no
     // time and a time has no date, so `duration.between(date(...),
@@ -5924,32 +5899,12 @@ fn temporal_difference_calendar(
     //
     // The threshold is a differing (year, month), not a day count: 31 Jan to
     // 1 Feb is one day apart and *does* cross a month.
-    {
-        let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
-        let same_month = |x: i32, y: i32| {
-            match (
-                epoch.checked_add_signed(chrono::Duration::days(x as i64)),
-                epoch.checked_add_signed(chrono::Duration::days(y as i64)),
-            ) {
-                (Some(p), Some(q)) => {
-                    use chrono::Datelike;
-                    p.year() == q.year() && p.month() == q.month()
-                }
-                _ => false,
-            }
-        };
-        if same_month(da, db) {
-            return temporal_difference(a, b);
-        }
+    let (start, end) = (db, da);
+    let (start_y, start_m, _) = civil::civil_from_days(start);
+    let (end_y, end_m, _) = civil::civil_from_days(end);
+    if (start_y, start_m) == (end_y, end_m) {
+        return temporal_difference(a, b);
     }
-
-    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
-    let to_date = |d: i32| {
-        epoch
-            .checked_add_signed(chrono::Duration::days(d as i64))
-            .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))
-    };
-    let (start, end) = (to_date(db)?, to_date(da)?);
     // The clock parts must be compared as **instants** when both sides carry an
     // offset, exactly as in the time-only path (#807). `time_part_of` returns
     // the local wall clock, which is right for rendering and wrong here:
@@ -5974,8 +5929,7 @@ fn temporal_difference_calendar(
     // Whole months, then leftover days, then the clock. Borrowing works as it
     // does on paper: if the clock difference is negative, one day is not yet
     // complete; if the day count then goes negative, one month is not either.
-    let mut months = (end.year() as i64 - start.year() as i64) * 12
-        + (end.month() as i64 - start.month() as i64);
+    let mut months = (end_y - start_y) * 12 + (end_m as i64 - start_m as i64);
     // The clock difference keeps its own sign; it is only borrowed into days
     // when the *whole* result is positive. Borrowing unconditionally produced
     // `P-28DT2H19M27.858S` where `P-27DT-21H-40M-32.142S` was expected — the
@@ -5992,10 +5946,7 @@ fn temporal_difference_calendar(
     };
     let _ = &mut nanos;
     let _ = &mut day_adjust;
-    let mut days = end
-        .signed_duration_since(shift_months_clamped(start, months)?)
-        .num_days()
-        + day_adjust;
+    let mut days = end - shift_months_clamped(start, months)? + day_adjust;
     // Borrow toward zero, not toward negative infinity. Going **backwards**, a
     // partial month stays as days rather than becoming a whole negative month
     // plus positive days: 2015-07-21 back to 2015-06-24 is `P-27D`, not
@@ -6003,16 +5954,10 @@ fn temporal_difference_calendar(
     // Cypher writes.
     if months > 0 && days < 0 {
         months -= 1;
-        days = end
-            .signed_duration_since(shift_months_clamped(start, months)?)
-            .num_days()
-            + day_adjust;
+        days = end - shift_months_clamped(start, months)? + day_adjust;
     } else if months < 0 && days > 0 {
         months += 1;
-        days = end
-            .signed_duration_since(shift_months_clamped(start, months)?)
-            .num_days()
-            + day_adjust;
+        days = end - shift_months_clamped(start, months)? + day_adjust;
     }
 
     Ok(PropertyValue::Duration {
@@ -6088,14 +6033,10 @@ fn named_zone_calendar_difference(
 
     // start + months + days on the local calendar, then its offset.
     let out_of_range = || ExecutionError::RuntimeError("date out of range".into());
-    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).expect("epoch");
-    let start_date = epoch
-        .checked_add_signed(chrono::Duration::days(local_b.div_euclid(DAY) as i64))
+    let start_date = i64::try_from(local_b.div_euclid(DAY)).map_err(|_| out_of_range())?;
+    let mid_day = shift_months_clamped(start_date, months)?
+        .checked_add(days)
         .ok_or_else(out_of_range)?;
-    let mid_date = shift_months_clamped(start_date, months)?
-        .checked_add_signed(chrono::Duration::days(days))
-        .ok_or_else(out_of_range)?;
-    let mid_day = mid_date.signed_duration_since(epoch).num_days();
     let mid_time = local_b.rem_euclid(DAY);
     let mid_offset = match resolve_offset(&TzSpec::Named(tz), mid_day, mid_time as i64) {
         Ok(o) => o as i128,
@@ -6118,15 +6059,8 @@ fn named_zone_calendar_difference(
 
 /// Move a date by whole months, clamping the day into the target month —
 /// 31 January plus one month is 28 February.
-fn shift_months_clamped(
-    d: chrono::NaiveDate,
-    months: i64,
-) -> Result<chrono::NaiveDate, ExecutionError> {
-    use chrono::Datelike;
-    let total = d.year() as i64 * 12 + d.month0() as i64 + months;
-    let (y, m0) = (total.div_euclid(12), total.rem_euclid(12));
-    let last = days_in_month(y as i32, m0 as u32 + 1);
-    chrono::NaiveDate::from_ymd_opt(y as i32, m0 as u32 + 1, d.day().min(last))
+fn shift_months_clamped(days: i64, months: i64) -> Result<i64, ExecutionError> {
+    crate::graph::civil::shift_months_clamped(days, months)
         .ok_or_else(|| ExecutionError::RuntimeError("date out of range".into()))
 }
 
@@ -30277,7 +30211,7 @@ mod filter_sort_single_read {
                 3 => Some(PropertyValue::Float(k as f64 / 7.0 - 20.0)),
                 4 => Some(PropertyValue::String(format!("s{:03}", k % 40))),
                 5 => Some(PropertyValue::Boolean(k % 2 == 0)),
-                6 => Some(PropertyValue::Date(k as i32 % 30)),
+                6 => Some(PropertyValue::Date(k as i64 % 30)),
                 7 => Some(PropertyValue::Array(vec![PropertyValue::Integer(k as i64 % 4)])),
                 _ => Some(if k % 4 == 0 { PropertyValue::Float(f64::NAN) } else { PropertyValue::Integer(3) }),
             };

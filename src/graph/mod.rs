@@ -53,6 +53,7 @@
 //! - REQ-MEM-001, REQ-MEM-003: in-memory storage with optimized data structures
 
 pub mod catalog;
+pub mod civil;
 pub mod edge;
 pub mod feature;
 pub mod node;

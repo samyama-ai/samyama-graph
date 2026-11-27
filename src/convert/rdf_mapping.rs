@@ -2333,7 +2333,7 @@ fn lexical_form(v: &PropertyValue) -> Option<(String, &'static str)> {
         PropertyValue::Integer(i) => Some((i.to_string(), "integer")),
         PropertyValue::Float(f) => Some((double_text(*f), "double")),
         PropertyValue::Boolean(b) => Some((b.to_string(), "boolean")),
-        PropertyValue::Date(days) => Some((date_text(*days as i64)?, "date")),
+        PropertyValue::Date(days) => Some((date_text(*days)?, "date")),
         PropertyValue::LocalDateTime { secs, nanos } => {
             Some((clock_text(*secs, *nanos)?, "dateTime"))
         }

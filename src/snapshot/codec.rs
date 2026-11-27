@@ -139,7 +139,7 @@ pub fn json_to_property(val: &serde_json::Value) -> PropertyValue {
                     }
                     "Date" => {
                         if let Some(d) = obj.get("days").and_then(|v| v.as_i64()) {
-                            return PropertyValue::Date(d as i32);
+                            return PropertyValue::Date(d);
                         }
                     }
                     "LocalTime" => {

@@ -477,7 +477,7 @@ fn days(y: i32, m: u32, d: u32) -> i64 {
 #[test]
 fn date_components() {
     // 2017-11-11 is a Saturday in ISO week 45.
-    let d = PropertyValue::Date(days(2017, 11, 11) as i32);
+    let d = PropertyValue::Date(days(2017, 11, 11));
     let get = |k: &str| temporal_property(&d, k).unwrap();
     assert_eq!(get("year"), int(2017));
     assert_eq!(get("month"), int(11));
@@ -574,7 +574,9 @@ fn non_temporal_values_have_no_components() {
 
 #[test]
 fn out_of_range_date_components_are_null() {
-    let d = PropertyValue::Date(i32::MAX);
+    // Past +999999999-12-31. (`i32::MAX` days used to be the example; it is
+    // year 5,881,580 and now has components, #1009.)
+    let d = PropertyValue::Date(crate::graph::civil::MAX_DAY + 1);
     assert_eq!(temporal_property(&d, "year").unwrap(), PropertyValue::Null);
     assert_eq!(
         temporal_property(&d, "dayOfQuarter").unwrap(),
