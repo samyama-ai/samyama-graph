@@ -6885,6 +6885,20 @@ pub trait PhysicalOperator: Send {
         Vec::new()
     }
 
+    /// Confine this operator to a named subgraph (#337). Returns whether it
+    /// can run inside one.
+    ///
+    /// `false` by default, so an operator nobody has reviewed for a view is
+    /// refused rather than run over the whole graph: a scoped query fails
+    /// closed. An operator that reads the graph itself (a scan, an expand)
+    /// keeps the scope and enforces it; one that only reshapes rows its
+    /// children produced returns `true` and does nothing. Called once per
+    /// operator by [`restrict_plan_to_subgraph`], which also walks the
+    /// children, so an implementation does not recurse.
+    fn restrict_to_subgraph(&mut self, _scope: &SubgraphScopeRef) -> bool {
+        false
+    }
+
     /// Whether this operator can take over the `Filter` directly above it and
     /// test rows as it produces them (#1615). See [`fuse_scan_filters`].
     fn can_absorb_filter(&self) -> bool {
@@ -7319,6 +7333,67 @@ pub fn undescribed_plan_lines(plan_text: &str) -> Vec<String> {
 /// Type alias for boxed operators
 pub type OperatorBox = Box<dyn PhysicalOperator>;
 
+/// A compiled named subgraph, shared by every operator of a scoped plan.
+pub type SubgraphScopeRef = std::sync::Arc<crate::graph::subgraph::SubgraphScope>;
+
+/// Confine every operator of a plan to a named subgraph (#337).
+///
+/// Refuses the plan if any operator cannot run inside one, or if an operator
+/// holds children its [`PhysicalOperator::children_mut`] does not hand out --
+/// a child the walk cannot reach is a child that would read the whole graph.
+pub fn restrict_plan_to_subgraph(slot: &mut OperatorBox, scope: &SubgraphScopeRef) -> ExecutionResult<()> {
+    let described = slot.describe();
+    let refuse = || {
+        ExecutionError::PlanningError(format!(
+            "{} is not supported inside a named subgraph yet; run the query against the tenant graph",
+            described.name
+        ))
+    };
+    if !slot.restrict_to_subgraph(scope) {
+        return Err(refuse());
+    }
+    let children = slot.children_mut();
+    if children.len() != described.children.len() {
+        return Err(refuse());
+    }
+    for child in children {
+        restrict_plan_to_subgraph(child, scope)?;
+    }
+    Ok(())
+}
+
+/// The scope's relationship types, kept to those `requested` names, for an
+/// expand to walk instead of every type (#337). `requested` empty means every
+/// type, so the scope's own list replaces it. An intersection that comes out
+/// empty is left as it was: an empty list means "any type" to the operators,
+/// and the per-edge check already rejects every edge of a type outside the
+/// view.
+fn scoped_edge_types(requested: &mut Vec<String>, scope: &SubgraphScopeRef) {
+    let scoped = &scope.definition().edge_types;
+    if scoped.is_empty() {
+        return;
+    }
+    if requested.is_empty() {
+        *requested = scoped.clone();
+        return;
+    }
+    let kept: Vec<String> = requested.iter().filter(|t| scoped.contains(t)).cloned().collect();
+    if !kept.is_empty() {
+        *requested = kept;
+    }
+}
+
+/// Operators that only reshape the rows their children produce: they read no
+/// node or relationship the children did not hand them, so a view needs
+/// nothing from them.
+macro_rules! row_operator_in_subgraph {
+    () => {
+        fn restrict_to_subgraph(&mut self, _scope: &SubgraphScopeRef) -> bool {
+            true
+        }
+    };
+}
+
 /// Selectivity assumed for an equality whose statistics are not to hand.
 const EQUALITY_SELECTIVITY: f64 = 0.1;
 /// Selectivity assumed for a range comparison.
@@ -7441,6 +7516,8 @@ pub struct NodeScanOperator {
     retained: Option<Vec<Option<PropertyValue>>>,
     /// Nodes the fused filter tested since `take_internal_rows` last asked.
     tested: usize,
+    /// The named subgraph this scan is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 impl NodeScanOperator {
@@ -7457,6 +7534,7 @@ impl NodeScanOperator {
             filter: None,
             retained: None,
             tested: 0,
+            subgraph: None,
         }
     }
 
@@ -7471,6 +7549,34 @@ impl NodeScanOperator {
             return;
         }
         self.initialized = true;
+
+        // Inside a named subgraph (#337) the candidates are the view's own
+        // labels, not every node, and the view's predicates are applied here
+        // rather than by a filter above: an early limit has to count members,
+        // and a limit taken before the membership test would count nodes the
+        // view excludes.
+        if let Some(scope) = self.subgraph.clone() {
+            let mut ids: Vec<NodeId> = match self.labels.first() {
+                None => store.subgraph_node_ids(&scope),
+                Some(first) => {
+                    let mut ids: Vec<NodeId> = store
+                        .node_ids_by_label(first, None)
+                        .into_iter()
+                        .filter(|id| {
+                            store.get_node(*id).is_some_and(|n| self.labels.iter().all(|l| n.has_label(l)))
+                                && scope.contains_node(store, *id)
+                        })
+                        .collect();
+                    ids.sort_unstable_by_key(|id| id.as_u64());
+                    ids
+                }
+            };
+            if let Some(limit) = self.early_limit {
+                ids.truncate(limit);
+            }
+            self.node_ids = ids;
+            return;
+        }
 
         // Three cases:
         //   1. No labels  → scan all nodes (rare)
@@ -7545,6 +7651,12 @@ impl NodeScanOperator {
 }
 
 impl PhysicalOperator for NodeScanOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        self.initialized = false;
+        true
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.initialize(store);
 
@@ -8435,6 +8547,8 @@ impl FilterOperator {
 }
 
 impl PhysicalOperator for FilterOperator {
+    row_operator_in_subgraph!();
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -8873,6 +8987,8 @@ pub struct ExpandOperator {
     fused_close: Option<FusedClose>,
     /// The closing edge of each entry of `current_edges`, when fused.
     current_close_edges: Vec<crate::graph::EdgeId>,
+    /// The named subgraph this expand is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 /// The closing hop a fused expand binds. See `ExpandOperator::fused_close`.
@@ -8919,6 +9035,7 @@ impl ExpandOperator {
             edge_index: 0,
             path_variable: None,
             type_ids: None,
+            subgraph: None,
         }
     }
 
@@ -9163,6 +9280,15 @@ impl ExpandOperator {
         let node_id = source_val.node_id()
             .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", self.source_var)))?;
 
+        // A source outside the view has no relationships in it (#337).
+        let subgraph = self.subgraph.clone();
+        if subgraph.as_ref().is_some_and(|s| !s.contains_node(store, node_id)) {
+            self.current_edges.clear();
+            self.current_close_edges.clear();
+            self.edge_index = 0;
+            return Ok(());
+        }
+
         // Filter on the interned edge-type id *during* the adjacency walk, and
         // resolve the `EdgeType` string only for the edges that survive.
         //
@@ -9374,6 +9500,12 @@ impl ExpandOperator {
             .filter_map(|c| Some((c, eval_expression(&c.bound, record, store).ok()?)))
             .collect();
         let keeps = |target: NodeId, eid: crate::graph::EdgeId| -> bool {
+            // The induced-edge rule: the type and the far end in the view.
+            if let Some(scope) = &subgraph {
+                if !scope.contains_edge_to(store, eid, target) {
+                    return false;
+                }
+            }
             // A closing hop can only land on the node it closes onto.
             if let Some(p) = pinned_target {
                 if target != p {
@@ -9469,17 +9601,28 @@ impl ExpandOperator {
         let closing_edges = |target: NodeId, eid: crate::graph::EdgeId, out: &mut Vec<crate::graph::EdgeId>| {
             out.clear();
             let Some(c) = co_node else { return };
+            if subgraph.as_ref().is_some_and(|s| !s.contains_node(store, c)) {
+                return;
+            }
             if close_via_index {
                 for list in &co_lists {
                     for &(_, e2) in pinned_run(list, target) {
-                        if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
+                        if e2 != eid
+                            && !used_edges.contains(&e2)
+                            && !out.contains(&e2)
+                            && subgraph.as_ref().is_none_or(|s| s.contains_edge_to(store, e2, c))
+                        {
                             out.push(e2);
                         }
                     }
                 }
             } else {
                 let mut keep = |e2: crate::graph::EdgeId| {
-                    if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
+                    if e2 != eid
+                        && !used_edges.contains(&e2)
+                        && !out.contains(&e2)
+                        && subgraph.as_ref().is_none_or(|s| s.contains_edge_to(store, e2, c))
+                    {
                         out.push(e2);
                     }
                 };
@@ -9623,6 +9766,13 @@ impl ExpandOperator {
 }
 
 impl PhysicalOperator for ExpandOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        scoped_edge_types(&mut self.edge_types, scope);
+        self.type_ids = None;
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        true
+    }
+
     fn estimate_rows(&self, store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         let input = children.first().copied().flatten()?;
         let nodes = store.node_count().max(1) as f64;
@@ -9976,6 +10126,8 @@ pub struct VarLengthExpandOperator {
     in_index: std::cell::RefCell<Option<(u64, Option<std::sync::Arc<crate::graph::TypeAdjacency>>)>>,
     /// Neighbour walks so far, against `TYPE_INDEX_AFTER_WALKS`.
     type_walks: std::cell::Cell<usize>,
+    /// The named subgraph this walk is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 impl VarLengthExpandOperator {
@@ -10021,6 +10173,7 @@ impl VarLengthExpandOperator {
             out_index: std::cell::RefCell::new(None),
             in_index: std::cell::RefCell::new(None),
             type_walks: std::cell::Cell::new(0),
+            subgraph: None,
         }
     }
 
@@ -10062,6 +10215,14 @@ impl VarLengthExpandOperator {
 
     /// Does this edge satisfy the segment's inline property constraints?
     fn edge_props_ok(&self, eid: crate::graph::EdgeId, store: &GraphStore) -> bool {
+        // Inside a named subgraph every hop is checked against the view
+        // (#337). The far end is checked by the walk's visit wrapper, which
+        // knows it; here the edge's own endpoints are read.
+        if let Some(scope) = &self.subgraph {
+            if !scope.contains_edge(store, eid) {
+                return false;
+            }
+        }
         if self.edge_properties.is_empty() {
             return true;
         }
@@ -10259,6 +10420,7 @@ impl VarLengthExpandOperator {
         out_index: Option<&crate::graph::TypeAdjacency>,
         in_index: Option<&crate::graph::TypeAdjacency>,
         edge_properties: &std::collections::HashMap<String, PropertyValue>,
+        subgraph: Option<&SubgraphScopeRef>,
         store: &GraphStore,
         visit: &mut impl FnMut(NodeId),
     ) {
@@ -10267,6 +10429,9 @@ impl VarLengthExpandOperator {
         // pattern excludes -- and the two would then disagree about the same
         // question depending on which end the planner anchored.
         let mut with_edge = |nb: NodeId, e: crate::graph::EdgeId| {
+            if subgraph.is_some_and(|s| !s.contains_edge(store, e)) {
+                return;
+            }
             if edge_properties.is_empty()
                 || edge_properties
                     .iter()
@@ -10523,7 +10688,7 @@ impl VarLengthExpandOperator {
             let mut reach: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
             let mut visited: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
             visited.insert(target);
-            if self.min_hops == 0 {
+            if self.min_hops == 0 && self.subgraph.as_ref().is_none_or(|s| s.contains_node(store, target)) {
                 reach.insert(target);
             }
             let mut frontier = vec![target];
@@ -10532,7 +10697,7 @@ impl VarLengthExpandOperator {
                 depth += 1;
                 let mut next = Vec::new();
                 for &cur in &frontier {
-                    Self::neighbors_in(cur, type_filter, &reversed, out_index.as_deref(), in_index.as_deref(), &self.edge_properties, store, &mut |nb| {
+                    Self::neighbors_in(cur, type_filter, &reversed, out_index.as_deref(), in_index.as_deref(), &self.edge_properties, self.subgraph.as_ref(), store, &mut |nb| {
                         if visited.insert(nb) {
                             next.push(nb);
                             if depth >= self.min_hops {
@@ -11286,6 +11451,13 @@ fn reconstruct_path(
 }
 
 impl PhysicalOperator for VarLengthExpandOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        scoped_edge_types(&mut self.edge_types, scope);
+        self.type_ids = None;
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        true
+    }
+
     // A write beneath this operator refused with "requires mutable store
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
@@ -11637,6 +11809,8 @@ impl ProjectOperator {
 }
 
 impl PhysicalOperator for ProjectOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -12269,6 +12443,26 @@ impl AggregatorState {
     }
 }
 
+/// Rows an aggregate pulls from its input at a time (#2274).
+///
+/// An aggregate keeps only its group table; what it holds of its *input* is
+/// the one batch it is folding. That batch was 65,536 rows, which made the
+/// batch, not the aggregate, the peak: `MATCH (a:P)-[:R]->(b) RETURN count(b)`
+/// returned one row and peaked at 13.9 MB on 300,000 edges, which is 65,536
+/// records at about 212 bytes each, and the 2- and 3-hop counts at 20.4 and
+/// 25.0 MB as the records widened (`docs/QUERY-MEMORY.md`, finding 3). The
+/// 3-hop count folds 2.7 million rows, so a peak of 25 MB was never the whole
+/// expansion; it was one batch of it.
+///
+/// 4,096 rows bounds that batch at about 0.9 MB for the 1-hop count and
+/// 1.6 MB for the 3-hop, whatever the row count, and is still large enough
+/// that the per-batch costs -- a
+/// `Vec`, a call through the operator tree, the parallel record build in a
+/// scan, which starts at 1,024 rows -- stay amortised. The deadline is checked
+/// every ten batches, so it is now checked every 40,960 rows rather than every
+/// 655,360.
+const AGGREGATE_BATCH_ROWS: usize = 4096;
+
 /// Aggregate operator: GROUP BY + Aggregations
 pub struct AggregateOperator {
     input: OperatorBox,
@@ -12379,6 +12573,8 @@ impl AggregateOperator {
 }
 
 impl PhysicalOperator for AggregateOperator {
+    row_operator_in_subgraph!();
+
     /// One row per group, built before the first is returned.
     fn memory_bytes(&self) -> Option<usize> {
         self.peak_bytes
@@ -12666,7 +12862,7 @@ impl AggregateOperator {
         let mut groups: rustc_hash::FxHashMap<IdentityKey, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::default();
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12774,7 +12970,7 @@ impl AggregateOperator {
         // Probing first means the allocation happens once per group.
         let mut scratch: Vec<Value> = Vec::with_capacity(self.group_by.len());
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12837,7 +13033,7 @@ impl AggregateOperator {
 
         let all_simple_count = Self::all_simple_count(&self.aggregates);
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12894,7 +13090,7 @@ impl AggregateOperator {
         let mut readers: Vec<RowReader> =
             self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -13771,6 +13967,8 @@ impl EagerOperator {
 }
 
 impl PhysicalOperator for EagerOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -13872,6 +14070,8 @@ impl BindPathOperator {
 }
 
 impl PhysicalOperator for BindPathOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -13918,6 +14118,8 @@ impl LimitOperator {
 }
 
 impl PhysicalOperator for LimitOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         Some(children.first().copied().flatten()?.min(self.limit as f64))
     }
@@ -14216,12 +14418,11 @@ impl SortOperator {
     ///
     /// `select_nth_unstable_by` partitions in O(n) rather than sorting, so
     /// trimming a buffer is cheaper than sorting it and is done repeatedly as
-    /// the input streams in. Rows tied with the k-th are dropped along with
-    /// the rest of the tail; Cypher does not define a tie-break for
-    /// `ORDER BY … LIMIT`, so any k of a tied set is a valid answer, but two
-    /// runs may therefore disagree about *which* — the same latitude the
-    /// unstable sort below already takes.
-    fn trim_to(keyed: &mut Vec<(SortKey<'_>, Record)>, k: usize, items: &[(Expression, bool)]) {
+    /// the input streams in. A full tie is broken by the row's input position,
+    /// as the unbounded sort breaks it, so the rows kept are exactly the first
+    /// `k` the unbounded sort would return -- whatever the batch sizes, and
+    /// however often the buffer is trimmed (#2275).
+    fn trim_to(keyed: &mut Vec<(SortKey<'_>, usize, Record)>, k: usize, items: &[(Expression, bool)]) {
         if k == 0 {
             keyed.clear();
             return;
@@ -14229,8 +14430,17 @@ impl SortOperator {
         if keyed.len() <= k {
             return;
         }
-        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items));
+        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_ranked(a, b, items));
         keyed.truncate(k);
+    }
+
+    /// The bounded sort's total order: the key, then the input position.
+    fn cmp_ranked(
+        a: &(SortKey<'_>, usize, Record),
+        b: &(SortKey<'_>, usize, Record),
+        items: &[(Expression, bool)],
+    ) -> std::cmp::Ordering {
+        Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items).then(a.1.cmp(&b.1))
     }
 
     /// The row order for a key whose every part, in every row, is a non-null
@@ -14485,6 +14695,8 @@ impl SortOperator {
 }
 
 impl PhysicalOperator for SortOperator {
+    row_operator_in_subgraph!();
+
     /// Every input row, held to be ordered.
     fn memory_bytes(&self) -> Option<usize> {
         self.peak_bytes
@@ -14738,29 +14950,39 @@ impl SortOperator {
             return Ok(());
         }
 
-        let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::new();
-        while let Some(batch) = self.input.next_batch(store, batch_size)? {
-            keyed.reserve(batch.records.len());
+        // Rows are fed into the top-k as they arrive, and the input is asked
+        // for batches no larger than the working size. Pulling 65,536 rows at
+        // a time held that many *projected* rows -- in the input's batch and
+        // again in the buffer -- before the first trim: a top-10 over 100,000
+        // rows peaked at 60% of sorting all of them (#2275). Now the buffer
+        // holds at most `trim_at` rows and a batch at most as many again.
+        let (Some(k), Some(trim_at)) = (bound, trim_at) else {
+            unreachable!("the unbounded sort returned above")
+        };
+        let pull = trim_at.min(batch_size);
+        let mut keyed: Vec<(SortKey<'_>, usize, Record)> = Vec::new();
+        let mut seq = 0usize;
+        while let Some(batch) = self.input.next_batch(store, pull)? {
             let mut known = known_values(&mut self.input, batch.records.len());
             for record in batch.records {
-                let k = retained_key.zip(known.next().flatten());
-                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store, k)?;
-                keyed.push((key, record));
-            }
-            if let (Some(k), Some(threshold)) = (bound, trim_at) {
-                if keyed.len() >= threshold {
+                let r = retained_key.zip(known.next().flatten());
+                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store, r)?;
+                keyed.push((key, seq, record));
+                seq += 1;
+                // Per row, not per batch, so an input that ignores the batch
+                // size still cannot grow the buffer past the working size.
+                if keyed.len() >= trim_at {
                     Self::trim_to(&mut keyed, k, &self.sort_items);
                 }
             }
         }
-        if let Some(k) = bound {
-            Self::trim_to(&mut keyed, k, &self.sort_items);
-        }
+        Self::trim_to(&mut keyed, k, &self.sort_items);
 
         let sort_items = &self.sort_items;
-        keyed.sort_by(|a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), sort_items));
+        // A total order (key, then input position), so unstable is exact.
+        keyed.sort_unstable_by(|a, b| Self::cmp_ranked(a, b, sort_items));
 
-        self.records = keyed.into_iter().map(|(_, record)| record).collect();
+        self.records = keyed.into_iter().map(|(_, _, record)| record).collect();
         self.sorted_upto = self.records.len();
         self.executed = true;
         Ok(())
@@ -14946,6 +15168,8 @@ pub struct IndexScanOperator {
     /// missed `Float(150.0)`: `PropertyValue::cmp` orders `Integer(n)` just
     /// below `Float(n)`, and an exact bound on one variant cuts the other off.
     loose: bool,
+    /// The named subgraph this scan is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 /// The value at the low end of `v`'s numeric tie (`Integer(n)` for `n` or
@@ -15014,6 +15238,7 @@ impl IndexScanOperator {
             satisfied,
             other_end: None,
             loose: false,
+            subgraph: None,
         }
     }
 
@@ -15069,6 +15294,11 @@ impl IndexScanOperator {
 }
 
 impl PhysicalOperator for IndexScanOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        true
+    }
+
     fn estimate_rows(&self, store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
         let stats = store.statistics();
         let selectivity = match self.op {
@@ -15111,7 +15341,7 @@ impl PhysicalOperator for IndexScanOperator {
             let node_id = self.node_ids[self.current];
             self.current += 1;
 
-            if store.has_node(node_id) {
+            if store.has_node(node_id) && self.subgraph.as_ref().is_none_or(|s| s.contains_node(store, node_id)) {
                 let mut record = Record::new();
                 record.bind(self.variable.clone(), Value::NodeRef(node_id));
                 return Ok(Some(record));
@@ -15133,7 +15363,7 @@ impl PhysicalOperator for IndexScanOperator {
             let node_id = self.node_ids[self.current];
             self.current += 1;
 
-            if store.has_node(node_id) {
+            if store.has_node(node_id) && self.subgraph.as_ref().is_none_or(|s| s.contains_node(store, node_id)) {
                 let mut record = Record::new();
                 record.bind(self.variable.clone(), Value::NodeRef(node_id));
                 records.push(record);
@@ -15543,6 +15773,8 @@ impl CartesianProductOperator {
 }
 
 impl PhysicalOperator for CartesianProductOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         match children {
             [Some(l), Some(r)] => Some(l * r),
@@ -15800,6 +16032,8 @@ impl JoinOperator {
 }
 
 impl PhysicalOperator for JoinOperator {
+    row_operator_in_subgraph!();
+
     /// The hashed left side and the buffered right side.
     fn memory_bytes(&self) -> Option<usize> {
         self.peak_bytes
@@ -16059,6 +16293,8 @@ impl LeftOuterJoinOperator {
 }
 
 impl PhysicalOperator for LeftOuterJoinOperator {
+    row_operator_in_subgraph!();
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.left, &mut self.right]
     }
@@ -16906,6 +17142,8 @@ impl DistinctOperator {
 }
 
 impl PhysicalOperator for DistinctOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -18537,6 +18775,8 @@ impl SingleRowOperator {
 }
 
 impl PhysicalOperator for SingleRowOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
         Some(1.0)
     }
@@ -18574,6 +18814,8 @@ impl MaterializedOperator {
 }
 
 impl PhysicalOperator for MaterializedOperator {
+    row_operator_in_subgraph!();
+
     fn is_materialized(&self) -> bool {
         true
     }
@@ -23827,6 +24069,8 @@ impl SkipOperator {
 }
 
 impl PhysicalOperator for SkipOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         Some((children.first().copied().flatten()? - self.skip as f64).max(0.0))
     }
@@ -24589,6 +24833,8 @@ impl UnwindOperator {
 }
 
 impl PhysicalOperator for UnwindOperator {
+    row_operator_in_subgraph!();
+
     // A write beneath this operator refused with "requires mutable store
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
@@ -26610,7 +26856,7 @@ impl WithBarrierOperator {
             // Aggregation path: group by non-aggregate items
             let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
 
-            let batch_size = 65536;
+            let batch_size = AGGREGATE_BATCH_ROWS;
             while let Some(batch) = self.input.next_batch(store, batch_size)? {
                 for record in batch.records {
                     let mut key = Vec::new();
@@ -26807,6 +27053,8 @@ impl WithBarrierOperator {
 }
 
 impl PhysicalOperator for WithBarrierOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -26909,6 +27157,8 @@ pub struct ExpandIntoOperator {
     edge_binding: Option<String>,
     /// The current input record and the edges still to emit it with.
     pending: Option<(Record, std::vec::IntoIter<crate::graph::EdgeId>)>,
+    /// The named subgraph this check is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 impl ExpandIntoOperator {
@@ -26926,11 +27176,17 @@ impl ExpandIntoOperator {
             edge_type,
             edge_binding,
             pending: None,
+            subgraph: None,
         }
     }
 }
 
 impl PhysicalOperator for ExpandIntoOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        true
+    }
+
     // A write beneath this operator refused with "requires mutable store
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
@@ -26985,7 +27241,10 @@ impl PhysicalOperator for ExpandIntoOperator {
                 .ok_or_else(|| ExecutionError::VariableNotFound(self.target_binding.clone()))?;
 
             let et = self.edge_type.as_ref().map(|t| EdgeType::new(t.as_str()));
-            let edges = store.edges_between(source_id, target_id, et.as_ref());
+            let mut edges = store.edges_between(source_id, target_id, et.as_ref());
+            if let Some(scope) = &self.subgraph {
+                edges.retain(|e| scope.contains_edge(store, *e));
+            }
             // None -- the record is filtered out, and the next one tried.
             if !edges.is_empty() {
                 self.pending = Some((record, edges.into_iter()));
@@ -27041,6 +27300,8 @@ pub struct NodeByIdOperator {
     /// id(n) = 5` would otherwise match a node of any label that happens to
     /// hold that id (#538).
     labels: Vec<Label>,
+    /// The named subgraph this lookup is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 impl NodeByIdOperator {
@@ -27050,6 +27311,7 @@ impl NodeByIdOperator {
             position: 0,
             variable,
             labels: Vec::new(),
+            subgraph: None,
         }
     }
 
@@ -27061,6 +27323,11 @@ impl NodeByIdOperator {
 }
 
 impl PhysicalOperator for NodeByIdOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        true
+    }
+
     fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
         Some(self.node_ids.len() as f64)
     }
@@ -27072,7 +27339,10 @@ impl PhysicalOperator for NodeByIdOperator {
 
             // Verify the node still exists and carries the pattern's labels.
             let matches = match store.get_node(node_id) {
-                Some(node) => self.labels.iter().all(|l| node.has_label(l)),
+                Some(node) => {
+                    self.labels.iter().all(|l| node.has_label(l))
+                        && self.subgraph.as_ref().is_none_or(|s| s.contains_node(store, node_id))
+                }
                 None => false,
             };
             if matches {

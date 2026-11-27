@@ -7841,7 +7841,7 @@
       "query": "RETURN 1"
     },
     "response": {
-      "error": "This build serves a single graph ('default'); the requested graph 'no_such_graph' does not exist and the argument cannot be honoured. Previously it was ignored and the query silently ran against 'default', merging datasets. Omit the argument, or use a separate data directory per dataset.",
+      "error": "This build serves a single graph ('default'); the requested graph 'no_such_graph' does not exist, no named subgraph has that name, and the argument cannot be honoured. Previously it was ignored and the query silently ran against 'default', merging datasets. Omit the argument, or use a separate data directory per dataset.",
       "graph": "no_such_graph"
     },
     "status": 400
