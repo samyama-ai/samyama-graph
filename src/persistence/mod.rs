@@ -57,7 +57,7 @@ pub mod tenant;
 pub mod wal;
 pub mod writer;
 
-pub use storage::{PersistentStorage, StorageError, StorageResult};
+pub use storage::{PersistentStorage, StallStats, StorageError, StorageResult};
 pub use tenant::{
     ConnectionSlot, ResourceQuotas, ResourceUsage, Tenant, TenantError, TenantManager, TenantResult,
     AutoEmbedConfig, NLQConfig, AgentConfig, ToolConfig, LLMProvider,

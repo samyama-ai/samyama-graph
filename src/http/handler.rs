@@ -1452,6 +1452,55 @@ pub async fn algorithm_catalog_handler() -> impl IntoResponse {
     Json(json!({ "count": algorithms.len(), "algorithms": algorithms }))
 }
 
+/// The RocksDB stall gauges `/metrics` serves (#2128). Gauges: each is the
+/// state at the moment of the scrape, not a count over time.
+fn render_rocksdb_stalls(s: &crate::persistence::StallStats) -> String {
+    let rows: [(&str, &str, u64); 7] = [
+        (
+            "samyama_rocksdb_write_stopped",
+            "1 while RocksDB has stopped writes until a flush or compaction catches up (rocksdb.is-write-stopped). A write statement holds the graph write lock while it waits.",
+            u64::from(s.write_stopped),
+        ),
+        (
+            "samyama_rocksdb_delayed_write_rate_bytes",
+            "Rate RocksDB is throttling writes to, bytes per second; 0 when writes are not delayed (rocksdb.actual-delayed-write-rate).",
+            s.delayed_write_rate,
+        ),
+        (
+            "samyama_rocksdb_l0_files",
+            "Level-0 SST files in the fullest column family (rocksdb.num-files-at-level0). Writes slow at 20 and stop at 36 by default.",
+            s.l0_files,
+        ),
+        (
+            "samyama_rocksdb_pending_compaction_bytes",
+            "Estimated bytes compaction must rewrite, over all column families (rocksdb.estimate-pending-compaction-bytes).",
+            s.pending_compaction_bytes,
+        ),
+        (
+            "samyama_rocksdb_running_compactions",
+            "Compactions running now (rocksdb.num-running-compactions).",
+            s.running_compactions,
+        ),
+        (
+            "samyama_rocksdb_running_flushes",
+            "Memtable flushes running now (rocksdb.num-running-flushes).",
+            s.running_flushes,
+        ),
+        (
+            "samyama_rocksdb_immutable_memtables",
+            "Full memtables waiting to be flushed, over all column families (rocksdb.num-immutable-mem-table).",
+            s.immutable_memtables,
+        ),
+    ];
+    let mut out = String::new();
+    for (name, help, value) in rows {
+        out.push_str(&format!(
+            "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {value}\n"
+        ));
+    }
+    out
+}
+
 /// `GET /metrics` — Prometheus text exposition (REL-10).
 ///
 /// Hand-rolled rather than pulling in a metrics crate: what is exported here
@@ -1595,6 +1644,13 @@ pub async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse
              samyama_active_connections {}\n",
             usage.active_connections
         ));
+    }
+    // RocksDB's write back-pressure (#2128). A write statement persists while
+    // it holds the graph's write lock, so a stalled RocksDB write is time
+    // every reader waits; these say whether that is happening. Absent on a
+    // server with no persistence, which has no RocksDB to ask.
+    if let Some(pm) = state.persistence.as_ref() {
+        out.push_str(&render_rocksdb_stalls(&pm.storage().stall_stats()));
     }
     // Query latency last, because it is the part an operator opens this page
     // for. Everything above describes the graph; this describes what asking it

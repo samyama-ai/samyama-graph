@@ -125,6 +125,33 @@ impl RowBatch {
     }
 }
 
+/// The column families [`PersistentStorage::open`] creates.
+const COLUMN_FAMILIES: [&str; 4] = ["default", "nodes", "edges", "indices"];
+
+/// What [`PersistentStorage::stall_stats`] reads (#2128).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StallStats {
+    /// `rocksdb.is-write-stopped`: writes are blocked outright until a flush
+    /// or compaction catches up.
+    pub write_stopped: bool,
+    /// `rocksdb.actual-delayed-write-rate`, bytes per second; 0 when writes
+    /// are not being delayed.
+    pub delayed_write_rate: u64,
+    /// `rocksdb.num-files-at-level0`, the largest over the column families.
+    /// Past `level0_slowdown_writes_trigger` (20 by default) writes are
+    /// delayed, past `level0_stop_writes_trigger` (36) stopped.
+    pub l0_files: u64,
+    /// `rocksdb.estimate-pending-compaction-bytes`, summed.
+    pub pending_compaction_bytes: u64,
+    /// `rocksdb.num-running-compactions`.
+    pub running_compactions: u64,
+    /// `rocksdb.num-running-flushes`.
+    pub running_flushes: u64,
+    /// `rocksdb.num-immutable-mem-table`, summed: memtables full and waiting
+    /// to be flushed. At `max_write_buffer_number - 1` writes stall.
+    pub immutable_memtables: u64,
+}
+
 /// RocksDB-based persistent storage
 pub struct PersistentStorage {
     /// RocksDB instance
@@ -181,6 +208,7 @@ impl PersistentStorage {
         opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::PointInTime);
 
         // Define column families
+        // The same names as `COLUMN_FAMILIES`.
         let cf_descriptors = vec![
             ColumnFamilyDescriptor::new("default", Options::default()),
             ColumnFamilyDescriptor::new("nodes", Self::node_cf_options()),
@@ -484,6 +512,49 @@ impl PersistentStorage {
         self.db.flush()?;
         debug!("Flushed storage to disk");
         Ok(())
+    }
+
+    /// RocksDB's own account of write back-pressure, read now (#2128).
+    ///
+    /// Every write statement persists while it holds the graph's write lock,
+    /// so a RocksDB write that is slowed or stopped is time every reader
+    /// spends waiting. These are the properties that say whether that is
+    /// happening: the database-wide stall state, and the per-column-family
+    /// causes of it summed (or, for L0, the worst) over the column families
+    /// this storage opens. A property this RocksDB does not report reads as 0.
+    pub fn stall_stats(&self) -> StallStats {
+        use rocksdb::properties as p;
+        let db_int = |name: &rocksdb::properties::PropName| {
+            self.db.property_int_value(name).ok().flatten().unwrap_or(0)
+        };
+        let mut stats = StallStats {
+            write_stopped: db_int(p::IS_WRITE_STOPPED) != 0,
+            delayed_write_rate: db_int(p::ACTUAL_DELAYED_WRITE_RATE),
+            running_compactions: db_int(p::NUM_RUNNING_COMPACTIONS),
+            running_flushes: db_int(p::NUM_RUNNING_FLUSHES),
+            ..StallStats::default()
+        };
+        let l0 = p::num_files_at_level(0);
+        for name in COLUMN_FAMILIES {
+            let Some(cf) = self.db.cf_handle(name) else { continue };
+            let cf_int = |prop: &rocksdb::properties::PropName| {
+                self.db.property_int_value_cf(&cf, prop).ok().flatten().unwrap_or(0)
+            };
+            stats.l0_files = stats.l0_files.max(cf_int(&l0));
+            stats.pending_compaction_bytes += cf_int(p::ESTIMATE_PENDING_COMPACTION_BYTES);
+            stats.immutable_memtables += cf_int(p::NUM_IMMUTABLE_MEM_TABLE);
+        }
+        stats
+    }
+
+    /// RocksDB's database-wide statistics text (`rocksdb.dbstats`), which
+    /// carries the cumulative and interval write-stall time. For a report, not
+    /// for parsing: the format is RocksDB's and changes between versions.
+    pub fn db_stats_text(&self) -> Option<String> {
+        self.db
+            .property_value(rocksdb::properties::DBSTATS)
+            .ok()
+            .flatten()
     }
 
     /// Write a tenant's index declarations (#1477).

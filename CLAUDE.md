@@ -40,6 +40,7 @@ cargo bench --bench ldbc_benchmark -- --derive-params 50 # parameters valid for 
 cargo bench --bench ldbc_bi_benchmark          # LDBC SNB BI queries (needs data)
 cargo bench --bench finbench_benchmark         # LDBC FinBench queries (synthetic data)
 cargo bench --bench hierarchy_benchmark        # OEH index: build, order test, roll-up vs subtree size
+cargo bench --bench rocksdb_write_stalls       # Read latency while persisting writes stall RocksDB
 
 # Run examples
 cargo run --example banking_demo              # Banking fraud detection + NLQ
@@ -237,7 +238,7 @@ Benchmarks are the opposite — always `--release`, on a quiet host, with the
 calibration line compared before the timings (#529).
 
 - **Unit and integration tests** across the workspace; `scripts/coverage.sh` measures coverage for the current checkout.
-- **35 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
+- **36 benchmark binaries** in `benches/` (Criterion micro-benchmarks + domain benchmarks)
 - **Integration tests**: Rust suites in `tests/` and Python scripts in `tests/integration/`
 - **20 demos on built-in data** in `examples/`
 - **17 dataset loaders and post-processing passes** in `examples/`
