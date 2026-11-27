@@ -192,6 +192,11 @@ modules of `src/protocol/server.rs` (RESP) and `src/http/transactions.rs` (HTTP)
     than a refusal: `CREATE CONSTRAINT ... IS UNIQUE OPTIONS {onDuplicate: 'update'}`.
     That works without a key, at the cost of making every such `CREATE` an
     upsert.
+  - SDKs: the Rust, Python and TypeScript remote clients send a key of their
+    own with every write and so retry a write whose reply timed out, under
+    the same retry budget as a read. With keys turned off (for a server older
+    than #2176), a write that times out is sent once and reported as a
+    timeout, as #2175 made every write.
 - **Write order**: the log is appended after the memory mutation, not before (§1).
 - **A write that does not reach disk is now reported as a failure**, and the
   process stops accepting writes (#1274). It used to be a `warn!` line and a

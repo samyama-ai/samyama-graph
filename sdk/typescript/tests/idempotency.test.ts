@@ -62,6 +62,16 @@ describe("idempotency keys (#2176)", () => {
     s.close();
   });
 
+  test("with keys off a write carries none", async () => {
+    // For a server older than #2176, which ignores the header; such a write
+    // is never re-sent after a timeout (connection.test.ts).
+    const s = await recorder();
+    const t = new HttpTransport(s.url, { maxRetries: 0, idempotencyKeys: false });
+    await t.query("CREATE (:Plain)");
+    assert.deepEqual(s.keys, [undefined]);
+    s.close();
+  });
+
   test("a caller can choose the key, to send a call again safely", async () => {
     const s = await recorder();
     const client = new SamyamaClient({ url: s.url, maxRetries: 0 });

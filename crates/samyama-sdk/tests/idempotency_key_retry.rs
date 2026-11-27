@@ -111,6 +111,20 @@ async fn each_call_has_its_own_key_and_a_read_has_none() {
     assert_eq!(labelled(&*store.read().await, "Twice"), 2);
 }
 
+/// With keys off -- for a server older than #2176, which would ignore one --
+/// a write carries none, so it is also one the client never re-sends after a
+/// timeout (`a_timed_out_write_without_a_key_is_sent_once`).
+#[tokio::test]
+async fn keys_can_be_turned_off() {
+    let (url, _store, seen) = serve(Duration::ZERO).await;
+    let c = RemoteClient::with_config(
+        &url,
+        ConnectionConfig { max_retries: 0, idempotency_keys: false, ..Default::default() },
+    );
+    c.query("default", "CREATE (:Plain)").await.unwrap();
+    assert_eq!(*seen.lock().unwrap(), vec![None], "a write carried a key with keys off");
+}
+
 /// A caller that got an error it cannot read sends the same call again with
 /// its own key, and the write is not repeated.
 #[tokio::test]

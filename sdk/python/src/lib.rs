@@ -21,8 +21,10 @@ pyo3::create_exception!(
     RequestTimeoutError,
     PyRuntimeError,
     "The server did not answer in time (#2175).\n\n\
-     If the request was a write, the server may or may not have applied it, so \
-     it was not sent again. Retry it only if the statement is safe to run twice \
+     If the request was a write, the server may or may not have applied it. A \
+     write without an idempotency key was not sent again; a keyed one was \
+     retried and still got no answer (#2176). Retry it only under the same key \
+     (query_with_idempotency_key) or if the statement is safe to run twice \
      (MERGE on a key, a write under a unique constraint, SET to a fixed value). \
      A subclass of RuntimeError, so existing `except RuntimeError` handlers \
      still catch it."
@@ -524,9 +526,17 @@ impl SamyamaClient {
     /// is kept before it is closed (`None` keeps them until the server closes
     /// them). `pool_max_idle_per_host=0` turns reuse off: every request opens
     /// a fresh connection.
+    ///
+    /// `idempotency_keys` sends every write with an `Idempotency-Key` of its
+    /// own (#2176), so a write whose reply timed out is retried and still
+    /// applied once. Turn it off for a server older than #2176, which ignores
+    /// the header: writes then carry no key, and a write that times out is
+    /// sent once and raises `RequestTimeoutError` (#2175).
     #[pyo3(signature = (url, timeout_seconds=30.0, connect_timeout_seconds=5.0,
                         max_retries=2, retry_base_delay_ms=100,
-                        pool_max_idle_per_host=8, pool_idle_timeout_seconds=90.0))]
+                        pool_max_idle_per_host=8, pool_idle_timeout_seconds=90.0,
+                        idempotency_keys=true))]
+    #[allow(clippy::too_many_arguments)]
     fn connect(
         url: &str,
         timeout_seconds: Option<f64>,
@@ -535,6 +545,7 @@ impl SamyamaClient {
         retry_base_delay_ms: u64,
         pool_max_idle_per_host: usize,
         pool_idle_timeout_seconds: Option<f64>,
+        idempotency_keys: bool,
     ) -> PyResult<Self> {
         let secs = |v: Option<f64>| -> PyResult<Option<std::time::Duration>> {
             match v {
@@ -555,6 +566,7 @@ impl SamyamaClient {
             retry_base_delay: std::time::Duration::from_millis(retry_base_delay_ms),
             pool_max_idle_per_host,
             pool_idle_timeout: secs(pool_idle_timeout_seconds)?,
+            idempotency_keys,
             ..Default::default()
         };
         Ok(SamyamaClient {

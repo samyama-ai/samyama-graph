@@ -45,6 +45,7 @@ export class SamyamaClient {
       maxRetries: options?.maxRetries,
       retryBaseDelayMs: options?.retryBaseDelayMs,
       maxConnections: options?.maxConnections,
+      idempotencyKeys: options?.idempotencyKeys,
     });
   }
 
@@ -53,7 +54,8 @@ export class SamyamaClient {
    * Factory method for a more readable API.
    *
    * `options` takes the same connection settings as the constructor
-   * (`timeoutMs`, `maxRetries`, `retryBaseDelayMs`, `maxConnections`). Leaving them out keeps
+   * (`timeoutMs`, `maxRetries`, `retryBaseDelayMs`, `maxConnections`,
+   * `idempotencyKeys`). Leaving them out keeps
    * the defaults, which include a 30 s request deadline (#1326).
    */
   static connectHttp(

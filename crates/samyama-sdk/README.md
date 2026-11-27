@@ -48,10 +48,13 @@ let client = EmbeddedClient::new();
 
 Remote — HTTP to a server. `RemoteClient::new` uses `ConnectionConfig::default()`
 (30 s request timeout, 5 s connect timeout, 2 retries with 100 ms base backoff).
-A refused connection is retried for any request. A timeout is retried only for
-requests that cannot write (`query_readonly`, `query_stream`, `nlq`, `status`);
-a write that times out returns `SamyamaError::Timeout`, because the server may
-already have applied it:
+A refused connection is retried for any request. A timeout is retried for
+requests that cannot write (`query_readonly`, `query_stream`, `nlq`, `status`)
+and for writes, which carry an `Idempotency-Key` by default: the server applies
+a keyed write once however often it is sent (#2176). A write without a key
+(`idempotency_keys: false`, for a server older than #2176) that times out is
+sent once and returns `SamyamaError::Timeout`, because the server may already
+have applied it:
 
 ```rust,no_run
 use samyama_sdk::{ConnectionConfig, RemoteClient};

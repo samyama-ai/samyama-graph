@@ -376,6 +376,7 @@ async fn remote_client_without_timeouts_keeps_its_config() {
         pool_max_idle_per_host: 1,
         max_retries: 0,
         retry_base_delay: Duration::from_millis(1),
+        idempotency_keys: false,
     };
     let r = RemoteClient::with_config("http://127.0.0.1:1/", cfg);
     assert!(r.config().timeout.is_none());
