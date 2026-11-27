@@ -433,6 +433,13 @@ harness = false
 name = "sort_topn"
 harness = false
 
+# Retrieval quality on BEIR / MS MARCO (#1988): nDCG@10, recall@100 and
+# latency for BM25, dense and client-side RRF. Its metrics and parsing are in
+# benches/retrieval_common, tested by tests/retrieval_quality_metrics.rs.
+[[bench]]
+name = "retrieval_quality_benchmark"
+harness = false
+
 [[bench]]
 name = "filtered_ann_benchmark"
 harness = false

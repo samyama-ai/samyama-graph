@@ -30,6 +30,7 @@ cargo bench --bench ann_benchmark -- --dataset data/ann/sift-128-euclidean  # af
 cargo bench --bench vector_cost_profile -- --synthetic 1000000x768 --dollars-per-hour 0.252  # bytes/vector, build/restart, $ per 1M queries per quantization
 cargo bench --bench graph_vector_hybrid_benchmark  # GraphRAG-shaped vector + traversal queries vs a brute-force reference (--export DIR for the Neo4j/Qdrant script)
 cargo bench --bench vector_churn_benchmark -- --synthetic 100000x128 --cycles 20  # recall under insert/delete/update (--mode drift, --runbook)
+cargo bench --bench retrieval_quality_benchmark -- --dataset data/beir/scifact  # nDCG@10/recall@100: BM25, dense, client-side RRF; after scripts/prepare_beir_datasets.py
 cargo bench --bench graphalytics_benchmark     # LDBC Graphalytics algorithms
 cargo bench --bench mvcc_benchmark             # MVCC & arena allocation
 cargo bench --bench late_materialization_bench  # Late materialization traversal
