@@ -858,6 +858,9 @@ pub struct QueryPlanner {
     /// LIMIT k` can start from (#2255), set per `plan` call like `hints`.
     /// Taken by the first scan choice for its variable.
     nearest: std::sync::Mutex<Option<NearestTopK>>,
+    /// The named subgraph every plan is confined to (#337). `None` plans
+    /// against the whole tenant graph, as always.
+    subgraph: Option<super::operator::SubgraphScopeRef>,
 }
 
 /// `CYPHER` options in force for the query being planned (#1616).
@@ -969,6 +972,7 @@ impl QueryPlanner {
             hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
             forcing: std::sync::Mutex::new(Forcing::default()),
             nearest: std::sync::Mutex::new(None),
+            subgraph: None,
         }
     }
 
@@ -981,12 +985,67 @@ impl QueryPlanner {
             hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
             forcing: std::sync::Mutex::new(Forcing::default()),
             nearest: std::sync::Mutex::new(None),
+            subgraph: None,
         }
     }
 
     /// Get the current planner configuration
     pub fn config(&self) -> &PlannerConfig {
         &self.config
+    }
+
+    /// Confine every plan this planner makes to a named subgraph (#337).
+    ///
+    /// The scope is enforced by the operators, not by rewriting the query:
+    /// the plan is made as for the whole graph, with the shortcuts that
+    /// answer from whole-graph counts or indexes turned off, and then every
+    /// operator is handed the scope. One that cannot honour it fails the
+    /// plan -- see [`super::operator::restrict_plan_to_subgraph`].
+    pub fn with_subgraph(mut self, scope: super::operator::SubgraphScopeRef) -> Self {
+        self.subgraph = Some(scope);
+        self
+    }
+
+    /// The named subgraph this planner is confined to, if any.
+    pub fn subgraph(&self) -> Option<&super::operator::SubgraphScopeRef> {
+        self.subgraph.as_ref()
+    }
+
+    /// What a scoped query may not contain, checked before planning.
+    ///
+    /// Each of these is evaluated straight against the store from inside an
+    /// expression, where no operator stands between it and the whole graph:
+    /// a pattern predicate or `EXISTS {}` in a filter, a pattern
+    /// comprehension, and the hierarchy functions, which read the OEH index.
+    /// Read off the query's own structure, so a form not listed here that
+    /// nests one of them is still caught.
+    fn check_subgraph_query(query: &Query) -> ExecutionResult<()> {
+        if query.is_write() {
+            return Err(ExecutionError::PlanningError(
+                crate::graph::subgraph::WRITE_REFUSED.to_string(),
+            ));
+        }
+        if query.plan_options.plan.is_some() || query.plan_options.planner.is_some() {
+            return Err(ExecutionError::PlanningError(
+                "CYPHER planner options are not supported inside a named subgraph".to_string(),
+            ));
+        }
+        let shape = format!("{query:?}").to_ascii_lowercase();
+        for (needle, what) in [
+            ("existssubquery", "pattern predicates and EXISTS { } subqueries"),
+            ("patterncomprehension", "pattern comprehensions"),
+            ("\"subsumes\"", "subsumes()"),
+            ("\"hierarchy_rollup\"", "hierarchy_rollup()"),
+            ("\"hierarchy_lca\"", "hierarchy_lca()"),
+        ] {
+            if shape.contains(needle) {
+                return Err(ExecutionError::PlanningError(format!(
+                    "{what} are not supported inside a named subgraph yet; \
+                     run the query against the tenant graph"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Build the physical plan for a detected hierarchy rewrite (ADR-035 §8).
@@ -1334,6 +1393,21 @@ impl QueryPlanner {
     }
 
     pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+        let Some(scope) = self.subgraph.clone() else {
+            return self.plan_whole_graph(query, store);
+        };
+        Self::check_subgraph_query(query)?;
+        let mut plan = self.plan_whole_graph(query, store)?;
+        if plan.is_write {
+            return Err(ExecutionError::PlanningError(
+                crate::graph::subgraph::WRITE_REFUSED.to_string(),
+            ));
+        }
+        super::operator::restrict_plan_to_subgraph(&mut plan.root, &scope)?;
+        Ok(plan)
+    }
+
+    fn plan_whole_graph(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
         use crate::query::ast::PlannerChoice;
         // Diagnostics are left for EXPLAIN to take; a query that ran without
         // EXPLAIN would otherwise leave its candidates for the next one to print.
@@ -1885,7 +1959,10 @@ impl QueryPlanner {
         // correlated `CALL { WITH p, x MATCH (p)-[]->(x) RETURN count(*) }` came
         // back as EdgeCount over every relationship (#1236). A seeded plan takes
         // the general pipeline, which starts from the seed.
-        if seed.is_none() {
+        //
+        // Off inside a named subgraph (#337) too: each answers from an index
+        // or a count over the whole graph, which no operator can confine.
+        if seed.is_none() && self.subgraph.is_none() {
             // ADR-035: answer a reflexive subtree aggregate or enumeration from the OEH
             // hierarchy index. The detector is conservative — when it returns Some, the
             // rewrite is answer-preserving and only the cost changes.
@@ -3561,6 +3638,7 @@ impl QueryPlanner {
             // thing there is. `is_write` is already computed above and covers
             // every write clause, so it is the whole condition.
             let use_label_count = has_aggregation
+                && self.subgraph.is_none()
                 && !is_write
                 && !seeded
                 && aggregates.len() == 1
@@ -3599,6 +3677,7 @@ impl QueryPlanner {
             // Edge type count cache: O(1) shortcut for MATCH ()-[r]->() RETURN type(r), count(r)
             // Detect: one count aggregate, one group-by with type() function, single edge path, no WHERE
             let use_edge_type_count = has_aggregation
+                && self.subgraph.is_none()
                 && !is_write
                 && !seeded
                 && aggregates.len() == 1
@@ -3649,6 +3728,7 @@ impl QueryPlanner {
                 None
             };
             let use_edge_count = has_aggregation
+                && self.subgraph.is_none()
                 && !is_write
                 && !seeded
                 && aggregates.len() == 1
@@ -4938,6 +5018,10 @@ impl QueryPlanner {
             let f = self.forcing.lock().unwrap();
             (f.graph_native.unwrap_or(self.config.graph_native), f.plan, f.graph_native == Some(true))
         };
+        // The cost-based enumerator can choose operators no subgraph can
+        // confine (a worst-case-optimal join); a scoped plan takes the
+        // default planner, whose operators all can (#337).
+        let graph_native = graph_native && self.subgraph.is_none();
         if let Some(n) = forced {
             // A pattern the enumerator cannot plan has the one plan the
             // default planner gives it, so `plan=1` is that plan and any

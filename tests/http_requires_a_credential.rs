@@ -444,6 +444,7 @@ async fn every_mutating_route_needs_more_than_read() {
         "/api/enrich/policy",
         "/api/vector/indexes",
         "/api/tenants",
+        "/api/subgraphs",
     ] {
         let s = status_of(app(creds.clone()), post_json(path, serde_json::json!({}))).await;
         assert_eq!(s, StatusCode::FORBIDDEN, "{path} let a read credential through");
