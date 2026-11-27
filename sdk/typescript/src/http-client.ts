@@ -41,6 +41,17 @@ export interface ConnectionOptions {
    * until then. A caller's `signal` also cancels a call still waiting.
    */
   maxConnections?: number;
+  /**
+   * Send every write with an `Idempotency-Key` of its own (#2176), made once
+   * per call and reused on each retry of it, so a write whose reply timed out
+   * can be sent again and still be applied once.
+   *
+   * On by default. Turn it off for a server older than #2176: such a server
+   * ignores the header, so a retried write would run twice. With it off,
+   * writes carry no key and a write that times out is sent once (#2175). A
+   * key passed as `idempotencyKey` is sent either way.
+   */
+  idempotencyKeys?: boolean;
 }
 
 const DEFAULTS: Required<ConnectionOptions> = {
@@ -48,6 +59,7 @@ const DEFAULTS: Required<ConnectionOptions> = {
   maxRetries: 2,
   retryBaseDelayMs: 100,
   maxConnections: 10,
+  idempotencyKeys: true,
 };
 
 /**
@@ -109,13 +121,28 @@ export interface RequestOptions {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/** The header that makes a write safe to send again (#2176). */
+const IDEMPOTENCY_KEY = "Idempotency-Key";
+
+/** A key no other write will have. */
+export function newIdempotencyKey(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  // Older runtimes: unique enough to tell one write from another, which is
+  // all a key has to do.
+  const hex = (n: number) => Math.floor(Math.random() * 16 ** n).toString(16).padStart(n, "0");
+  return `${Date.now().toString(16)}-${hex(8)}-${hex(8)}-${hex(8)}`;
+}
+
 /**
  * May a request be sent again after it was sent and failed (#2175)?
  *
  * `"safe"` for a request that cannot change anything: a `readOnly` query, NLQ
- * translation, status, schema. `"unsafe"` for anything that may write: a
- * timed-out write may already have been applied, and sending it again is how
- * one `CREATE` became three nodes with the default settings.
+ * translation, status, schema; and for a write that carries an idempotency
+ * key, which the server applies once however often it is sent (#2176).
+ * `"unsafe"` for anything else that may write: a timed-out write may already
+ * have been applied, and sending it again without a key is how one `CREATE`
+ * became three nodes with the default settings.
  */
 type Replay = "safe" | "unsafe";
 
@@ -191,8 +218,9 @@ export class HttpTransport {
    *
    * A connection that was never established, for any request: it never
    * reached the server. A timeout or a dropped connection only when `replay`
-   * is `"safe"`: the server may already have run the request, and repeating a
-   * write it has applied is how one `CREATE` became three (#2175). An HTTP
+   * is `"safe"` (a read, or a write with an idempotency key, #2176): the
+   * server may already have run the request, and repeating a write it has
+   * applied and cannot recognise is how one `CREATE` became three (#2175). An HTTP
    * error is the server answering and is never retried. A caller's own
    * `AbortSignal` firing is never retried — the caller asked to stop.
    */
@@ -277,23 +305,34 @@ export class HttpTransport {
   async query(
     cypher: string,
     graph: string = "default",
-    opts?: RequestOptions & { readOnly?: boolean },
+    opts?: RequestOptions & { readOnly?: boolean; idempotencyKey?: string },
   ): Promise<QueryResult> {
     // `read_only` makes the server refuse a write before it runs (#1628);
     // only sent when asked, so a plain query's body is what it always was.
     const body: Record<string, unknown> = { query: cypher, graph };
     if (opts?.readOnly) body.read_only = true;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    // A request that may write carries a key, made once here and not per
+    // attempt, so a retry of a write the server already applied is answered
+    // with the first reply instead of running again (#2176). A server older
+    // than the key ignores the header, which is what `idempotencyKeys: false`
+    // is for. A key the caller chose is sent either way.
+    const key =
+      opts?.idempotencyKey ??
+      (!opts?.readOnly && this.options.idempotencyKeys ? newIdempotencyKey() : undefined);
+    if (key !== undefined) headers[IDEMPOTENCY_KEY] = key;
     return this.json<QueryResult>(
       "/api/query",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(body),
       },
       opts,
-      // The server refuses a `read_only` write, so only that can be replayed
-      // after a timeout; anything else may be a write.
-      opts?.readOnly ? "safe" : "unsafe",
+      // The server refuses a `read_only` write, and answers a key it has seen
+      // with the first reply (#2176), so either can be replayed after a
+      // timeout. A write without a key is sent once.
+      opts?.readOnly || key !== undefined ? "safe" : "unsafe",
     );
   }
 

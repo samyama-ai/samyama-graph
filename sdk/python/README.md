@@ -41,10 +41,13 @@ client = SamyamaClient.connect(
 )
 ```
 
-A refused connection is retried for any request. A timeout is retried only
-for reads (`query_readonly`, `query_stream`, `nlq`, `status`): a write that
-times out raises `samyama.RequestTimeoutError` (a `RuntimeError` subclass)
-without being sent again, because the server may already have applied it.
+A refused connection is retried for any request. A timeout is retried for
+reads (`query_readonly`, `query_stream`, `nlq`, `status`) and for writes, which
+carry an `Idempotency-Key` by default: the server applies a keyed write once
+however often it is sent (#2176). A write without a key
+(`idempotency_keys=False`, for a server older than #2176) that times out raises
+`samyama.RequestTimeoutError` (a `RuntimeError` subclass) without being sent
+again, because the server may already have applied it.
 
 Both return the same `SamyamaClient`, with the same query methods. Graph
 algorithms (`page_rank`, `wcc`, `scc`, `bfs`, `dijkstra`, `pca`,

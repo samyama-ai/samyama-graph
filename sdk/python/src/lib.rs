@@ -21,8 +21,10 @@ pyo3::create_exception!(
     RequestTimeoutError,
     PyRuntimeError,
     "The server did not answer in time (#2175).\n\n\
-     If the request was a write, the server may or may not have applied it, so \
-     it was not sent again. Retry it only if the statement is safe to run twice \
+     If the request was a write, the server may or may not have applied it. A \
+     write without an idempotency key was not sent again; a keyed one was \
+     retried and still got no answer (#2176). Retry it only under the same key \
+     (query_with_idempotency_key) or if the statement is safe to run twice \
      (MERGE on a key, a write under a unique constraint, SET to a fixed value). \
      A subclass of RuntimeError, so existing `except RuntimeError` handlers \
      still catch it."
@@ -524,9 +526,17 @@ impl SamyamaClient {
     /// is kept before it is closed (`None` keeps them until the server closes
     /// them). `pool_max_idle_per_host=0` turns reuse off: every request opens
     /// a fresh connection.
+    ///
+    /// `idempotency_keys` sends every write with an `Idempotency-Key` of its
+    /// own (#2176), so a write whose reply timed out is retried and still
+    /// applied once. Turn it off for a server older than #2176, which ignores
+    /// the header: writes then carry no key, and a write that times out is
+    /// sent once and raises `RequestTimeoutError` (#2175).
     #[pyo3(signature = (url, timeout_seconds=30.0, connect_timeout_seconds=5.0,
                         max_retries=2, retry_base_delay_ms=100,
-                        pool_max_idle_per_host=8, pool_idle_timeout_seconds=90.0))]
+                        pool_max_idle_per_host=8, pool_idle_timeout_seconds=90.0,
+                        idempotency_keys=true))]
+    #[allow(clippy::too_many_arguments)]
     fn connect(
         url: &str,
         timeout_seconds: Option<f64>,
@@ -535,6 +545,7 @@ impl SamyamaClient {
         retry_base_delay_ms: u64,
         pool_max_idle_per_host: usize,
         pool_idle_timeout_seconds: Option<f64>,
+        idempotency_keys: bool,
     ) -> PyResult<Self> {
         let secs = |v: Option<f64>| -> PyResult<Option<std::time::Duration>> {
             match v {
@@ -555,6 +566,7 @@ impl SamyamaClient {
             retry_base_delay: std::time::Duration::from_millis(retry_base_delay_ms),
             pool_max_idle_per_host,
             pool_idle_timeout: secs(pool_idle_timeout_seconds)?,
+            idempotency_keys,
             ..Default::default()
         };
         Ok(SamyamaClient {
@@ -583,6 +595,47 @@ impl SamyamaClient {
         match result {
             Ok(r) => convert_query_result(r),
             Err(e) => Err(sdk_err(e)),
+        }
+    }
+
+    /// Execute a Cypher query under an idempotency key the caller chose (#2176).
+    ///
+    /// Every `query` against a server is already sent with a key of its own,
+    /// so the client's own retries cannot apply a write twice. That key is new
+    /// per call, though: if the call raises, calling again is a second write.
+    /// A caller that wants to try again after an error that does not say
+    /// whether the write landed (a timeout, a dropped connection) picks the
+    /// key itself and sends it again: a write that committed under it answers
+    /// with its first result and does not run again, for as long as the server
+    /// keeps the key (`SAMYAMA_IDEMPOTENCY_TTL_SECS`, 24 h by default). The
+    /// same key with a different statement is refused.
+    ///
+    /// Visible ASCII, no spaces, at most 255 bytes. Refused on an embedded
+    /// client, which has no reply to lose and no server to keep the key.
+    #[pyo3(signature = (cypher, key, graph="default"))]
+    fn query_with_idempotency_key(
+        &self,
+        py: Python<'_>,
+        cypher: &str,
+        key: &str,
+        graph: &str,
+    ) -> PyResult<QueryResult> {
+        let result = py.detach(|| {
+            let rt = get_runtime();
+            match &*self.inner {
+                ClientInner::Embedded(_) => Err(samyama_sdk::SamyamaError::QueryError(
+                    "an idempotency key needs a server to keep it; an embedded client \
+                     has no reply to lose, so call query instead"
+                        .to_string(),
+                )),
+                ClientInner::Remote(c) => {
+                    rt.block_on(c.query_with_idempotency_key(graph, cypher, key))
+                }
+            }
+        });
+        match result {
+            Ok(r) => convert_query_result(r),
+            Err(e) => Err(PyRuntimeError::new_err(e.to_string())),
         }
     }
 

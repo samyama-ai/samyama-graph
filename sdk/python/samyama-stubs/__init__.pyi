@@ -24,9 +24,10 @@ __all__ = ["SamyamaClient", "QueryResult", "QueryStream", "ServerStatus", "Reque
 class RequestTimeoutError(RuntimeError):
     """The server did not answer in time (#2175).
 
-    If the request was a write, the server may or may not have applied it, so
-    it was not sent again. A refused connection raises `RuntimeError` instead:
-    that request never reached the server.
+    If the request was a write, the server may or may not have applied it. A
+    write without an idempotency key was not sent again; a keyed one was
+    retried and still got no answer (#2176). A refused connection raises
+    `RuntimeError` instead: that request never reached the server.
     """
 
 class QueryResult:
@@ -107,6 +108,7 @@ class SamyamaClient:
         retry_base_delay_ms: int = 100,
         pool_max_idle_per_host: int = 8,
         pool_idle_timeout_seconds: float | None = 90.0,
+        idempotency_keys: bool = True,
     ) -> SamyamaClient:
         """A client for a server already running at `url`.
 
@@ -114,12 +116,20 @@ class SamyamaClient:
         is what this used to do unconditionally (samyama-graph#1326).
         Connections are pooled: `pool_max_idle_per_host` idle ones are kept
         for reuse (0 turns reuse off) for `pool_idle_timeout_seconds` each.
+        `idempotency_keys` sends each write with a key of its own, so a write
+        that timed out is retried and applied once (#2176); turn it off for a
+        server older than #2176, and a timed-out write is then sent once.
         """
         ...
 
     def query(
         self, cypher: str, graph: str = "default", cancel: CancelToken | None = None
     ) -> QueryResult: ...
+    def query_with_idempotency_key(
+        self, cypher: str, key: str, graph: str = "default"
+    ) -> QueryResult:
+        """Run a write that is safe to send again under the same key (#2176)."""
+        ...
     def query_readonly(
         self, cypher: str, graph: str = "default", cancel: CancelToken | None = None
     ) -> QueryResult:

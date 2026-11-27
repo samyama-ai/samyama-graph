@@ -116,6 +116,7 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
         ("POST", "/api/tx/begin") => vec![bare("begin", "/api/tx/begin")],
         ("POST", "/api/tx/{id}/commit") => vec![bare("unknown id", "/api/tx/nope/commit")],
         ("POST", "/api/tx/{id}/rollback") => vec![bare("unknown id", "/api/tx/nope/rollback")],
+        ("GET", "/api/requests/{key}") => vec![bare("unknown key", "/api/requests/nope")],
         ("GET", "/api/schema") => vec![
             bare("schema", "/api/schema"),
             bare("unknown subgraph", "/api/schema?subgraph=nope"),

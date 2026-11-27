@@ -55,12 +55,14 @@ describe("connection management", () => {
       maxRetries: undefined,
       retryBaseDelayMs: undefined,
       maxConnections: undefined,
+      idempotencyKeys: undefined,
     });
     assert.deepEqual(t.connectionOptions, {
       timeoutMs: 30_000,
       maxRetries: 2,
       retryBaseDelayMs: 100,
       maxConnections: 10,
+      idempotencyKeys: true,
     });
   });
 
@@ -71,6 +73,7 @@ describe("connection management", () => {
       maxRetries: 0,
       retryBaseDelayMs: 100,
       maxConnections: 10,
+      idempotencyKeys: true,
     });
   });
 
@@ -88,14 +91,15 @@ describe("connection management", () => {
         maxRetries: 2,
         retryBaseDelayMs: 100,
         maxConnections: 10,
+        idempotencyKeys: true,
       });
     }
   });
 
   test("a timed-out read is retried the configured number of times", async () => {
     // Counted at the server: one connection per attempt. Timing alone would
-    // pass for a client that never retried and simply waited longer. Only a
-    // read is repeated after a timeout (#2175).
+    // pass for a client that never retried and simply waited longer. A read
+    // is repeated after a timeout (#2175); a write only with a key (#2176).
     const s = await blackHole();
     const t = new HttpTransport(s.url, {
       timeoutMs: 120,
@@ -107,9 +111,11 @@ describe("connection management", () => {
     s.close();
   });
 
-  test("a timed-out write is sent once (#2175)", async () => {
-    // The server may have applied a write whose answer never came; sending it
-    // again is how one CREATE became three nodes with the defaults.
+  test("a timed-out write with an idempotency key is retried (#2176)", async () => {
+    // A write carries a key by default and the server applies a key once
+    // however often it arrives, so the write is sent again under the retry
+    // budget. That it is applied once is the Rust SDK's
+    // `a_write_retried_after_a_timeout_is_applied_once`, against the server.
     const s = await blackHole();
     const t = new HttpTransport(s.url, {
       timeoutMs: 120,
@@ -120,7 +126,26 @@ describe("connection management", () => {
       () => t.query("CREATE (:Order {id: 1})"),
       (err: unknown) => err instanceof DOMException && err.name === "TimeoutError",
     );
-    assert.equal(s.connections(), 1, "a timed-out write was sent again");
+    assert.equal(s.connections(), 3, "expected one attempt plus two retries");
+    s.close();
+  });
+
+  test("a timed-out write without a key is sent once (#2175)", async () => {
+    // The server may have applied a write whose answer never came; sending it
+    // again with nothing to recognise it by is how one CREATE became three
+    // nodes with the defaults.
+    const s = await blackHole();
+    const t = new HttpTransport(s.url, {
+      timeoutMs: 120,
+      maxRetries: 2,
+      retryBaseDelayMs: 10,
+      idempotencyKeys: false,
+    });
+    await assert.rejects(
+      () => t.query("CREATE (:Order {id: 1})"),
+      (err: unknown) => err instanceof DOMException && err.name === "TimeoutError",
+    );
+    assert.equal(s.connections(), 1, "a timed-out write without a key was sent again");
     s.close();
   });
 

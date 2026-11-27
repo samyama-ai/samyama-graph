@@ -34,8 +34,11 @@ pub struct ConnectionConfig {
     /// How many times a *retryable* failure is retried. Zero disables retry.
     ///
     /// A connection failure is retryable for every request. A timeout is
-    /// retryable only for requests that cannot write (`query_readonly`,
-    /// streaming reads, `nlq`, `status`): a write that timed out may already
+    /// retryable for requests that cannot write (`query_readonly`, streaming
+    /// reads, `nlq`, `status`) and for a write that carries an idempotency key
+    /// (see [`idempotency_keys`](Self::idempotency_keys)): the server answers
+    /// a repeated key with the first reply, so the retry cannot apply the
+    /// write twice (#2176). A write without a key that timed out may already
     /// have been applied, so it is reported as [`SamyamaError::Timeout`]
     /// rather than sent again (#2175).
     pub max_retries: u32,
@@ -45,6 +48,16 @@ pub struct ConnectionConfig {
     /// turns one slow server into a thundering herd of clients all waking at
     /// the same moment.
     pub retry_base_delay: Duration,
+    /// Send every write with an `Idempotency-Key` of its own (#2176), made
+    /// once per call and reused on each retry of it, so that a write whose
+    /// reply timed out can be sent again and still be applied once.
+    ///
+    /// On by default. Turn it off for a server older than #2176: such a
+    /// server ignores the header, so a retried write would run twice. With it
+    /// off, writes carry no key and a write that times out is sent once and
+    /// reported as [`SamyamaError::Timeout`] (#2175).
+    /// [`RemoteClient::query_with_idempotency_key`] sends its key either way.
+    pub idempotency_keys: bool,
 }
 
 impl Default for ConnectionConfig {
@@ -56,6 +69,7 @@ impl Default for ConnectionConfig {
             pool_max_idle_per_host: 8,
             max_retries: 2,
             retry_base_delay: Duration::from_millis(100),
+            idempotency_keys: true,
         }
     }
 }
@@ -139,8 +153,9 @@ impl RemoteClient {
     /// A connection failure always: the request never reached the server, so
     /// sending it again cannot apply it twice. A timeout only when `replay` is
     /// [`Replay::Safe`]: a timed-out request may already have been executed,
-    /// and repeating a write the server has applied is how one `CREATE`
-    /// became three with the default settings (#2175).
+    /// and repeating a write the server has applied, without a key for the
+    /// server to recognise it by, is how one `CREATE` became three with the
+    /// default settings (#2175).
     ///
     /// A 4xx is the server answering, and retrying it repeats a request the
     /// server has already refused; a 5xx may have had an effect, so neither is
@@ -448,6 +463,29 @@ impl RemoteClient {
             .await
     }
 
+    /// Run `cypher` under an idempotency key the caller chose (#2176).
+    ///
+    /// Every call that may write is already sent with a key of its own, so
+    /// the client's own retries cannot apply it twice. That key is new per
+    /// call, though: if this call fails, a second call is a second write.
+    /// A caller that wants to try again after an error that does not say
+    /// whether the write landed — a timeout, a dropped connection — picks
+    /// the key itself and sends it again: a write that committed under it
+    /// answers with its first reply and does not run again, for as long as
+    /// the server keeps the key (`SAMYAMA_IDEMPOTENCY_TTL_SECS`, 24 h by
+    /// default). The same key with a different statement is refused.
+    ///
+    /// Visible ASCII, no spaces, at most 255 bytes.
+    pub async fn query_with_idempotency_key(
+        &self,
+        graph: &str,
+        cypher: &str,
+        key: &str,
+    ) -> SamyamaResult<QueryResult> {
+        self.post_query_keyed(graph, cypher, serde_json::json!({}), false, Some(key.to_string()))
+            .await
+    }
+
     /// Execute a POST request to /api/query with bound `params`.
     ///
     /// `read_only` asks the server to refuse the statement if it writes
@@ -458,6 +496,24 @@ impl RemoteClient {
         cypher: &str,
         params: serde_json::Value,
         read_only: bool,
+    ) -> SamyamaResult<QueryResult> {
+        // A request that may write carries a key, made once here and not per
+        // attempt, so a retry of a write the server already applied is
+        // answered with the first reply instead of running again (#2176). A
+        // server older than the key ignores the header, which is what
+        // `idempotency_keys: false` is for.
+        let key = (!read_only && self.config.idempotency_keys).then(new_idempotency_key);
+        self.post_query_keyed(graph, cypher, params, read_only, key)
+            .await
+    }
+
+    async fn post_query_keyed(
+        &self,
+        graph: &str,
+        cypher: &str,
+        params: serde_json::Value,
+        read_only: bool,
+        key: Option<String>,
     ) -> SamyamaResult<QueryResult> {
         let url = format!("{}/api/query", self.http_base_url);
         let mut body = serde_json::json!({ "query": cypher, "graph": graph });
@@ -470,14 +526,22 @@ impl RemoteClient {
         }
 
         // A `read_only` request is refused by the server if it writes, so it
-        // can be repeated after a timeout. Anything else may be a write.
-        let replay = if read_only {
+        // can be repeated after a timeout. So can a keyed write: the server
+        // answers a key it has seen with the first reply instead of running
+        // the write again (#2176). A write without a key is sent once.
+        let replay = if read_only || key.is_some() {
             Replay::Safe
         } else {
             Replay::Unsafe
         };
         let response = self
-            .send_with_retry(replay, || self.http_client.post(&url).json(&body))
+            .send_with_retry(replay, || {
+                let request = self.http_client.post(&url).json(&body);
+                match &key {
+                    Some(key) => request.header(IDEMPOTENCY_KEY, key),
+                    None => request,
+                }
+            })
             .await?;
 
         if response.status().is_success() {
@@ -551,16 +615,27 @@ const NDJSON: &str = "application/x-ndjson";
 
 /// May a request be sent again after it timed out (#2175)?
 ///
-/// A timeout says nothing about whether the server ran the request. Only a
-/// request that cannot change anything (a `read_only` query, NLQ translation,
-/// a status check) is [`Safe`](Replay::Safe) to repeat. A connection failure
-/// is retried either way, since the request never arrived.
+/// A timeout says nothing about whether the server ran the request. A request
+/// that cannot change anything (a `read_only` query, NLQ translation, a status
+/// check) is [`Safe`](Replay::Safe) to repeat, and so is a write that carries
+/// an idempotency key, which the server applies once however often it is sent
+/// (#2176). A write without a key is not. A connection failure is retried
+/// either way, since the request never arrived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Replay {
     /// Has no effect on the server; repeat it after a timeout.
     Safe,
-    /// May write; after a timeout report [`SamyamaError::Timeout`] instead.
+    /// May write and carries no key; after a timeout report
+    /// [`SamyamaError::Timeout`] instead.
     Unsafe,
+}
+
+/// The header that makes a write safe to send again (#2176).
+const IDEMPOTENCY_KEY: &str = "Idempotency-Key";
+
+/// A key no other write will have.
+fn new_idempotency_key() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 /// `fut`, or a timeout error if `limit` passes first. `None` waits forever.

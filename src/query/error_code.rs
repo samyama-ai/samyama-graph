@@ -130,3 +130,8 @@ pub const INVALID_WRITE_PATTERN: &str = "Samyama.ClientError.Statement.InvalidWr
 /// being written, and nothing needs rebinding or retyping — the combination of
 /// restrictor, selector and quantifier is what cannot be served.
 pub const INVALID_PATTERN: &str = "Samyama.ClientError.Statement.InvalidPattern";
+
+/// An `Idempotency-Key` already used for a different request (#2176). The key
+/// names one request; replaying the first reply to a second one would hide the
+/// client's bug, and running the second would make the key mean two things.
+pub const IDEMPOTENCY_KEY_REUSED: &str = "Samyama.ClientError.Request.IdempotencyKeyReused";

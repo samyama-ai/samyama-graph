@@ -87,8 +87,10 @@ async fn a_timed_out_read_is_retried_the_configured_number_of_times() {
     // count is the attempt count. Asserting on elapsed time alone would pass
     // for a client that retried zero times and simply waited longer.
     //
-    // A read: only a request that cannot write is repeated after a timeout
-    // (#2175). `a_timed_out_write_is_sent_once` is the other half.
+    // A read: a request that cannot write is repeated after a timeout
+    // (#2175). A write is repeated only when it carries an idempotency key
+    // (#2176): `a_timed_out_keyed_write_is_retried` and
+    // `a_timed_out_write_without_a_key_is_sent_once` are the other halves.
     let (url, accepted) = black_hole().await;
     let client = RemoteClient::with_config(
         &url,
@@ -110,11 +112,12 @@ async fn a_timed_out_read_is_retried_the_configured_number_of_times() {
 }
 
 #[tokio::test]
-async fn a_timed_out_write_is_sent_once() {
-    // The server may have run a write whose answer never arrived, and
-    // repeating it is how one `CREATE` became three nodes with the default
-    // settings (#2175). With retries on, a write that times out is sent once
-    // and reported as a timeout, so the caller can decide.
+async fn a_timed_out_keyed_write_is_retried() {
+    // A write carries an idempotency key by default, and the server applies a
+    // key once however often it arrives (#2176), so a write whose answer
+    // never came is sent again under #2175's retry budget. That the retry is
+    // applied once is `a_write_retried_after_a_timeout_is_applied_once`
+    // (`idempotency_key_retry.rs`), against the real server.
     let (url, accepted) = black_hole().await;
     let client = RemoteClient::with_config(
         &url,
@@ -131,10 +134,42 @@ async fn a_timed_out_write_is_sent_once() {
         .await
         .expect_err("a server that never answers must not return Ok");
 
+    let n = accepted.load(Ordering::SeqCst);
+    assert_eq!(n, 3, "expected the first attempt plus two retries, saw {n} connections");
+    assert!(
+        matches!(err, SamyamaError::Timeout(_)),
+        "a timeout must be reported as one, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_timed_out_write_without_a_key_is_sent_once() {
+    // The server may have run a write whose answer never arrived, and
+    // repeating a write it cannot recognise is how one `CREATE` became three
+    // nodes with the default settings (#2175). With retries on but no
+    // idempotency key, a write that times out is sent once and reported as a
+    // timeout, so the caller can decide.
+    let (url, accepted) = black_hole().await;
+    let client = RemoteClient::with_config(
+        &url,
+        ConnectionConfig {
+            timeout: Some(Duration::from_millis(150)),
+            max_retries: 2,
+            retry_base_delay: Duration::from_millis(10),
+            idempotency_keys: false,
+            ..Default::default()
+        },
+    );
+
+    let err = client
+        .query("default", "CREATE (:Order {id: 1})")
+        .await
+        .expect_err("a server that never answers must not return Ok");
+
     assert_eq!(
         accepted.load(Ordering::SeqCst),
         1,
-        "a timed-out write was sent again"
+        "a timed-out write without a key was sent again"
     );
     assert!(
         matches!(err, SamyamaError::Timeout(_)),

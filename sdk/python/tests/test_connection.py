@@ -114,8 +114,8 @@ def test_every_remote_method_is_bounded(black_hole):
 
 def test_a_timed_out_read_is_retried_the_configured_number_of_times(black_hole):
     # Counted at the server, one connection per attempt. Timing alone would
-    # pass for a client that never retried and simply waited longer. Only a
-    # read is repeated after a timeout (#2175).
+    # pass for a client that never retried and simply waited longer. A read is
+    # repeated after a timeout (#2175); a write only with a key (#2176).
     client = samyama.SamyamaClient.connect(
         black_hole.url,
         timeout_seconds=0.15,
@@ -127,9 +127,10 @@ def test_a_timed_out_read_is_retried_the_configured_number_of_times(black_hole):
     assert black_hole.connections == 3, "expected one attempt plus two retries"
 
 
-def test_a_timed_out_write_is_sent_once(black_hole):
-    # The server may have applied a write whose answer never came; sending it
-    # again is how one CREATE became three nodes with the defaults (#2175).
+def test_a_timed_out_keyed_write_is_retried(black_hole):
+    # A write carries an idempotency key by default, and the server applies a
+    # key once however often it arrives (#2176), so it is sent again under the
+    # retry budget.
     client = samyama.SamyamaClient.connect(
         black_hole.url,
         timeout_seconds=0.15,
@@ -138,7 +139,23 @@ def test_a_timed_out_write_is_sent_once(black_hole):
     )
     with pytest.raises(samyama.RequestTimeoutError):
         client.query("CREATE (:Order {id: 1})")
-    assert black_hole.connections == 1, "a timed-out write was sent again"
+    assert black_hole.connections == 3, "expected one attempt plus two retries"
+
+
+def test_a_timed_out_write_without_a_key_is_sent_once(black_hole):
+    # The server may have applied a write whose answer never came; sending it
+    # again with nothing to recognise it by is how one CREATE became three
+    # nodes with the defaults (#2175).
+    client = samyama.SamyamaClient.connect(
+        black_hole.url,
+        timeout_seconds=0.15,
+        max_retries=2,
+        retry_base_delay_ms=10,
+        idempotency_keys=False,
+    )
+    with pytest.raises(samyama.RequestTimeoutError):
+        client.query("CREATE (:Order {id: 1})")
+    assert black_hole.connections == 1, "a timed-out write without a key was sent again"
 
 
 def test_a_timeout_is_a_runtime_error_and_a_refusal_is_not_a_timeout(black_hole):

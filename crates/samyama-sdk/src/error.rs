@@ -22,10 +22,11 @@ pub enum SamyamaError {
     /// Kept apart from [`HttpError`](Self::HttpError) because it means
     /// something a refused connection does not: the server may have received
     /// the request and applied it. After a timed-out write the outcome is
-    /// unknown, so repeat it only if the statement is safe to run twice
-    /// (`MERGE` on a key, a write under a unique constraint, `SET` to a fixed
-    /// value). A refused connection never reached the server and is safe to
-    /// retry.
+    /// unknown, so repeat it only under the same idempotency key
+    /// (`RemoteClient::query_with_idempotency_key`, #2176) or if the statement
+    /// is safe to run twice (`MERGE` on a key, a write under a unique
+    /// constraint, `SET` to a fixed value). A refused connection never reached
+    /// the server and is safe to retry.
     #[error("Timeout: {0}")]
     Timeout(String),
 

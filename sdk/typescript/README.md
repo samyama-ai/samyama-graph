@@ -27,14 +27,17 @@ import { SamyamaClient } from "samyama-sdk";
 const client = new SamyamaClient({
   url: "http://localhost:8080",  // default
   timeoutMs: 30000,              // whole-request deadline, default 30000
-  maxRetries: 2,                 // connection failures; timeouts only for reads
+  maxRetries: 2,                 // connection failures; timeouts for reads and keyed writes
   retryBaseDelayMs: 100,         // doubled each attempt
 });
 ```
 
 A request that never reached the server (connection refused, host not found)
-is retried for any call. A timeout is retried only for reads (`queryReadonly`,
-`nlq`, `status`, `schema`): a write that times out rejects with a
+is retried for any call. A timeout is retried for reads (`queryReadonly`,
+`nlq`, `status`, `schema`) and for queries that write, which carry an
+`Idempotency-Key` by default: the server applies a keyed write once however
+often it is sent (#2176). A write without a key (`idempotencyKeys: false`, for
+a server older than #2176, or the import calls) that times out rejects with a
 `TimeoutError` without being sent again, because the server may already have
 applied it.
 

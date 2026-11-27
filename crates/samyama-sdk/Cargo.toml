@@ -26,6 +26,8 @@ thiserror = "1.0"
 
 # The pinned snapshot's digest, reported by SamyamaEnv (#2095)
 sha2 = "0.10"
+# Idempotency keys for writes (#2176)
+uuid = { version = "1.8", features = ["v4"] }
 
 # Core graph database (for EmbeddedClient)
 # No default features: a library must not bring the server's allocator (ADR-038).

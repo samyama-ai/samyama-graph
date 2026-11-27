@@ -157,4 +157,11 @@ export interface ClientOptions {
    * wait for a slot; a stream holds its slot until it ends.
    */
   maxConnections?: number;
+  /**
+   * Send every write with an `Idempotency-Key` of its own, so a write whose
+   * reply timed out can be retried and still be applied once (default: true,
+   * #2176). Turn it off for a server older than #2176, which ignores the
+   * header: writes then carry no key and a timed-out write is sent once.
+   */
+  idempotencyKeys?: boolean;
 }

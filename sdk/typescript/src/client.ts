@@ -45,6 +45,7 @@ export class SamyamaClient {
       maxRetries: options?.maxRetries,
       retryBaseDelayMs: options?.retryBaseDelayMs,
       maxConnections: options?.maxConnections,
+      idempotencyKeys: options?.idempotencyKeys,
     });
   }
 
@@ -53,7 +54,8 @@ export class SamyamaClient {
    * Factory method for a more readable API.
    *
    * `options` takes the same connection settings as the constructor
-   * (`timeoutMs`, `maxRetries`, `retryBaseDelayMs`, `maxConnections`). Leaving them out keeps
+   * (`timeoutMs`, `maxRetries`, `retryBaseDelayMs`, `maxConnections`,
+   * `idempotencyKeys`). Leaving them out keeps
    * the defaults, which include a 30 s request deadline (#1326).
    */
   static connectHttp(
@@ -66,6 +68,29 @@ export class SamyamaClient {
   /** Execute a read-write Cypher query */
   async query(cypher: string, graph: string = "default"): Promise<QueryResult> {
     return this.http.query(cypher, graph);
+  }
+
+  /**
+   * Execute a query under an idempotency key the caller chose (#2176).
+   *
+   * Every call that may write is already sent with a key of its own, so the
+   * client's own retries cannot apply it twice. That key is new per call,
+   * though: if this call fails, a second call is a second write. A caller that
+   * wants to try again after an error that does not say whether the write
+   * landed (a timeout, a dropped connection) picks the key itself and sends it
+   * again: a write that committed under it answers with its first reply and
+   * does not run again, for as long as the server keeps the key
+   * (`SAMYAMA_IDEMPOTENCY_TTL_SECS`, 24 h by default). The same key with a
+   * different statement is refused.
+   *
+   * Visible ASCII, no spaces, at most 255 bytes.
+   */
+  async queryWithIdempotencyKey(
+    cypher: string,
+    key: string,
+    graph: string = "default",
+  ): Promise<QueryResult> {
+    return this.http.query(cypher, graph, { idempotencyKey: key });
   }
 
   /**
