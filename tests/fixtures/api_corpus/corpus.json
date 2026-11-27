@@ -6348,7 +6348,7 @@
       "query": "RETURN [1, 2"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:13\n  |\n1 | RETURN [1, 2\n  |             ^---\n  |\n  = expected label_check, index_op, member_op, pow_op, mul_div_mod_op, add_sub_op, comparison_op, in_op, and_op, or_op, or xor_op"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:13\n  |\n1 | RETURN [1, 2\n  |             ^---\n  |\n  = expected label_check, index_op, member_op, pow_op, mul_div_mod_op, add_sub_op, comparison_op, in_op, within_op, and_op, or_op, or xor_op"
     },
     "status": 400
   },
@@ -7548,7 +7548,7 @@
       "query": "RETURN [1, 2"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:13\n  |\n1 | RETURN [1, 2\n  |             ^---\n  |\n  = expected label_check, index_op, member_op, pow_op, mul_div_mod_op, add_sub_op, comparison_op, in_op, and_op, or_op, or xor_op"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:13\n  |\n1 | RETURN [1, 2\n  |             ^---\n  |\n  = expected label_check, index_op, member_op, pow_op, mul_div_mod_op, add_sub_op, comparison_op, in_op, within_op, and_op, or_op, or xor_op"
     },
     "status": 400
   },
