@@ -3,6 +3,7 @@ pub mod benchmarks;
 pub mod budget;
 pub mod common;
 pub mod constraints;
+pub mod linear;
 pub mod moo;
 pub mod stats;
 

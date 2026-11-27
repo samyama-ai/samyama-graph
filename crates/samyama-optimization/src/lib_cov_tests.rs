@@ -146,8 +146,8 @@ fn zdt_objectives_match_closed_forms_on_the_pareto_set() {
     assert_eq!(z(1).dim(), 3);
     assert_eq!(z(1).num_objectives(), 2);
     let (lo, hi) = z(1).bounds();
-    assert_eq!(lo, Array1::zeros(3));
-    assert_eq!(hi, Array1::ones(3));
+    assert_eq!(lo, Array1::<f64>::zeros(3));
+    assert_eq!(hi, Array1::<f64>::ones(3));
 
     let f = z(1).objectives(&x);
     assert!(close(f[0], 0.25) && close(f[1], 0.5));
@@ -187,8 +187,8 @@ fn dtlz_objectives_lie_on_their_known_fronts() {
     assert_eq!(d(1).dim(), dim);
     assert_eq!(d(1).num_objectives(), m);
     let (lo, hi) = d(1).bounds();
-    assert_eq!(lo, Array1::zeros(dim));
-    assert_eq!(hi, Array1::ones(dim));
+    assert_eq!(lo, Array1::<f64>::zeros(dim));
+    assert_eq!(hi, Array1::<f64>::ones(dim));
 
     // DTLZ1: linear front, objectives sum to 0.5.
     let f = d(1).objectives(&x);

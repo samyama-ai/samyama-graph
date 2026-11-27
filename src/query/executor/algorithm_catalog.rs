@@ -211,6 +211,18 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
         // The path and its totals, then the result envelope (OPT-09, #2265).
         &["path", "cost", "resource", "objective", "feasible", "gap", "iterations", "total_time_ms"],
     ),
+    // An exact linear or mixed-integer program, solved by HiGHS (OPT-05,
+    // #1766). The program is the config; no graph is read and nothing is
+    // written. `status` says whether the answer is a proven optimum.
+    read(
+        "algo.or.lp",
+        &["algo.or.milp", "algo.or.linearProgram"],
+        Optimization,
+        &[
+            "status", "values", "objective", "feasible", "gap", "mip_gap", "iterations", "nodes",
+            "total_time_ms", "solver",
+        ],
+    ),
 ];
 
 /// How an argument is passed: by position, or as a key of the config map.
@@ -232,6 +244,8 @@ pub enum ParamType {
     /// A node id, as `id(n)` returns it.
     NodeId,
     List,
+    /// A map of names to values, as `algo.or.lp`'s `objective` and `bounds`.
+    Map,
 }
 
 /// The value used when an optional argument is left out.
@@ -501,6 +515,14 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         key("k", T::Integer, D::Integer(2)),
         key("seed", T::Integer, D::Integer(42)),
     ]),
+    ("algo.or.lp", &[
+        opt("sense", T::String),
+        Param { name: "objective", kind: ParamKind::Config, ty: T::Map, required: false, default: None, also: None, bound: None },
+        opt("constraints", T::List),
+        Param { name: "bounds", kind: ParamKind::Config, ty: T::Map, required: false, default: None, also: None, bound: None },
+        opt("integer", T::List),
+        at_least(opt("timeLimitMs", T::Integer), 1.0, B::Refused),
+    ]),
     ("algo.or.constrainedShortestPath", &[
         SOURCE,
         TARGET,
@@ -666,6 +688,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.node2vec", "node2vec embeddings from biased random walks, embedded by random projection of co-occurrence counts."),
     ("algo.or.solve", "Optimises a numeric property on each node of a label with a metaheuristic solver (Jaya by default), each value within the bounds, minimising the sum of value times its cost property."),
     ("algo.negativeSampling", "Node pairs that are not edges, for training link prediction (random, degree-matched or k-hop)."),
+    ("algo.or.lp", "Solves a user-supplied linear or mixed-integer program exactly with HiGHS: the proven optimum and its values, or the proof that the program is infeasible or unbounded."),
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
     ("algo.split", "Assigns each node to train, validation or test so that related nodes (a component, a community, a source, or a time window) land in the same split."),
     ("algo.splitLeakage", "The pairs of related nodes that a split put in different splits, each with the reason they count as a leak."),

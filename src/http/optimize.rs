@@ -414,6 +414,27 @@ fn algorithm_catalog() -> Vec<AlgorithmInfo> {
             params: default_params(),
             multi_objective: true,
         },
+        // The one exact solver (OPT-05, #1766). It takes a linear program,
+        // not a benchmark function: `/optimize/solve` refuses it and names
+        // `POST /optimize/lp`, which runs it.
+        AlgorithmInfo {
+            id: "highs",
+            name: "HiGHS (exact LP/MILP)",
+            family: "exact",
+            variant: None,
+            equation_tex: r"\min_x c^\top x \;\text{s.t.}\; Ax \{\le,=,\ge\} b,\; l \le x \le u,\; x_j \in \mathbb{Z}\ (j \in I)",
+            paper_refs: vec![PaperRef {
+                title: "Parallelizing the dual revised simplex method",
+                url: "https://doi.org/10.1007/s12532-017-0130-5",
+                year: 2018,
+            }],
+            params: vec![ParamSpec {
+                name: "time_limit_ms",
+                ty: "int",
+                default: serde_json::Value::Null,
+            }],
+            multi_objective: false,
+        },
     ]
 }
 
@@ -762,6 +783,53 @@ pub fn router() -> Router<Arc<OptimizeState>> {
         .route("/optimize/solve", post(start_solve))
         .route("/optimize/solve/:id/stream", get(stream_solve))
         .route("/optimize/solve/:id/cancel", post(cancel_solve))
+        .route("/optimize/lp", post(solve_lp))
+}
+
+/// `POST /optimize/lp`: solve a user-supplied linear or mixed-integer program
+/// exactly with HiGHS (OPT-05, #1766). The body is the program in the form
+/// `algo.or.lp` takes; the answer is HiGHS's status and, when there is one,
+/// the point. Synchronous: an exact solve has no iterations worth streaming,
+/// and `timeLimitMs` bounds it.
+async fn solve_lp(
+    body: Result<Json<samyama_optimization::linear::LinearProgramSpec>, JsonRejection>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let Json(spec) = body.map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid linear program: {}", rejection_detail(&e)),
+        )
+    })?;
+    let (model, options) = spec
+        .to_model()
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid linear program: {e}")))?;
+    let solved = tokio::task::spawn_blocking(move || {
+        samyama_optimization::linear::solve(&model, options).map(|s| (model, s))
+    })
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("the solve did not finish: {e}")))?;
+    let (model, s) =
+        solved.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("the solve failed: {e}")))?;
+    let values = s.values.as_ref().map(|xs| {
+        model
+            .variables
+            .iter()
+            .zip(xs)
+            .map(|(v, x)| (v.name.clone(), serde_json::json!(x)))
+            .collect::<serde_json::Map<_, _>>()
+    });
+    Ok(Json(serde_json::json!({
+        "status": s.status.as_str(),
+        "objective": s.objective,
+        "values": values,
+        "feasible": s.feasible,
+        "gap": s.gap,
+        "mip_gap": s.mip_gap,
+        "iterations": s.iterations,
+        "nodes": s.nodes,
+        "total_time_ms": s.total_time_ms,
+        "solver": "HiGHS",
+    })))
 }
 
 async fn list_algorithms() -> Json<Vec<AlgorithmInfo>> {
@@ -888,6 +956,18 @@ async fn start_solve(
             StatusCode::BAD_REQUEST,
             format!("unknown algorithm: {}", req.algorithm),
         ))?;
+    // The exact solver runs a linear program, not a benchmark function; running
+    // anything else under its name would answer a question nobody asked.
+    if algo.family == "exact" {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "{} is an exact solver for linear programs, not for benchmark functions; \
+                 POST the program to /optimize/lp (or CALL algo.or.lp in Cypher)",
+                algo.id
+            ),
+        ));
+    }
     let budget = req.budget().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     // Only the single-objective benchmarks are defined at any size. The
     // others -- ZDT, DTLZ and `uc2_dosing` -- are solved at the catalogue's

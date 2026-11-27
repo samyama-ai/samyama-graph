@@ -19179,6 +19179,9 @@ impl AlgorithmOperator {
         ("stratifiedsampling", "it groups nodes by their labels, which a projection does not keep"),
         ("or.constrainedshortestpath", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
         ("or.shortestpathwithconstraints", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
+        ("or.lp", "it solves the linear program in its config and reads no graph"),
+        ("or.milp", "it solves the linear program in its config and reads no graph"),
+        ("or.linearprogram", "it solves the linear program in its config and reads no graph"),
     ];
 
     /// The projection `graph` names, or `None` when the call names none.
@@ -23619,6 +23622,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "or.constrainedshortestpath" | "or.shortestpathwithconstraints" => {
                     self.execute_constrained_shortest_path(store)?
                 }
+                // An exact LP/MILP (OPT-05, #1766): reads no graph.
+                "or.lp" | "or.milp" | "or.linearprogram" => self.execute_or_lp()?,
                 "maxflow" => self.execute_max_flow(store)?,
                 "mst" => self.execute_mst(store)?,
                 "trianglecount" => self.execute_triangle_count(store)?,
@@ -23743,6 +23748,8 @@ impl PhysicalOperator for AlgorithmOperator {
                 "or.constrainedshortestpath" | "or.shortestpathwithconstraints" => {
                     self.execute_constrained_shortest_path(store)?
                 }
+                // An exact LP/MILP (OPT-05, #1766): reads no graph.
+                "or.lp" | "or.milp" | "or.linearprogram" => self.execute_or_lp()?,
                 "maxflow" => self.execute_max_flow(store)?,
                 "mst" => self.execute_mst(store)?,
                 "trianglecount" => self.execute_triangle_count(store)?,
@@ -30296,6 +30303,10 @@ mod expand_bound_comparison_reads {
         assert_eq!(pushed, NODES + edges + 2 * kept);
     }
 }
+
+// `algo.or.lp`, an exact LP/MILP through HiGHS (OPT-05, #1766).
+#[path = "or_lp_ops.rs"]
+mod or_lp_ops;
 
 #[cfg(test)]
 #[path = "operator_cov_tests_a.rs"]
