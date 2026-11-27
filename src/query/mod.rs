@@ -236,6 +236,9 @@ struct ResultKey {
     /// `GraphStore::features`' generation: a `feature.get` answered before
     /// the latest materialization is not served after it (ML-07).
     features: u64,
+    /// The user-function registry's generation (LANG-10, #1674): an answer
+    /// computed before a function was replaced or removed is not served after.
+    udf: u64,
 }
 
 /// Canonical, order-independent rendering of bound parameters.
@@ -773,6 +776,7 @@ impl QueryEngine {
             epoch: store.epoch(),
             projections: store.graph_projections.generation(),
             features: store.features.generation(),
+            udf: crate::udf::generation(),
         };
 
         {
@@ -801,6 +805,7 @@ impl QueryEngine {
         if store.epoch() == key.epoch
             && store.graph_projections.generation() == key.projections
             && store.features.generation() == key.features
+            && crate::udf::generation() == key.udf
         {
             self.insert_with_budget(key, batch.clone());
         }

@@ -132,6 +132,7 @@ fn reinserting_a_key_charges_only_the_difference() {
         epoch: 1,
         projections: 0,
         features: 0,
+        udf: 0,
     };
     let mut batch = RecordBatch::new(vec!["x".into()]);
     let mut r = executor::Record::new();

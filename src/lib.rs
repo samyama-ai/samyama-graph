@@ -152,6 +152,7 @@ pub mod snapshot;
 pub mod convert;
 pub use auth::{Credential, Secret, Role, read_credentials};
 pub mod optimization;
+pub mod udf;
 
 // Re-export main types for convenience
 pub use graph::{

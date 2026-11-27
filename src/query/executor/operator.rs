@@ -3161,7 +3161,7 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
 /// purpose: over-rejecting a valid query is the worse failure.
 pub fn is_known_function(name: &str) -> bool {
     let lower = name.to_lowercase();
-    lower.contains('.') || KNOWN_FUNCTIONS.contains(&lower.as_str())
+    lower.contains('.') || KNOWN_FUNCTIONS.contains(&lower.as_str()) || crate::udf::function(&lower).is_some()
 }
 
 
@@ -5169,6 +5169,11 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
                 Value::Property(PropertyValue::Boolean(b)) => Ok(Value::Property(PropertyValue::String(b.to_string()))),
                 _ => Ok(Value::Null),
             }
+        }
+        // Last, so a built-in always wins; registering a built-in's name is
+        // refused anyway (LANG-10, #1674).
+        _ if crate::udf::function(name).is_some() => {
+            crate::udf::function(name).expect("checked").call(args)
         }
         _ => Err(ExecutionError::RuntimeError(format!(
             "Unknown function: `{name}`.{}",

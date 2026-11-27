@@ -544,6 +544,12 @@ const AGGREGATE_NAMES: &[&str] = &[
     "percentilecont", "percentiledisc",
 ];
 
+/// Is `lower` (already lower-cased) the name of an aggregate? Used to refuse
+/// registering a user function under one (LANG-10, #1674).
+pub(crate) fn is_aggregate_name(lower: &str) -> bool {
+    AGGREGATE_NAMES.contains(&lower)
+}
+
 fn is_aggregate_call(expr: &Expression) -> bool {
     matches!(expr, Expression::Function { name, .. }
         if AGGREGATE_NAMES.contains(&name.to_lowercase().as_str()))
