@@ -105,11 +105,44 @@ static PRATT_PARSER: LazyLock<PrattParser<Rule>> = LazyLock::new(|| {
         .op(Op::infix(Rule::pow_op, Assoc::Left))
 });
 
+/// What a grammar failure wanted and where, as one sentence (DX-06).
+///
+/// `pest` puts its caret diagram first and says what it expected on the last
+/// line, after the diagram. A reader -- or a client that keeps the first line
+/// -- saw only "Parse error:" and a position. This states the cause before the
+/// diagram, from the same `= expected ...` line pest prints, so the two cannot
+/// disagree; the diagram follows unchanged.
+fn syntax_cause(e: &pest::error::Error<Rule>) -> String {
+    let (line, column) = match e.line_col {
+        pest::error::LineColLocation::Pos(p) => p,
+        pest::error::LineColLocation::Span(start, _) => start,
+    };
+    let rendered = e.to_string();
+    let wanted = rendered
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find_map(|l| l.strip_prefix("= "));
+    match wanted {
+        // A short list reads as a cause: "expected label", "expected node".
+        Some(w) if w.matches(", ").count() + w.matches(" or ").count() < 3 => {
+            format!("{w} at line {line}, column {column}.")
+        }
+        // A long one is grammar-rule names ("expected label_check, index_op,
+        // member_op, ..."): it stays in pest's last line, below the diagram,
+        // and the first line says only where.
+        Some(_) => format!(
+            "unexpected input at line {line}, column {column}; what could come there is listed below."
+        ),
+        None => format!("the query does not parse at line {line}, column {column}."),
+    }
+}
+
 /// Parser errors
 #[derive(Error, Debug)]
 pub enum ParseError {
     /// Pest parsing error
-    #[error("[{}] Parse error: {0}", crate::query::error_code::SYNTAX)]
+    #[error("[{}] Parse error: {}\n{0}", crate::query::error_code::SYNTAX, syntax_cause(.0))]
     PestError(#[from] pest::error::Error<Rule>),
 
     /// Semantic error

@@ -114,13 +114,20 @@ pub fn locate(query: &str, needle: &str) -> Option<Span> {
         return None;
     }
     let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    // The boundary rule keeps `n` from matching inside `name`. It only means
+    // something at an identifier edge: an operator or a quoted literal is its
+    // own boundary, so `/` is found in `1/0` and `'a'` in `[1]['a']`.
+    let ident_start = needle.chars().next().is_some_and(is_ident);
+    let ident_end = needle.chars().next_back().is_some_and(is_ident);
     let mut from = 0usize;
     while let Some(rel) = query[from..].find(needle) {
         let start = from + rel;
         let end = start + needle.len();
-        let before_ok = start == 0
+        let before_ok = !ident_start
+            || start == 0
             || !query[..start].chars().next_back().is_some_and(is_ident);
-        let after_ok = end == query.len()
+        let after_ok = !ident_end
+            || end == query.len()
             || !query[end..].chars().next().is_some_and(is_ident);
         if before_ok && after_ok {
             let line = query[..start].matches('\n').count() + 1;
@@ -283,5 +290,18 @@ mod tests {
         assert_eq!((span.line, span.column), (2, 6));
         assert_eq!(&q[span.offset..span.offset + span.len], "n");
         assert_eq!(locate("RETURN name", "n"), None);
+    }
+
+    #[test]
+    fn locate_finds_an_operator_or_literal_between_identifier_characters() {
+        // An operator or a quoted literal is its own boundary (DX-06): `/`
+        // sits between two digits in `1/0`, and was not found at all.
+        let span = locate("RETURN 1/0 AS x", "/").unwrap();
+        assert_eq!((span.line, span.column), (1, 9));
+        let span = locate("RETURN [1,2]['a'] AS x", "'a'").unwrap();
+        assert_eq!((span.column, span.len), (14, 3));
+        // An identifier keeps its boundary rule on the side that has one.
+        assert_eq!(locate("RETURN a.first_name", "first"), None);
+        assert_eq!(locate("RETURN n.name.first", "first").map(|s| s.column), Some(15));
     }
 }

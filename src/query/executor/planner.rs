@@ -955,8 +955,8 @@ pub fn unknown_procedure_message(name: &str) -> String {
     match crate::query::suggest::closest(name, known) {
         Some(known) => format!("Unknown procedure: `{name}`. Did you mean `{known}`?"),
         None => format!(
-            "Unknown procedure: `{name}`. The schema procedures are {}; graph \
-             algorithms are called as `algo.<name>()`.",
+            "Unknown procedure: `{name}`. Use one of the schema procedures instead: {}; \
+             graph algorithms are called as `algo.<name>()`.",
             KNOWN_DB_PROCEDURES.join(", ")
         ),
     }
