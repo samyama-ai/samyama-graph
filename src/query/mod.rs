@@ -152,6 +152,21 @@ impl CacheStats {
     }
 }
 
+/// Whether reads are planned by the graph-native, cost-based planner (#1729).
+///
+/// On by default: it is the planner that enumerates candidate plans and
+/// reports their cost (`Candidates evaluated`, `Chosen plan cost`), which the
+/// plan diagram (VIS-06) and EXPLAIN's cost block read, and a default server
+/// used to show none of it. `SAMYAMA_GRAPH_NATIVE=false` (or `0`) falls back to
+/// the rule-based planner, for a workload that plans worse under the new one.
+/// Read on every query, so it can be changed without a restart.
+pub fn graph_native_enabled() -> bool {
+    !matches!(
+        std::env::var("SAMYAMA_GRAPH_NATIVE").as_deref().map(str::trim),
+        Ok("false" | "0" | "off" | "no")
+    )
+}
+
 /// Query engine - high-level interface for executing queries
 ///
 /// Includes an LRU AST cache that eliminates repeated parsing overhead
@@ -526,6 +541,43 @@ impl QueryEngine {
         time_limit: Option<std::time::Duration>,
         dialect: crate::query::ast::Dialect,
     ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        self.execute_read(query_str, store, params, time_limit, dialect, None)
+    }
+
+    /// A read confined to a named subgraph (#337): the query sees only the
+    /// view's nodes and the relationships between them.
+    ///
+    /// The scope is enforced by the plan's operators -- see
+    /// [`executor::QueryPlanner::with_subgraph`] -- so the query text is run
+    /// as written. A write is refused, as is anything the operators cannot
+    /// confine.
+    pub fn execute_in_subgraph(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+        time_limit: Option<std::time::Duration>,
+        subgraph: &executor::operator::SubgraphScopeRef,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+        self.execute_read(
+            query_str,
+            store,
+            params,
+            time_limit,
+            crate::query::ast::Dialect::Cypher,
+            Some(subgraph),
+        )
+    }
+
+    fn execute_read(
+        &self,
+        query_str: &str,
+        store: &crate::graph::GraphStore,
+        params: &BoundParams,
+        time_limit: Option<std::time::Duration>,
+        dialect: crate::query::ast::Dialect,
+        subgraph: Option<&executor::operator::SubgraphScopeRef>,
+    ) -> Result<RecordBatch, Box<dyn std::error::Error>> {
         crate::usdt::query_start(query_str, false);
         let _in_flight = crate::query::metrics::in_flight();
         let parse_started = std::time::Instant::now();
@@ -548,7 +600,12 @@ impl QueryEngine {
             query = Arc::new(own);
         }
 
-        let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
+        let mut executor = if let Some(scope) = subgraph {
+            QueryExecutor::with_planner(
+                store,
+                executor::planner::QueryPlanner::new().with_subgraph(Arc::clone(scope)),
+            )
+        } else if graph_native_enabled() {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
                 executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
             ))
@@ -621,7 +678,7 @@ impl QueryEngine {
         let _in_flight = crate::query::metrics::in_flight();
         let query = self.parse_to_run(query_str)?;
 
-        let mut executor = if std::env::var("SAMYAMA_GRAPH_NATIVE").unwrap_or_default() == "true" {
+        let mut executor = if graph_native_enabled() {
             QueryExecutor::with_planner(store, executor::planner::QueryPlanner::with_config(
                 executor::planner::PlannerConfig { graph_native: true, max_candidate_plans: 64 }
             ))

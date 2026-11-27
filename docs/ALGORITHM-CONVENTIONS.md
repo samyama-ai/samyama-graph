@@ -336,6 +336,68 @@ What it refuses:
 - a `graph` that names no projection, or is not a non-empty string;
 - a `graph` an algorithm never takes a view from, rather than ignoring it.
 
+## Incremental updates
+
+`incremental: true` keeps an algorithm's result with the graph between calls
+and updates it from what was added since, instead of computing it again from
+the whole graph (ALGO-14):
+
+```cypher
+CALL algo.pageRank({incremental: true}) YIELD node, score
+
+CALL algo.wcc({incremental: true}) YIELD node, componentId
+
+CALL algo.degree({incremental: true}) YIELD node, score
+```
+
+The first call builds the result as a plain call does and keeps it. A later
+call reads the nodes and relationships created since and applies just those,
+so one new relationship costs about what it changes rather than a full run.
+`label` and `edgeType` work as they do without the key; each combination of
+them -- and, for PageRank, each `damping` -- keeps its own result.
+
+What it promises against a plain call on the same graph:
+
+| Algorithm | Same answer? |
+|---|---|
+| `algo.degree` | Exactly the same scores. |
+| `algo.wcc` | The same components. The first call's `componentId`s are the plain call's; after that an untouched component keeps its id, and two components that merge take one of their ids, which a plain call may number differently. Compare which nodes share an id, not the ids. |
+| `algo.pageRank` | The same fixed point, to within an L1 distance of `2 * 1e-4 / (1 - damping)` (1.3e-3 at 0.85) on a graph with no dangling nodes. A plain call stops after `iterations` (20), which leaves more error than that; `iterations: 1000` is the plain call to compare against. |
+
+When it computes from scratch instead -- still the right answer, at a plain
+call's cost:
+
+- **anything was deleted** -- a node or a relationship -- **or a node gained or
+  lost a label**, since the last call. Deletions are not applied as updates: a
+  removed relationship can split a component or move PageRank mass anywhere;
+- more nodes and relationships were added since the last call than the graph's
+  log of additions keeps -- between half a million and a million, depending on
+  when it last made room (`MAX_RECORDED_ADDITIONS`);
+- after the update, the result's node count (or, with no filter, its
+  relationship count) differs from the graph's. Every write is meant to reach
+  the update; this check turns one that did not into a recompute rather than
+  a wrong answer.
+
+What it keeps, and where:
+
+- with the graph, in memory, per tenant. A restart forgets it, as it forgets
+  projections;
+- at most 8 results per graph; the least recently used goes first. A PageRank
+  result holds a copy of the graph's adjacency, so this bounds the memory it
+  can hold to a few times the graph's own relationship arrays.
+
+What it refuses:
+
+- `incremental` on any other algorithm (`unknown config key`). Closeness,
+  betweenness and the like depend on paths through the whole graph, which one
+  new relationship can change anywhere;
+- an `incremental` that is not `true` or `false`;
+- `incremental: true` with `graph`: a projection is a snapshot, and the
+  incremental result follows the live graph;
+- `incremental: true` with `iterations` on PageRank: it runs until every
+  residual is small, not for a number of iterations;
+- a `damping` that is not above 0 and below 1.
+
 ## Embeddings
 
 **`gds.fastRP` and `gds.node2vec` are the one exception to "`gds.*` is the
@@ -416,13 +478,31 @@ ratio, and placing them largest first keeps the overshoot to one group per split
 |---|---|---|---|---|---|---|---|
 | Train/val/test split | split, trainTestSplit | entity: weak components of `edgeType`, direction ignored; community: Louvain's symmetrised graph; time, source, random: edges unused | Ignored | entity: a self-loop links a record to itself, so it changes no group | Each component, community or source is a group of its own; an isolated node is a group of one | Groups are shuffled by `seed`, placed largest first, each into the split furthest below its target, the earlier split on a tie; time: ordered by time then node id, and equal times share a split | Ratios must sum to 1; `[train, test]` or `[train, val, test]`. Reproducible from `seed` |
 | Split leakage check | splitLeakage, leakageCheck | entity: walks `edgeType` in both directions up to `hops` (default 3); community: Louvain recomputed on the graph as it is now; time, source: edges unused | Ignored | entity: a self-loop is walked like any edge and never pairs a node with itself | Nodes in different components are never a leak; every node in scope must hold a split, or the call is refused | Rows ordered by node ids; community and source report one row per group and pair of splits it spans, with its smallest node on each side | None: one row per leak, so `count(*)` is the leakage figure; an equal time across a boundary is not a leak |
+| Benchmark contamination | contamination, ngramOverlap, contaminationCheck | No edges: it compares the text property of the `corpusLabel` nodes with that of the `benchmarkLabel` nodes | Ignored | Not applicable; a node with both labels is never paired with itself | Not applicable: every corpus text is compared with every benchmark item; an empty text (no tokens) never matches; a label with no nodes, or a node without a string text, is refused | Rows by overlap, highest first, then corpus node id, then benchmark node id | `overlap` = the benchmark item's distinct word n-grams found in the corpus text / all of its distinct n-grams, in (0, 1]; text lower-cased and split on every non-alphanumeric character; an item shorter than `n` tokens is one gram, its whole sequence |
+
+`contamination` checks the other direction (ML-12): whether a training corpus
+already contains the items of a test set. The benchmark is whatever is loaded
+under `benchmarkLabel`; none ships with the engine. A pair is reported when at
+least `minOverlap` (default 0.5) of the benchmark item's word `n`-grams
+(default 8) occur in the corpus text, so a question quoted verbatim inside a
+long document scores 1.0.
+
+```cypher graph=benchmark-contamination
+CALL algo.contamination({corpusLabel: 'Doc', benchmarkLabel: 'Question',
+                         property: 'text', n: 8, minOverlap: 0.5})
+YIELD corpus, benchmark, shared, ngrams, overlap
+RETURN count(DISTINCT benchmark) AS seenQuestions;
+```
+
+Exact overlap only: a paraphrase shares no long n-grams and is not found, and
+a small `n` (2 or 3) reports common phrases rather than copying.
 
 ## Not a graph algorithm
 
 | Algorithm | Cypher name | Directedness | Weights | Self-loops | Disconnected | Tie-breaking | Normalisation |
 |---|---|---|---|---|---|---|---|
 | PCA | pca | No edges: it reads numeric node properties | Node properties, not edge weights; a non-numeric or missing value is the caller's to handle | Not applicable | Not applicable: there is no graph | Components in eigenvalue-descending order; equal eigenvalues give an arbitrary but reproducible basis | Centred by default, scaled on request. **Component sign is not fixed** **(differs)**. Deterministic: a fixed start vector and a seeded RNG |
-| Optimisation solvers | or.solve | Not applicable | Not applicable | Not applicable | Not applicable | Solver-specific; every solver is seed-reproducible (OPT-08) | Solver-specific. Every row carries `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and `total_time_ms` (OPT-09), multi-objective rows included; `fitness` includes the constraint penalty, `objective` does not |
+| Optimisation solvers | or.solve | Not applicable | Not applicable | Not applicable | Not applicable | Solver-specific; every solver is seed-reproducible (OPT-08) | Solver-specific. Every row carries `objective`, `feasible`, `gap`, `iterations`, `max_iterations` and `total_time_ms` (OPT-09), multi-objective rows included, and `evaluations` and `stopped_by` (`iterations`, `time_budget` or `evaluation_budget`) for the optional `timeBudgetMs` and `maxEvaluations` limits (OPT-11); `fitness` includes the constraint penalty, `objective` does not |
 
 ## Where a convention differs from the obvious one
 

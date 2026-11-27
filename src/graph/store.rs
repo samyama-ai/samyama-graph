@@ -1364,6 +1364,10 @@ pub struct GraphStore {
     /// catalog; see [`crate::graph::retention`].
     retention: crate::graph::retention::RetentionRules,
 
+    /// Named subgraphs, by name (#337). Persisted through the index catalog;
+    /// see [`crate::graph::subgraph`].
+    subgraphs: std::collections::BTreeMap<String, Arc<crate::graph::subgraph::SubgraphScope>>,
+
     /// Columnar storage for node properties
     pub node_columns: ColumnStore,
 
@@ -1426,6 +1430,12 @@ pub struct GraphStore {
     /// here counts, so a mutator added later makes a projection look stale,
     /// never fresh: the safe direction.
     data_changes: std::sync::atomic::AtomicU64,
+    /// The nodes and relationships added since a point, for the incremental
+    /// algorithms (ALGO-14). See `structure_log.rs`.
+    structure_log: super::structure_log::StructureLog,
+    /// The incremental algorithms' saved state for this graph (ALGO-14).
+    /// Lives with the store so it is per tenant and goes when the graph does.
+    incremental: crate::algo::incremental::IncrementalStates,
     /// The last content hash computed and the `data_changes` it was computed
     /// at (ML-08, #1747). A hash is one pass over the whole graph, so an
     /// export reuses it until the data changes.
@@ -1514,6 +1524,7 @@ impl GraphStore {
             graph_projections: Arc::new(crate::graph::projection::GraphProjections::new()),
             features: Arc::new(crate::graph::feature::FeatureRegistry::new()),
             retention: Default::default(),
+            subgraphs: Default::default(),
             node_columns: ColumnStore::new(),
             edge_columns: ColumnStore::new(),
             index_sender: None,
@@ -1526,6 +1537,8 @@ impl GraphStore {
             statistics_cache: std::sync::RwLock::new(None),
             epoch: std::sync::atomic::AtomicU64::new(0),
             data_changes: std::sync::atomic::AtomicU64::new(0),
+            structure_log: Default::default(),
+            incremental: Default::default(),
             content_hash_memo: std::sync::Mutex::new(None),
             snapshot_sources: Vec::new(),
             snapshot_sources_epoch: 0,
@@ -2205,6 +2218,7 @@ NodeDeleted { id, .. } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.node_added(node_id);
     }
 
     /// Create a node with multiple labels and properties, refusing one that
@@ -2398,6 +2412,7 @@ NodeDeleted { id, .. } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.node_added(node_id);
         node_id
     }
 
@@ -2541,6 +2556,7 @@ NodeDeleted { id, .. } => {
             versions.push(node);
         }
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.node_added(node_id);
         node_id
     }
 
@@ -2922,6 +2938,7 @@ NodeDeleted { id, .. } => {
         }
 
         self.journal(crate::graph::event::Mutation::NodeDeleted(id));
+        self.structure_log.rewritten();
         Ok(node)
     }
 
@@ -3011,6 +3028,7 @@ NodeDeleted { id, .. } => {
         }
 
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.rewritten();
         Ok(true)
     }
 
@@ -3172,6 +3190,7 @@ NodeDeleted { id, .. } => {
         }
 
         self.journal(crate::graph::event::Mutation::NodeUpserted(node_id));
+        self.structure_log.rewritten();
         Ok(())
     }
 
@@ -3228,6 +3247,7 @@ NodeDeleted { id, .. } => {
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.structure_log.edge_added(edge_id);
         Ok(edge_id)
     }
 
@@ -3331,6 +3351,7 @@ NodeDeleted { id, .. } => {
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.structure_log.edge_added(edge_id);
         Ok(edge_id)
     }
 
@@ -3440,6 +3461,7 @@ NodeDeleted { id, .. } => {
 
         self.note_edge_created(edge_id);
         self.journal(crate::graph::event::Mutation::EdgeUpserted(edge_id));
+        self.structure_log.edge_added(edge_id);
         Ok(edge_id)
     }
 
@@ -3746,6 +3768,7 @@ NodeDeleted { id, .. } => {
         self.catalog.on_edge_deleted(edge.source, &src_labels, &edge.edge_type, edge.target, &tgt_labels);
 
         self.journal(crate::graph::event::Mutation::EdgeDeleted(id));
+        self.structure_log.rewritten();
         Ok(edge)
     }
 
@@ -5027,6 +5050,17 @@ NodeDeleted { id, .. } => {
     /// How many times data may have changed: the epoch, less housekeeping.
     /// Equal readings mean no node, relationship, label or property changed in
     /// between. See `data_changes`.
+    /// The nodes and relationships added since a point, and whether anything
+    /// was removed (ALGO-14).
+    pub fn structure_log(&self) -> &super::structure_log::StructureLog {
+        &self.structure_log
+    }
+
+    /// The incremental algorithms' saved state (ALGO-14).
+    pub fn incremental_states(&self) -> &crate::algo::incremental::IncrementalStates {
+        &self.incremental
+    }
+
     /// The memo `snapshot::content_hash::cached_content_hash` keeps.
     pub(crate) fn content_hash_memo(&self) -> &std::sync::Mutex<Option<(u64, String)>> {
         &self.content_hash_memo
@@ -6602,6 +6636,7 @@ NodeDeleted { id, .. } => {
     /// Clear all data from the graph
     pub fn clear(&mut self) {
         self.invalidate_statistics_cache();
+        self.structure_log.rewritten();
         self.snapshot_sources.clear();
         self.snapshot_sources_stale = false;
         self.structure_registry.clear();
@@ -6633,6 +6668,7 @@ NodeDeleted { id, .. } => {
         // Materialized feature values name nodes `clear` just removed.
         self.features = Arc::new(crate::graph::feature::FeatureRegistry::new());
         self.retention.clear();
+        self.subgraphs.clear();
         self.node_columns = ColumnStore::new();
         self.edge_columns = ColumnStore::new();
         self.next_node_id = 1;
@@ -6794,6 +6830,45 @@ NodeDeleted { id, .. } => {
         old
     }
 
+    /// Define a named subgraph (#337). Refuses a name already in use: a
+    /// definition is replaced by dropping it first, so a typo cannot silently
+    /// rewrite a view other callers depend on.
+    pub fn create_subgraph(
+        &mut self,
+        definition: crate::graph::subgraph::SubgraphDefinition,
+    ) -> Result<Arc<crate::graph::subgraph::SubgraphScope>, String> {
+        let scope = Arc::new(crate::graph::subgraph::SubgraphScope::compile(definition)?);
+        if self.subgraphs.contains_key(scope.name()) {
+            return Err(format!("subgraph '{}' already exists; drop it first to redefine it", scope.name()));
+        }
+        self.subgraphs.insert(scope.name().to_string(), Arc::clone(&scope));
+        // A cached scoped answer must not outlive the definition it used.
+        self.bump_epoch();
+        self.mark_index_catalog_changed();
+        Ok(scope)
+    }
+
+    /// Remove a named subgraph. The data it viewed is untouched. Returns the
+    /// definition, or `None` if there was none by that name.
+    pub fn drop_subgraph(&mut self, name: &str) -> Option<Arc<crate::graph::subgraph::SubgraphScope>> {
+        let old = self.subgraphs.remove(name);
+        if old.is_some() {
+            self.bump_epoch();
+            self.mark_index_catalog_changed();
+        }
+        old
+    }
+
+    /// The named subgraph called `name`, if there is one.
+    pub fn subgraph(&self, name: &str) -> Option<Arc<crate::graph::subgraph::SubgraphScope>> {
+        self.subgraphs.get(name).cloned()
+    }
+
+    /// Every named subgraph, by name.
+    pub fn subgraphs(&self) -> impl Iterator<Item = &Arc<crate::graph::subgraph::SubgraphScope>> {
+        self.subgraphs.values()
+    }
+
     /// Every label's retention rule, by label.
     pub fn retention_rules(&self) -> &crate::graph::retention::RetentionRules {
         &self.retention
@@ -6853,6 +6928,15 @@ NodeDeleted { id, .. } => {
             max_age_ms: rule.max_age_ms,
             max_records: rule.max_records,
         }));
+        definitions.extend(self.subgraphs.values().map(|scope| {
+            let d = scope.definition();
+            IndexDefinition::Subgraph {
+                name: d.name.clone(),
+                labels: d.labels.clone(),
+                edge_types: d.edge_types.clone(),
+                predicates: d.predicates.iter().map(|(l, p)| (l.clone(), p.clone())).collect(),
+            }
+        }));
         // Sorted so two runs of the same DDL produce byte-identical records and
         // a diff of the catalog is a diff of the indexes, not of hash order.
         definitions.sort_by_key(|d| match d {
@@ -6882,6 +6966,9 @@ NodeDeleted { id, .. } => {
             }
             IndexDefinition::Retention { label, .. } => {
                 (7u8, label.clone(), String::new(), String::new())
+            }
+            IndexDefinition::Subgraph { name, .. } => {
+                (8u8, name.clone(), String::new(), String::new())
             }
         });
         IndexCatalog { definitions }
@@ -7104,6 +7191,26 @@ NodeDeleted { id, .. } => {
                             max_records: *max_records,
                         },
                     );
+                }
+                IndexDefinition::Subgraph { name, labels, edge_types, predicates } => {
+                    let definition = crate::graph::subgraph::SubgraphDefinition {
+                        name: name.clone(),
+                        labels: labels.clone(),
+                        edge_types: edge_types.clone(),
+                        predicates: predicates.iter().cloned().collect(),
+                    };
+                    match crate::graph::subgraph::SubgraphScope::compile(definition) {
+                        Ok(scope) => {
+                            self.subgraphs.insert(name.clone(), Arc::new(scope));
+                        }
+                        Err(e) => {
+                            // Accepted when it was created, so this is a rule
+                            // tightened since. Dropped with a warning rather
+                            // than failing the boot over a view.
+                            tracing::warn!("could not restore subgraph '{name}': {e}");
+                            report.failed += 1;
+                        }
+                    }
                 }
                 IndexDefinition::VectorParams { label, property, m, ef_construction, ef } => {
                     vector_params.push((
@@ -7430,36 +7537,77 @@ NodeDeleted { id, .. } => {
         strategy: Option<crate::vector::strategy::FilterStrategy>,
         keep: impl Fn(NodeId) -> bool,
     ) -> VectorResult<Vec<(NodeId, f32)>> {
-        if strategy == Some(crate::vector::strategy::FilterStrategy::Exact) {
+        // An int8 index answers from its codes (#1974). Take more candidates
+        // than asked for and rerank them with the f32 vector on the node.
+        let (factor, metric) = match self.vector_index.get_index(label, property_key) {
+            Some(index) => {
+                let index = index.read().unwrap();
+                (index.quantization().rerank_factor(), index.metric())
+            }
+            None => (1, crate::vector::DistanceMetric::Cosine),
+        };
+        let fetch = k.saturating_mul(factor);
+        let hits = if strategy == Some(crate::vector::strategy::FilterStrategy::Exact) {
             let index = self.vector_index.get_index(label, property_key).ok_or_else(|| {
                 crate::vector::VectorError::IndexError(format!("no vector index on :{label}({property_key})"))
             })?;
             let label_key = Label::new(label);
-            let result = index.read().unwrap().search_exact_where(query, k, &|id| {
+            let result = index.read().unwrap().search_exact_where(query, fetch, &|id| {
                 self.get_node(id).is_some_and(|n| n.labels.contains(&label_key)) && keep(id)
             });
-            return result;
-        }
-        // Only nodes that still carry the label: the HNSW graph cannot drop a
-        // node, so one that lost the label, or was deleted, is still in it and
-        // must not be returned (#1605).
-        let label_key = Label::new(label);
-        if strategy == Some(crate::vector::strategy::FilterStrategy::Inline) {
-            // The predicate inside the walk (#1999): one search, no widening.
-            return self
-                .vector_index
-                .search_inline_ef(label, property_key, query, k, ef, |id| {
-                    self.get_node(id)
-                        .is_some_and(|n| n.labels.contains(&label_key))
-                        && keep(id)
-                });
-        }
-        self.vector_index
-            .search_filtered_ef(label, property_key, query, k, ef, |id| {
+            result?
+        } else {
+            // Only nodes that still carry the label: the HNSW graph cannot drop a
+            // node, so one that lost the label, or was deleted, is still in it and
+            // must not be returned (#1605).
+            let label_key = Label::new(label);
+            let live = |id| {
                 self.get_node(id)
                     .is_some_and(|n| n.labels.contains(&label_key))
                     && keep(id)
-            })
+            };
+            if strategy == Some(crate::vector::strategy::FilterStrategy::Inline) {
+                // The predicate inside the walk (#1999): one search, no widening.
+                self.vector_index
+                    .search_inline_ef(label, property_key, query, fetch, ef, live)?
+            } else {
+                self.vector_index
+                    .search_filtered_ef(label, property_key, query, fetch, ef, live)?
+            }
+        };
+        if factor > 1 {
+            Ok(self.rerank_vector_hits(property_key, metric, query, hits, k))
+        } else {
+            Ok(hits)
+        }
+    }
+
+    /// The `k` nearest of `hits` by the f32 vector each node holds in
+    /// `property_key` (#1974), at the distance an unquantized index would
+    /// report. A node whose property is not a vector of the query's length
+    /// keeps the index's own distance.
+    fn rerank_vector_hits(
+        &self,
+        property_key: &str,
+        metric: crate::vector::DistanceMetric,
+        query: &[f32],
+        mut hits: Vec<(NodeId, f32)>,
+        k: usize,
+    ) -> Vec<(NodeId, f32)> {
+        for (id, d) in &mut hits {
+            // Column first, row as fallback (#1187): a node's properties
+            // live in the column store, so its row copy may not hold them.
+            let exact = self
+                .node_property(*id, property_key)
+                .and_then(|p| p.to_vector())
+                .filter(|v| v.len() == query.len());
+            if let Some(v) = exact {
+                *d = metric.distance(query, &v);
+            }
+        }
+        hits.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        hits.truncate(k);
+        hits
     }
 
     /// The `k` nearest among `candidates` that still carry the label and pass
@@ -7606,6 +7754,7 @@ NodeDeleted { id, .. } => {
     pub fn insert_recovered_node(&mut self, node: Node) {
         self.bump_epoch();
         let node_id = node.id;
+        self.structure_log.node_added(node_id);
         let idx = node_id.as_u64() as usize;
 
         // Ensure storage capacity
@@ -7660,6 +7809,7 @@ NodeDeleted { id, .. } => {
         if !self.has_node(target) {
             return Err(GraphError::InvalidEdgeTarget(target));
         }
+        self.structure_log.edge_added(edge_id);
 
         // Update adjacency lists (sorted insert)
         {

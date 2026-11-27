@@ -858,6 +858,9 @@ pub struct QueryPlanner {
     /// LIMIT k` can start from (#2255), set per `plan` call like `hints`.
     /// Taken by the first scan choice for its variable.
     nearest: std::sync::Mutex<Option<NearestTopK>>,
+    /// The named subgraph every plan is confined to (#337). `None` plans
+    /// against the whole tenant graph, as always.
+    subgraph: Option<super::operator::SubgraphScopeRef>,
 }
 
 /// `CYPHER` options in force for the query being planned (#1616).
@@ -936,11 +939,17 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
     "db.schema.visualization",
 ];
 
+/// Named procedures outside `db.*`, offered as "did you mean" beside
+/// [`KNOWN_DB_PROCEDURES`] but not listed among the schema procedures when
+/// nothing is close (#2098).
+pub const KNOWN_OTHER_PROCEDURES: &[&str] = &["ai.rag.retrieve"];
+
 /// The refusal for a procedure name nothing dispatches: a likely intended
 /// name when there is one, and otherwise where the procedures are.
 pub fn unknown_procedure_message(name: &str) -> String {
     let known = KNOWN_DB_PROCEDURES
         .iter()
+        .chain(KNOWN_OTHER_PROCEDURES)
         .chain(super::feature_ops::FeatureProcedure::NAMES)
         .copied();
     match crate::query::suggest::closest(name, known) {
@@ -963,6 +972,7 @@ impl QueryPlanner {
             hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
             forcing: std::sync::Mutex::new(Forcing::default()),
             nearest: std::sync::Mutex::new(None),
+            subgraph: None,
         }
     }
 
@@ -975,12 +985,67 @@ impl QueryPlanner {
             hints: std::sync::Mutex::new((Vec::new(), HashSet::new())),
             forcing: std::sync::Mutex::new(Forcing::default()),
             nearest: std::sync::Mutex::new(None),
+            subgraph: None,
         }
     }
 
     /// Get the current planner configuration
     pub fn config(&self) -> &PlannerConfig {
         &self.config
+    }
+
+    /// Confine every plan this planner makes to a named subgraph (#337).
+    ///
+    /// The scope is enforced by the operators, not by rewriting the query:
+    /// the plan is made as for the whole graph, with the shortcuts that
+    /// answer from whole-graph counts or indexes turned off, and then every
+    /// operator is handed the scope. One that cannot honour it fails the
+    /// plan -- see [`super::operator::restrict_plan_to_subgraph`].
+    pub fn with_subgraph(mut self, scope: super::operator::SubgraphScopeRef) -> Self {
+        self.subgraph = Some(scope);
+        self
+    }
+
+    /// The named subgraph this planner is confined to, if any.
+    pub fn subgraph(&self) -> Option<&super::operator::SubgraphScopeRef> {
+        self.subgraph.as_ref()
+    }
+
+    /// What a scoped query may not contain, checked before planning.
+    ///
+    /// Each of these is evaluated straight against the store from inside an
+    /// expression, where no operator stands between it and the whole graph:
+    /// a pattern predicate or `EXISTS {}` in a filter, a pattern
+    /// comprehension, and the hierarchy functions, which read the OEH index.
+    /// Read off the query's own structure, so a form not listed here that
+    /// nests one of them is still caught.
+    fn check_subgraph_query(query: &Query) -> ExecutionResult<()> {
+        if query.is_write() {
+            return Err(ExecutionError::PlanningError(
+                crate::graph::subgraph::WRITE_REFUSED.to_string(),
+            ));
+        }
+        if query.plan_options.plan.is_some() || query.plan_options.planner.is_some() {
+            return Err(ExecutionError::PlanningError(
+                "CYPHER planner options are not supported inside a named subgraph".to_string(),
+            ));
+        }
+        let shape = format!("{query:?}").to_ascii_lowercase();
+        for (needle, what) in [
+            ("existssubquery", "pattern predicates and EXISTS { } subqueries"),
+            ("patterncomprehension", "pattern comprehensions"),
+            ("\"subsumes\"", "subsumes()"),
+            ("\"hierarchy_rollup\"", "hierarchy_rollup()"),
+            ("\"hierarchy_lca\"", "hierarchy_lca()"),
+        ] {
+            if shape.contains(needle) {
+                return Err(ExecutionError::PlanningError(format!(
+                    "{what} are not supported inside a named subgraph yet; \
+                     run the query against the tenant graph"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// Build the physical plan for a detected hierarchy rewrite (ADR-035 §8).
@@ -1328,6 +1393,21 @@ impl QueryPlanner {
     }
 
     pub fn plan(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
+        let Some(scope) = self.subgraph.clone() else {
+            return self.plan_whole_graph(query, store);
+        };
+        Self::check_subgraph_query(query)?;
+        let mut plan = self.plan_whole_graph(query, store)?;
+        if plan.is_write {
+            return Err(ExecutionError::PlanningError(
+                crate::graph::subgraph::WRITE_REFUSED.to_string(),
+            ));
+        }
+        super::operator::restrict_plan_to_subgraph(&mut plan.root, &scope)?;
+        Ok(plan)
+    }
+
+    fn plan_whole_graph(&self, query: &Query, store: &GraphStore) -> ExecutionResult<ExecutionPlan> {
         use crate::query::ast::PlannerChoice;
         // Diagnostics are left for EXPLAIN to take; a query that ran without
         // EXPLAIN would otherwise leave its candidates for the next one to print.
@@ -1879,7 +1959,10 @@ impl QueryPlanner {
         // correlated `CALL { WITH p, x MATCH (p)-[]->(x) RETURN count(*) }` came
         // back as EdgeCount over every relationship (#1236). A seeded plan takes
         // the general pipeline, which starts from the seed.
-        if seed.is_none() {
+        //
+        // Off inside a named subgraph (#337) too: each answers from an index
+        // or a count over the whole graph, which no operator can confine.
+        if seed.is_none() && self.subgraph.is_none() {
             // ADR-035: answer a reflexive subtree aggregate or enumeration from the OEH
             // hierarchy index. The detector is conservative — when it returns Some, the
             // rewrite is answer-preserving and only the cost changes.
@@ -3555,6 +3638,7 @@ impl QueryPlanner {
             // thing there is. `is_write` is already computed above and covers
             // every write clause, so it is the whole condition.
             let use_label_count = has_aggregation
+                && self.subgraph.is_none()
                 && !is_write
                 && !seeded
                 && aggregates.len() == 1
@@ -3593,6 +3677,7 @@ impl QueryPlanner {
             // Edge type count cache: O(1) shortcut for MATCH ()-[r]->() RETURN type(r), count(r)
             // Detect: one count aggregate, one group-by with type() function, single edge path, no WHERE
             let use_edge_type_count = has_aggregation
+                && self.subgraph.is_none()
                 && !is_write
                 && !seeded
                 && aggregates.len() == 1
@@ -3643,6 +3728,7 @@ impl QueryPlanner {
                 None
             };
             let use_edge_count = has_aggregation
+                && self.subgraph.is_none()
                 && !is_write
                 && !seeded
                 && aggregates.len() == 1
@@ -4154,6 +4240,43 @@ impl QueryPlanner {
                 call_clause.arguments.clone(),
                 &yields,
             )?));
+        }
+
+        if call_clause.procedure_name == super::rag_ops::NAME {
+            // (label, property, queryVector, k, hops) (#2098). The first four
+            // are `db.index.vector.queryNodes`' own, planned by it, so the two
+            // read their arguments the same way and refuse the same mistakes.
+            let args = &call_clause.arguments;
+            if args.len() != 5 {
+                return Err(ExecutionError::PlanningError(format!(
+                    "{} takes (label, property, queryVector, k, hops)",
+                    super::rag_ops::NAME
+                )));
+            }
+            let hops = match super::operator::eval_expression(&args[4], &super::Record::new(), store) {
+                Ok(super::Value::Property(PropertyValue::Integer(h))) if h >= 0 => h as usize,
+                _ => {
+                    return Err(ExecutionError::PlanningError(format!(
+                        "{}: hops must be a non-negative integer",
+                        super::rag_ops::NAME
+                    )))
+                }
+            };
+            let search = CallClause {
+                procedure_name: "db.index.vector.queryNodes".to_string(),
+                arguments: args[..4].to_vec(),
+                yield_items: ["node", "score"]
+                    .iter()
+                    .map(|n| crate::query::ast::YieldItem { name: n.to_string(), alias: None })
+                    .collect(),
+            };
+            let search = self.plan_call_filtered(&search, store, None, None)?;
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::rag_ops::RagRetrieveOperator::new(search, hops, &yields)?));
         }
 
         if call_clause.procedure_name == "db.index.vector.queryNodes" {
@@ -4842,10 +4965,14 @@ impl QueryPlanner {
     }
 
     fn dispatch_plan_match_inner(&self, match_clause: &MatchClause, where_clause: Option<&WhereClause>, store: &GraphStore) -> ExecutionResult<OperatorBox> {
-        let (graph_native, forced) = {
+        let (graph_native, forced, asked_for_cost) = {
             let f = self.forcing.lock().unwrap();
-            (f.graph_native.unwrap_or(self.config.graph_native), f.plan)
+            (f.graph_native.unwrap_or(self.config.graph_native), f.plan, f.graph_native == Some(true))
         };
+        // The cost-based enumerator can choose operators no subgraph can
+        // confine (a worst-case-optimal join); a scoped plan takes the
+        // default planner, whose operators all can (#337).
+        let graph_native = graph_native && self.subgraph.is_none();
         if let Some(n) = forced {
             // A pattern the enumerator cannot plan has the one plan the
             // default planner gives it, so `plan=1` is that plan and any
@@ -4865,6 +4992,34 @@ impl QueryPlanner {
             let plan = self.plan_match_native(match_clause, where_clause, store, n - 1)?;
             Self::note_native_plan_count();
             return Ok(plan);
+        }
+        if graph_native && !asked_for_cost && Self::is_cyclic(match_clause) {
+            // A cyclic pattern closes on a TrieJoin in the default planner,
+            // which counts parallel relationships correctly. The enumerator's
+            // plan closes it with an ExpandInto behind relationship-uniqueness
+            // Filters, which its TrieJoin rewrite cannot merge across, so with
+            // the graph-native planner on (the default since #1729) cyclic
+            // patterns lost their worst-case-optimal join (#2249, PERF-07).
+            // Until the enumerator's TrieJoin binds relationships with their
+            // multiplicity, a cycle goes to the planner that plans it right.
+            // Only by default: `CYPHER planner=cost` asks for the enumerator
+            // by name, and gets it.
+            return self.plan_match(match_clause, where_clause, store);
+        }
+        let nearest_pending = self.nearest.lock().unwrap().is_some();
+        if graph_native
+            && !asked_for_cost
+            && (nearest_pending || where_clause.is_some_and(|w| Self::uses_default_only_index(&w.predicate)))
+        {
+            // The same, for predicates only the default planner answers from an
+            // index: `subsumes()` from a hierarchy (OEH) index and the
+            // `point.*` functions from a point index (NDS-04). The enumerator
+            // plans them as generic filters, which on a hierarchy query meant
+            // a plan that ran past its deadline and on a point query a full
+            // scan (hier_cross_hierarchy, index_definitions_survive_restart).
+            // A pending nearest scan (`ORDER BY point.distance(...) LIMIT k`,
+            // found before the MATCH is planned) is consumed only there too.
+            return self.plan_match(match_clause, where_clause, store);
         }
         if graph_native {
             match self.plan_match_native(match_clause, where_clause, store, 0) {
@@ -4886,6 +5041,62 @@ impl QueryPlanner {
         } else {
             self.plan_match(match_clause, where_clause, store)
         }
+    }
+
+    /// Whether a WHERE calls a function only the default planner answers from
+    /// an index: `subsumes` (hierarchy index) or `point.*` (point index). Looks
+    /// through AND/OR/NOT and comparisons, where those planners find them.
+    fn uses_default_only_index(e: &Expression) -> bool {
+        match e {
+            Expression::Function { name, args, .. } => {
+                let n = name.to_ascii_lowercase();
+                n == "subsumes" || n.starts_with("point.") || args.iter().any(Self::uses_default_only_index)
+            }
+            Expression::Binary { left, right, .. } => {
+                Self::uses_default_only_index(left) || Self::uses_default_only_index(right)
+            }
+            Expression::Unary { expr, .. } => Self::uses_default_only_index(expr),
+            _ => false,
+        }
+    }
+
+    /// Whether this MATCH's pattern closes a cycle: some relationship joins two
+    /// node variables its other relationships already connect (#2249). Each
+    /// anonymous node is its own; a relationship from a node to itself is a
+    /// cycle of one.
+    fn is_cyclic(match_clause: &MatchClause) -> bool {
+        let mut parent: Vec<usize> = Vec::new();
+        let mut named: HashMap<String, usize> = HashMap::new();
+        fn find(parent: &mut Vec<usize>, mut x: usize) -> usize {
+            while parent[x] != x {
+                parent[x] = parent[parent[x]];
+                x = parent[x];
+            }
+            x
+        }
+        let mut id = |node: &crate::query::ast::NodePattern, parent: &mut Vec<usize>| -> usize {
+            let fresh = |parent: &mut Vec<usize>| {
+                parent.push(parent.len());
+                parent.len() - 1
+            };
+            match &node.variable {
+                Some(v) => *named.entry(v.clone()).or_insert_with(|| fresh(parent)),
+                None => fresh(parent),
+            }
+        };
+        for path in &match_clause.pattern.paths {
+            let mut prev = id(&path.start, &mut parent);
+            for segment in &path.segments {
+                let next = id(&segment.node, &mut parent);
+                let (a, b) = (find(&mut parent, prev), find(&mut parent, next));
+                if a == b {
+                    return true;
+                }
+                parent[a] = b;
+                prev = next;
+            }
+        }
+        false
     }
 
     /// Fold the candidate count of the MATCH `plan_match_native` just planned
