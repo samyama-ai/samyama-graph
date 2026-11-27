@@ -211,6 +211,9 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
         // The path and its totals, then the result envelope (OPT-09, #2265).
         &["path", "cost", "resource", "objective", "feasible", "gap", "iterations", "total_time_ms"],
     ),
+    // Structure-aware (#2037): graphs whose nodes have 3D or geographic positions.
+    read("algo.structural.astar", &[], Path, &["path", "hops", "length", "direct", "stretch", "expanded", "expandedUnguided"]),
+    read("algo.structural.stress", &[], Structure, &["source", "target", "distance", "pathLength", "hops", "stretch"]),
 ];
 
 /// How an argument is passed: by position, or as a key of the config map.
@@ -530,6 +533,20 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         LABEL,
         EDGE_TYPE,
     ]),
+    ("algo.structural.astar", &[
+        SOURCE,
+        TARGET,
+        opt("structure", T::String),
+        key("cost", T::String, D::String("length")),
+        EDGE_TYPE,
+        key("undirected", T::Boolean, D::Boolean(true)),
+    ]),
+    ("algo.structural.stress", &[
+        opt("structure", T::String),
+        opt("radius", T::Float),
+        EDGE_TYPE,
+        key("limit", T::Integer, D::Integer(100)),
+    ]),
     // Neighbour sampling (ML-02, #1717). `seeds` is one node id or a list.
     // `batchSize` has no fixed default: left out, every seed is one batch.
     ("algo.sample.neighbors", &[
@@ -669,6 +686,8 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
     ("algo.split", "Assigns each node to train, validation or test so that related nodes (a component, a community, a source, or a time window) land in the same split."),
     ("algo.splitLeakage", "The pairs of related nodes that a split put in different splits, each with the reason they count as a leak."),
+    ("algo.structural.astar", "The shortest path between two positioned nodes, by length or by hops, searched in order of the straight-line distance to the target."),
+    ("algo.structural.stress", "Pairs of positioned nodes within a radius that no relationship joins, with the shortest path between them and its stretch over the straight line."),
     ("algo.sample.neighbors", "Samples up to fanout neighbours per node at each hop out from the seed nodes, in minibatches, as a GNN trainer draws them; seeded, so the same seed returns the same rows."),
     ("algo.sample.forestFire", "A sample of size nodes burnt outward from the seed nodes as a forest fire, each burning node igniting a geometric number of its unburnt neighbours; seeded."),
     ("algo.sample.snowball", "The seed nodes and their neighbourhood, wave by wave for hops waves, taking up to perNode new neighbours of each node."),

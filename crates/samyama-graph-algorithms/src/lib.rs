@@ -8,6 +8,7 @@ mod gpu_parity_coverage;
 #[cfg(all(test, feature = "gpu"))]
 mod gpu_parity_tests;
 pub mod pagerank;
+pub mod guided_path;
 pub mod incremental;
 pub mod frontier;
 pub mod progress;
@@ -42,6 +43,7 @@ pub use constrained_path::{
 };
 pub use pagerank::{page_rank, page_rank_with, PageRankConfig};
 pub use progress::{NoProgress, Progress, Stopped};
+pub use guided_path::{guided_shortest_path, GuidedPath};
 pub use incremental::{
     IncrementalDegree, IncrementalPageRank, IncrementalPageRankError, IncrementalWcc, RESIDUAL_TOLERANCE,
 };

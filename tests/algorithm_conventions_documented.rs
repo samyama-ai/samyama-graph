@@ -33,7 +33,9 @@ fn canonical(name: &str) -> String {
         .or_else(|| bare.strip_prefix("samyama."))
         .unwrap_or(bare);
     let bare = match bare.rsplit_once('.') {
-        Some((prefix, tail)) if prefix != "or" => tail,
+        // `or.` and `structural.` are part of the name: `structural.astar`
+        // is not `aStar`.
+        Some((prefix, tail)) if prefix != "or" && prefix != "structural" => tail,
         _ => bare,
     };
     bare.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()).collect()
