@@ -851,10 +851,13 @@ fn cmd_convert(argv: &[String]) -> i32 {
              \x20                      [--missing-endpoints fail|placeholder|drop]\n\
              \x20                      [--report report.json] [--require-lossless]\n\
              \x20                      [--mapping mapping.yaml | --preset generic|skos|owl|samyama]\n\
+             \x20                      [--sgsnap-version 2|3]\n\
              \x20      samyama convert --formats\n\n\
              The format comes from each file's extension; --from / --to override it.\n\
              A path with no extension is a CSV directory.\n\
-             RDF input is mapped by --mapping or --preset (default: generic).\n\n{}",
+             RDF input is mapped by --mapping or --preset (default: generic).\n\
+             A .sgsnap output is written as v2 (gzip JSON lines) unless --sgsnap-version 3\n\
+             asks for the Parquet layout; any version is read.\n\n{}",
             convert::format_matrix()
         );
     };
@@ -869,7 +872,15 @@ fn cmd_convert(argv: &[String]) -> i32 {
     }
 
     // Flags that take a value, and the positional arguments around them.
-    const VALUED: [&str; 6] = ["--from", "--to", "--missing-endpoints", "--report", "--mapping", "--preset"];
+    const VALUED: [&str; 7] = [
+        "--from",
+        "--to",
+        "--missing-endpoints",
+        "--report",
+        "--mapping",
+        "--preset",
+        "--sgsnap-version",
+    ];
     let mut positional = Vec::new();
     let mut values = std::collections::HashMap::new();
     let mut require_lossless = false;
@@ -988,7 +999,21 @@ fn cmd_convert(argv: &[String]) -> i32 {
 
     // Losses are judged here, after writing, so exit 1 means "converted, and
     // something was dropped" -- the report is still written.
-    let opts = Options { on_missing_endpoint, require_lossless: false, mapping };
+    let sgsnap_version = match values.get("--sgsnap-version").copied() {
+        None => None,
+        Some(v) => match v.parse::<u32>() {
+            Ok(n) if samyama::snapshot::WRITABLE_VERSIONS.contains(&n) => Some(n),
+            _ => {
+                eprintln!("convert: --sgsnap-version is 2 or 3, not {v:?}");
+                return 2;
+            }
+        },
+    };
+    if sgsnap_version.is_some() && to != Format::Sgsnap {
+        eprintln!("convert: --sgsnap-version applies to .sgsnap output, not {to}");
+        return 2;
+    }
+    let opts = Options { on_missing_endpoint, require_lossless: false, mapping, sgsnap_version };
     let file = match std::fs::File::open(input) {
         Ok(f) => f,
         Err(e) => {

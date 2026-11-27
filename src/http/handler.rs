@@ -3550,7 +3550,30 @@ pub async fn import_json_handler(
 // ==================== Snapshot Handlers ====================
 
 /// POST /api/snapshot/export — export a .sgsnap snapshot
-pub async fn export_snapshot_handler(State(state): State<AppState>) -> impl IntoResponse {
+/// Query parameters for snapshot export.
+#[derive(Deserialize, Default)]
+pub struct SnapshotExportParams {
+    /// The `.sgsnap` version to write: 2 (gzip JSON lines, the default) or 3
+    /// (Parquet, #1099).
+    #[serde(default)]
+    pub version: Option<u32>,
+}
+
+pub async fn export_snapshot_handler(
+    State(state): State<AppState>,
+    Query(params): Query<SnapshotExportParams>,
+) -> impl IntoResponse {
+    let opts = crate::snapshot::WriteOptions {
+        version: params.version.unwrap_or(crate::snapshot::format::SNAPSHOT_VERSION),
+        ..Default::default()
+    };
+    if !crate::snapshot::WRITABLE_VERSIONS.contains(&opts.version) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("version is 2 or 3, not {}", opts.version) })),
+        )
+            .into_response();
+    }
     let store_guard = crate::store_lock::read(&state.store).await;
 
     let mut buf = Vec::new();
@@ -3558,8 +3581,8 @@ pub async fn export_snapshot_handler(State(state): State<AppState>) -> impl Into
     // too, because a `.sgsnap` an operator cannot open without a key should not
     // be indistinguishable from one they can.
     let exported = match &state.snapshot_key {
-        None => crate::snapshot::export_tenant(&store_guard, &mut buf),
-        Some(k) => crate::snapshot::export_tenant_encrypted(&store_guard, &mut buf, k),
+        None => crate::snapshot::export_tenant_with_options(&store_guard, &mut buf, &opts),
+        Some(k) => crate::snapshot::export_tenant_encrypted_with_options(&store_guard, &mut buf, k, &opts),
     };
     match exported {
         Ok(stats) => {

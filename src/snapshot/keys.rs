@@ -7,7 +7,6 @@
 
 use crate::snapshot::codec::json_to_property;
 use crate::snapshot::format::{SnapshotHeader, SnapshotNode};
-use flate2::read::GzDecoder;
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 use serde_json::Value;
@@ -327,7 +326,7 @@ fn visit_snapshot_nodes(
     mut visit: impl FnMut(SnapshotNode, u32),
 ) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::open(path)?;
-    let mut lines = BufReader::new(GzDecoder::new(file)).lines();
+    let mut lines = BufReader::new(super::open_lines(file)?).lines();
     let header_line = lines
         .next()
         .ok_or("empty snapshot file: missing header")??;
@@ -335,7 +334,7 @@ fn visit_snapshot_nodes(
     if header.format != "sgsnap" {
         return Err(format!("{} is not an sgsnap file", path.display()).into());
     }
-    if header.version != 1 && header.version != 2 {
+    if !(1..=super::v3::VERSION).contains(&header.version) {
         return Err(format!(
             "{} has unsupported snapshot version {}",
             path.display(),

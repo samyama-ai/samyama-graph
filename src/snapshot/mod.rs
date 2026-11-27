@@ -17,6 +17,7 @@ pub mod keys;
 pub mod persist;
 pub mod verify;
 pub mod results;
+pub mod v3;
 pub mod publish_gate;
 
 use std::collections::{HashMap, HashSet};
@@ -98,14 +99,51 @@ pub fn export_tenant(
 /// How [`write_file`] writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WriteOptions {
-    /// gzip level, 0-9. See [`DEFAULT_SNAPSHOT_COMPRESSION`].
+    /// gzip level, 0-9. See [`DEFAULT_SNAPSHOT_COMPRESSION`]. A v3 file is
+    /// not gzip and ignores it.
     pub compression_level: u32,
+    /// The format version to write: 2 (gzip JSON lines, the default) or 3
+    /// (Parquet, [`v3`]). Anything else is refused by the export.
+    pub version: u32,
 }
 
 impl Default for WriteOptions {
     fn default() -> Self {
-        Self { compression_level: DEFAULT_SNAPSHOT_COMPRESSION }
+        Self { compression_level: DEFAULT_SNAPSHOT_COMPRESSION, version: SNAPSHOT_VERSION }
     }
+}
+
+/// The format versions an export can write. Import reads these and v1.
+pub const WRITABLE_VERSIONS: [u32; 2] = [SNAPSHOT_VERSION, v3::VERSION];
+
+/// Export as `opts` says: v2 at `opts.compression_level`, or v3 (#1099).
+///
+/// v2 stays the default everywhere; v3 is written only when a caller asks for
+/// it, so nothing that consumes `.sgsnap` files today sees a new format it did
+/// not opt into.
+pub fn export_tenant_with_options(
+    store: &GraphStore,
+    writer: impl Write,
+    opts: &WriteOptions,
+) -> Result<ExportStats, Box<dyn std::error::Error>> {
+    match opts.version {
+        SNAPSHOT_VERSION => export_tenant_with_compression(store, writer, opts.compression_level),
+        v3::VERSION => v3::export(store, writer),
+        other => Err(format!(
+            "unsupported snapshot version {other} to write: expected {} or {}",
+            SNAPSHOT_VERSION,
+            v3::VERSION
+        )
+        .into()),
+    }
+}
+
+/// Export as a v3 (Parquet) snapshot. See [`v3`].
+pub fn export_tenant_v3(
+    store: &GraphStore,
+    writer: impl Write,
+) -> Result<ExportStats, Box<dyn std::error::Error>> {
+    v3::export(store, writer)
 }
 
 /// Write `store` to `path` as a `.sgsnap`, from any `GraphStore`, with no
@@ -156,7 +194,7 @@ pub fn write_file_if(
 
     let written = (|| -> Result<ExportStats, Box<dyn std::error::Error>> {
         let mut out = std::io::BufWriter::new(std::fs::File::create(&tmp)?);
-        let stats = export_tenant_with_compression(store, &mut out, opts.compression_level)?;
+        let stats = export_tenant_with_options(store, &mut out, opts)?;
         let file = out.into_inner().map_err(|e| e.into_error())?;
         file.sync_all()?;
         Ok(stats)
@@ -308,7 +346,6 @@ pub fn export_tenant_with_compression(
     let node_count = nodes.len() as u64;
     let total_edge_count = full_edges.len() as u64 + adjacency_edge_count;
 
-    let dropped = losses(total_edge_count);
 
     // Create gzip encoder, behind a buffer.
     //
@@ -324,21 +361,7 @@ pub fn export_tenant_with_compression(
         GzEncoder::new(CountingWriter::new(writer), Compression::new(compression_level.min(9))),
     );
 
-    // The store's sources go forward with its data (#1911). When the graph
-    // changed after they were recorded, they describe where it started, not
-    // what it is now: said in the loss report rather than claimed silently.
-    let sources = store.snapshot_sources().to_vec();
-    let mut dropped = dropped;
-    if !sources.is_empty() && !store.snapshot_sources_are_current() {
-        dropped.push(crate::snapshot::format::Dropped {
-            what: "sources_may_be_stale".to_string(),
-            count: sources.len() as u64,
-            detail: "The graph changed after it was converted from the sources in this \
-                     header, so they say where the data started, not that it still \
-                     matches them."
-                .to_string(),
-        });
-    }
+    let (dropped, sources) = export_losses(store, total_edge_count);
 
     // Write header (v2)
     let header = SnapshotHeader {
@@ -378,16 +401,7 @@ pub fn export_tenant_with_compression(
     // rebuild on import. Declined hierarchies are exported too: the probe is a property of
     // the data, so a hierarchy that declines here may be in regime after the import that
     // reshapes it, and dropping the declaration would silently lose the user's intent.
-    for info in store.hierarchy_index.list() {
-        let record = SnapshotHierarchyIndex {
-            t: "h".to_string(),
-            name: info.name.clone(),
-            edge_types: info.edge_types.clone(),
-            reverse: false,
-            measure_label: None,
-            measure_property: info.measure.clone(),
-            ops: info.ops.iter().map(|o| o.to_string()).collect(),
-        };
+    for record in hierarchy_records(store) {
         let json = serde_json::to_string(&record)?;
         gz.write_all(json.as_bytes())?;
         gz.write_all(b"\n")?;
@@ -534,6 +548,49 @@ impl<W: Write> Write for CountingWriter<W> {
 /// Each row says what it means for the restored graph rather than naming an
 /// internal structure, because the reader of this is deciding whether the
 /// restore is good enough.
+/// The loss report and the sources a header carries, shared by v2 and v3 so
+/// the two say the same thing about the same graph.
+fn export_losses(
+    store: &GraphStore,
+    edge_count: u64,
+) -> (Vec<crate::snapshot::format::Dropped>, Vec<crate::snapshot::format::SnapshotSource>) {
+    let mut dropped = losses(edge_count);
+    // The store's sources go forward with its data (#1911). When the graph
+    // changed after they were recorded, they describe where it started, not
+    // what it is now: said in the loss report rather than claimed silently.
+    let sources = store.snapshot_sources().to_vec();
+    if !sources.is_empty() && !store.snapshot_sources_are_current() {
+        dropped.push(crate::snapshot::format::Dropped {
+            what: "sources_may_be_stale".to_string(),
+            count: sources.len() as u64,
+            detail: "The graph changed after it was converted from the sources in this \
+                     header, so they say where the data started, not that it still \
+                     matches them."
+                .to_string(),
+        });
+    }
+    (dropped, sources)
+}
+
+/// Hierarchy-index declarations as snapshot records (ADR-035), for v2 lines
+/// and the v3 manifest alike.
+fn hierarchy_records(store: &GraphStore) -> Vec<SnapshotHierarchyIndex> {
+    store
+        .hierarchy_index
+        .list()
+        .into_iter()
+        .map(|info| SnapshotHierarchyIndex {
+            t: "h".to_string(),
+            name: info.name.clone(),
+            edge_types: info.edge_types.clone(),
+            reverse: false,
+            measure_label: None,
+            measure_property: info.measure.clone(),
+            ops: info.ops.iter().map(|o| o.to_string()).collect(),
+        })
+        .collect()
+}
+
 fn losses(edge_count: u64) -> Vec<crate::snapshot::format::Dropped> {
     use crate::snapshot::format::Dropped;
     let mut out = Vec::new();
@@ -585,6 +642,20 @@ pub fn export_tenant_encrypted(
     // `finish` and not `Drop`: the terminator is what tells a reader the file
     // is whole, and a `Drop` that failed to write it on a full disk could not
     // say so. A snapshot without its terminator does not import.
+    enc.finish()?;
+    Ok(stats)
+}
+
+/// [`export_tenant_encrypted`] in the version `opts` names. A v3 file is
+/// sealed exactly as a v2 one is: the archive is the plaintext stream.
+pub fn export_tenant_encrypted_with_options(
+    store: &GraphStore,
+    writer: impl Write,
+    key: &[u8; encryption::KEY_BYTES],
+    opts: &WriteOptions,
+) -> Result<ExportStats, Box<dyn std::error::Error>> {
+    let mut enc = encryption::EncryptingWriter::new(writer, key)?;
+    let stats = export_tenant_with_options(store, &mut enc, opts)?;
     enc.finish()?;
     Ok(stats)
 }
@@ -707,7 +778,7 @@ impl<R: BufRead> Iterator for BoundedLines<R> {
 /// Reads one line and stops; the rest of a hundred-million-node file is never
 /// decompressed.
 pub fn peek_header(reader: impl Read) -> Result<SnapshotHeader, Box<dyn std::error::Error>> {
-    let decoder = GzDecoder::new(reader);
+    let decoder = open_lines(reader)?;
     let header_line = BoundedLines::new(BufReader::new(decoder), MAX_LINE_BYTES)
         .next()
         .ok_or("empty snapshot file: missing header")??;
@@ -721,6 +792,46 @@ pub fn peek_header(reader: impl Read) -> Result<SnapshotHeader, Box<dyn std::err
     }
     Ok(header)
 }
+
+/// The first bytes of a stream, up to `n`, read without losing any: the
+/// caller chains them back in front of the rest.
+fn read_head(reader: &mut impl Read, n: usize) -> std::io::Result<Vec<u8>> {
+    let mut head = vec![0u8; n];
+    let mut filled = 0usize;
+    while filled < n {
+        match reader.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(k) => filled += k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    head.truncate(filled);
+    Ok(head)
+}
+
+/// A decrypted snapshot stream as the JSON lines every version reads as:
+/// a v1/v2 file through gzip, a v3 file ([`v3`]) through its Parquet reader.
+///
+/// The version is decided by the file's first block, not its header, so a
+/// file that is neither fails in the gzip decoder with the error it always
+/// did. Everything that reads a snapshot -- import, `peek_header`, the key
+/// and PII scans, the schema diagram -- goes through here, so none of them
+/// has a v3 path of its own.
+pub fn open_lines<'a>(
+    mut reader: impl Read + 'a,
+) -> Result<Box<dyn Read + 'a>, Box<dyn std::error::Error>> {
+    let head = read_head(&mut reader, HEAD_BYTES)?;
+    let stream = std::io::Cursor::new(head.clone()).chain(reader);
+    if v3::looks_like_v3(&head) {
+        Ok(Box::new(v3::LineReader::new(stream)?))
+    } else {
+        Ok(Box::new(GzDecoder::new(stream)))
+    }
+}
+
+/// How much of a file [`open_lines`] looks at: one tar header block.
+const HEAD_BYTES: usize = 512;
 
 /// `peek_header` for a file that may be encrypted, sniffed the same way
 /// `import_tenant_maybe_encrypted` sniffs it.
@@ -791,24 +902,20 @@ pub fn edit_header(
         &mut serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<SnapshotHeader, Box<dyn std::error::Error>> {
-    let mut head = [0u8; 12];
-    let mut filled = 0usize;
-    while filled < head.len() {
-        match reader.read(&mut head[filled..])? {
-            0 => break,
-            n => filled += n,
-        }
-    }
-    let head = &head[..filled];
-    if encryption::looks_encrypted(head) {
+    let head = read_head(&mut reader, HEAD_BYTES)?;
+    if encryption::looks_encrypted(&head) {
         return Err(
             "this snapshot is encrypted; edit its header (link a catalog or results, \
              mark it read-only) before encrypting it"
                 .into(),
         );
     }
+    let reader = std::io::Cursor::new(head.clone()).chain(reader);
+    if v3::looks_like_v3(&head) {
+        return v3::edit_header(reader, writer, edit);
+    }
 
-    let mut src = BufReader::new(GzDecoder::new(head.chain(reader)));
+    let mut src = BufReader::new(GzDecoder::new(reader));
     let mut header_line = String::new();
     if src.read_line(&mut header_line)? == 0 {
         return Err("empty snapshot file: missing header".into());
@@ -1076,7 +1183,7 @@ fn import_tenant_inner(
     created_nodes: &mut Vec<crate::graph::NodeId>,
     merged: &mut Vec<MergeUndo>,
 ) -> Result<ImportStats, Box<dyn std::error::Error>> {
-    let decoder = GzDecoder::new(reader);
+    let decoder = open_lines(reader)?;
     let mut lines = BoundedLines::new(BufReader::new(decoder), MAX_LINE_BYTES);
 
     // Parse header (first line)
@@ -1109,9 +1216,9 @@ fn import_tenant_inner(
         )
         .into());
     }
-    if header.version != 1 && header.version != 2 {
+    if !(1..=v3::VERSION).contains(&header.version) {
         return Err(format!(
-            "unsupported snapshot version: expected 1 or 2, got {}",
+            "unsupported snapshot version: expected 1, 2 or 3, got {}",
             header.version
         )
         .into());
@@ -1458,6 +1565,14 @@ fn import_tenant_inner(
                             node.set_property(key.clone(), pv);
                         }
                     }
+                }
+                // `Node::set_property` above stamps `updated_at` with `now`,
+                // so the snapshot's value is put back after the properties:
+                // restored before them, a node with an array, map, vector or
+                // temporal property came back claiming to have been updated
+                // at import time.
+                if let Some(node) = store.get_node_mut(new_id) {
+                    node.updated_at = snap_node.updated_at;
                 }
                 // Register in dedup index
                 for &key in dedup_keys {
