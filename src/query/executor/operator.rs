@@ -22891,6 +22891,27 @@ impl AlgorithmOperator {
         Ok(())
     }
 
+    /// One node's cost for `or.solve`'s objective, read from `cost_property`
+    /// (OPT-07, #2264).
+    ///
+    /// A whole number is that number. The cost used to be read with
+    /// `as_float`, which is `None` for an `Integer`, so `{cost: 3}` was
+    /// solved as a cost of `1.0` and the call reported success on an
+    /// objective the caller never wrote -- the same misreading #2266 fixed
+    /// for `budget`. A node without the property costs `1.0`, as documented;
+    /// any other value is refused by node and property rather than replaced.
+    fn or_solve_cost(store: &GraphStore, node: NodeId, cost_property: &str) -> ExecutionResult<f64> {
+        match store.node_property(node, cost_property) {
+            None | Some(PropertyValue::Null) => Ok(1.0),
+            Some(PropertyValue::Float(f)) => Ok(f),
+            Some(PropertyValue::Integer(i)) => Ok(i as f64),
+            Some(other) => Err(ExecutionError::bad_argument(format!(
+                "or.solve: cost property `{cost_property}` on node {} must be a number, got {other:?}",
+                node.as_u64()
+            ))),
+        }
+    }
+
     /// `bestKnown` (or `best_known`) from an `or.solve` config: the objective
     /// value the caller knows to be the best, which `gap` is measured against
     /// (OPT-09, #1776).
@@ -23192,11 +23213,9 @@ impl AlgorithmOperator {
                 if cost_props.is_empty() {
                     single_costs.push(1.0);
                 } else {
-                    let first = store.node_property(node.id, &cost_props[0]).and_then(|v| v.as_float()).unwrap_or(1.0);
-                    single_costs.push(first);
+                    single_costs.push(Self::or_solve_cost(store, node.id, &cost_props[0])?);
                     for (i, cp) in cost_props.iter().enumerate() {
-                        let cost = store.node_property(node.id, cp).and_then(|v| v.as_float()).unwrap_or(1.0);
-                        multi_costs[i].push(cost);
+                        multi_costs[i].push(Self::or_solve_cost(store, node.id, cp)?);
                     }
                 }
             }
