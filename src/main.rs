@@ -2290,6 +2290,12 @@ async fn start_server() {
             Some(p) => match samyama::auth::read_credentials(std::path::Path::new(&p)) {
                 Ok(c) => {
                     println!("HTTP API: {} credential(s) loaded from {p}", c.len());
+                    // A credential with retrieval rules (#2233): from here on a
+                    // query path that does not say whose rules apply cannot
+                    // retrieve, rather than retrieving with none.
+                    if c.iter().any(|c| c.rag_hide.is_some()) {
+                        samyama::query::executor::rag_policy::require_scope();
+                    }
                     c
                 }
                 Err(e) => {

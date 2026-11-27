@@ -3,12 +3,17 @@
 //! One credential file serves both protocols. Each line is
 //!
 //! ```text
-//! name:secret[:tenant=<graph>][:roles=<role>,<role>...]
+//! name:secret[:tenant=<graph>][:roles=<role>,<role>...][:rag_hide=<rule>,<rule>...]
 //! ```
 //!
 //! where `secret` is the SHA-256 hex digest of a machine token or an argon2 PHC
 //! string for a password. The trailing fields are optional and may come in
-//! either order.
+//! any order.
+//!
+//! `rag_hide=` lists what this principal's GraphRAG retrievals
+//! (`ai.rag.retrieve`) must leave out of a context: `label/L`, `edge/T`,
+//! `prop/k` or `prop/L.k`. It governs retrieval only, not ordinary queries;
+//! see [`crate::query::executor::rag_policy`] (#2233).
 //!
 //! A line with no `roles=` field is an admin. Before roles existed every
 //! credential could do everything, and a file written then has to mean the same
@@ -16,6 +21,9 @@
 //! existing deployment into one that refuses every request.
 
 use std::path::Path;
+use std::sync::Arc;
+
+use crate::query::executor::rag_policy::RagPolicy;
 
 /// What a credential may do. Ordered: each role includes the ones below it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -84,6 +92,9 @@ pub struct Credential {
     pub tenant: Option<String>,
     /// Never empty after parsing; see the module docs for the default.
     pub roles: Vec<Role>,
+    /// What this principal's GraphRAG contexts must leave out (`rag_hide=`),
+    /// or `None` for nothing.
+    pub rag_hide: Option<Arc<RagPolicy>>,
 }
 
 impl Credential {
@@ -100,6 +111,7 @@ impl Credential {
 
         let mut tenant = None;
         let mut roles = None;
+        let mut rag_hide = None;
         // Neither an argon2 PHC string nor a hex digest contains `=` in its
         // last `:`-separated field in a way that starts with these keys, so
         // peeling them off the end cannot eat part of a secret.
@@ -129,6 +141,13 @@ impl Credential {
                     return Some(Err(format!("empty `roles=` in {line:?}")));
                 }
                 roles = Some(parsed);
+            } else if let Some(r) = last.strip_prefix("rag_hide=") {
+                // A bad rule is an error, as a bad role is: a policy that
+                // silently hides less than it says is the failure to avoid.
+                match RagPolicy::parse(r) {
+                    Ok(p) => rag_hide = Some(Arc::new(p)),
+                    Err(e) => return Some(Err(format!("{e} in {line:?}"))),
+                }
             } else {
                 break;
             }
@@ -144,6 +163,7 @@ impl Credential {
             secret,
             tenant: tenant.clone(),
             roles: roles.clone().unwrap_or_else(|| vec![Role::Admin]),
+            rag_hide: rag_hide.clone(),
         };
 
         if secret_str.starts_with("$argon2") {
@@ -153,6 +173,14 @@ impl Credential {
             Ok(d) => Some(Ok(tenant_roles(Secret::Token(d)))),
             Err(e) => Some(Err(format!("{e} for {name:?}"))),
         }
+    }
+
+    /// The rules this principal's retrievals run under: its `rag_hide=`, or
+    /// none.
+    pub fn rag_policy(&self) -> Arc<RagPolicy> {
+        self.rag_hide
+            .clone()
+            .unwrap_or_else(|| Arc::new(RagPolicy::unrestricted()))
     }
 
     /// Whether this credential holds `role` or one above it.
@@ -254,6 +282,12 @@ pub fn read_credentials(path: &Path) -> Result<Vec<Credential>, String> {
         ));
     }
     Ok(out)
+}
+
+/// The retrieval rules a request runs under (#2233): its credential's, or
+/// none when the listener authenticates nobody.
+pub fn rag_policy_of(user: Option<&Credential>) -> Arc<RagPolicy> {
+    user.map_or_else(|| Arc::new(RagPolicy::unrestricted()), Credential::rag_policy)
 }
 
 /// Compare two digests without letting the time taken depend on where they differ.

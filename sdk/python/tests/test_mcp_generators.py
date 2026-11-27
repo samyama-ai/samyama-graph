@@ -432,6 +432,9 @@ class TestRetrieveEvidence:
         cypher, graph = client.query_readonly.call_args[0]
         assert graph == "default"
         assert cypher.startswith("CALL ai.rag.retrieve('Chunk', 'emb', [1.0, 0.0], 4, 2) YIELD ")
+        # Only id columns: the entity ones are closed under property rules (#2233).
+        yielded = cypher.split(" YIELD ", 1)[1].split(" RETURN ", 1)[0].split(", ")
+        assert not {"node", "seed", "path"} & set(yielded)
 
     def test_returns_the_envelope(self, client, mcp):
         data = json.loads(self._tool(client, mcp)([1.0, 0.0]))

@@ -236,6 +236,9 @@ struct ResultKey {
     /// `GraphStore::features`' generation: a `feature.get` answered before
     /// the latest materialization is not served after it (ML-07).
     features: u64,
+    /// The GraphRAG retrieval rules the answer was computed under (#2233), so
+    /// one principal's retrieval is never served to another with fewer rules.
+    rag_policy: Option<String>,
 }
 
 /// Canonical, order-independent rendering of bound parameters.
@@ -773,6 +776,7 @@ impl QueryEngine {
             epoch: store.epoch(),
             projections: store.graph_projections.generation(),
             features: store.features.generation(),
+            rag_policy: executor::rag_policy::active_fingerprint(),
         };
 
         {
