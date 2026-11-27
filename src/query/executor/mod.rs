@@ -88,6 +88,7 @@ pub mod projection_ops;
 pub mod structure_ops;
 pub mod point_ops;
 pub mod rag_ops;
+pub mod rag_verify;
 pub mod hybrid_ops;
 pub mod vector_ops;
 pub mod sparql_call;

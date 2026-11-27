@@ -942,7 +942,7 @@ pub const KNOWN_DB_PROCEDURES: &[&str] = &[
 /// Named procedures outside `db.*`, offered as "did you mean" beside
 /// [`KNOWN_DB_PROCEDURES`] but not listed among the schema procedures when
 /// nothing is close (#2098).
-pub const KNOWN_OTHER_PROCEDURES: &[&str] = &["ai.rag.retrieve"];
+pub const KNOWN_OTHER_PROCEDURES: &[&str] = &["ai.rag.retrieve", "ai.rag.verify_or_refuse"];
 
 /// The refusal for a procedure name nothing dispatches: a likely intended
 /// name when there is one, and otherwise where the procedures are.
@@ -4237,6 +4237,19 @@ impl QueryPlanner {
                 .collect();
             return Ok(Box::new(super::vector_ops::VectorSimilarityGraphOperator::new(
                 procedure,
+                call_clause.arguments.clone(),
+                &yields,
+            )?));
+        }
+
+        // The check-or-refuse gate over a retrieval's evidence (#2234).
+        if call_clause.procedure_name == super::rag_verify::NAME {
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            return Ok(Box::new(super::rag_verify::RagVerifyOperator::new(
                 call_clause.arguments.clone(),
                 &yields,
             )?));
