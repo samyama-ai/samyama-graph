@@ -116,7 +116,28 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
         ("POST", "/api/tx/begin") => vec![bare("begin", "/api/tx/begin")],
         ("POST", "/api/tx/{id}/commit") => vec![bare("unknown id", "/api/tx/nope/commit")],
         ("POST", "/api/tx/{id}/rollback") => vec![bare("unknown id", "/api/tx/nope/rollback")],
-        ("GET", "/api/schema") => vec![bare("schema", "/api/schema")],
+        ("GET", "/api/schema") => vec![
+            bare("schema", "/api/schema"),
+            bare("unknown subgraph", "/api/schema?subgraph=nope"),
+        ],
+        ("GET", "/api/subgraphs") => vec![bare("list", "/api/subgraphs")],
+        ("POST", "/api/subgraphs") => vec![
+            json(
+                "a definition",
+                "/api/subgraphs",
+                r#"{"name": "people", "labels": ["Person"], "edge_types": ["KNOWS"]}"#,
+            ),
+            json("no labels", "/api/subgraphs", r#"{"name": "empty", "labels": []}"#),
+            json(
+                "a bad predicate",
+                "/api/subgraphs",
+                r#"{"name": "p", "labels": ["Person"], "where": {"Person": "count(*) > 1"}}"#,
+            ),
+            json("no name", "/api/subgraphs", r#"{"labels": ["Person"]}"#),
+            json("broken JSON", "/api/subgraphs", BROKEN),
+        ],
+        ("GET", "/api/subgraphs/{name}") => vec![bare("unknown name", "/api/subgraphs/nope")],
+        ("DELETE", "/api/subgraphs/{name}") => vec![bare("unknown name", "/api/subgraphs/nope")],
         ("GET", "/api/algorithms/catalog") => vec![bare("catalog", "/api/algorithms/catalog")],
         ("POST", "/api/import/csv") => vec![
             raw("not multipart", "/api/import/csv", "application/json", "{}"),
@@ -187,6 +208,15 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
             bare("a negative limit", "/api/slowlog?limit=-1"),
         ],
         ("DELETE", "/api/slowlog") => vec![bare("reset", "/api/slowlog")],
+        ("POST", "/api/sparql") => vec![
+            json("a SELECT", "/api/sparql", r#"{"query": "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"}"#),
+            json("an ASK", "/api/sparql", r#"{"query": "ASK { ?s ?p ?o }"}"#),
+            raw("a SPARQL body", "/api/sparql", "application/sparql-query", "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"),
+            json("a syntax error", "/api/sparql", r#"{"query": "SELEKT ?s"}"#),
+            json("a CONSTRUCT", "/api/sparql", r#"{"query": "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"}"#),
+            json("another graph", "/api/sparql", r#"{"query": "ASK { ?s ?p ?o }", "graph": "other"}"#),
+            json("broken JSON", "/api/sparql", BROKEN),
+        ],
         ("GET", "/api/changes") => vec![
             bare("no token", "/api/changes"),
             bare("a token that does not parse", "/api/changes?since=nope"),
@@ -244,6 +274,10 @@ fn probes(method: &str, path: &str) -> Option<Vec<Probe>> {
         ("POST", "/api/verify") => vec![
             json("no fields", "/api/verify", r#"{}"#),
             json("broken JSON", "/api/verify", BROKEN),
+        ],
+        ("POST", "/api/retract") => vec![
+            json("no fields", "/api/retract", r#"{}"#),
+            json("broken JSON", "/api/retract", BROKEN),
         ],
         ("POST", "/api/nlq") => vec![
             json("no fields", "/api/nlq", r#"{}"#),

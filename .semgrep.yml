@@ -1,0 +1,106 @@
+# Samyama's own static rules (#2209, REL-12): what a generic linter does not
+# know about this codebase. Run by scripts/check_semgrep.py, which holds each
+# rule to a ceiling (scripts/semgrep_ceilings.json): the findings that exist
+# today are recorded, and a new one fails CI. See that script for how to
+# lower a ceiling after fixing one, or raise it with a reason.
+rules:
+  - id: samyama-no-unwrap-on-request-paths
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      `.unwrap()` / `.expect()` on a request, wire or parser path turns bad
+      input into a panic: the connection drops, and a panic on a path holding a
+      lock poisons it for every request after (#1655). Return an error the
+      caller can map to a 4xx instead.
+    patterns:
+      - pattern-either:
+          - pattern: $X.unwrap()
+          - pattern: $X.expect(...)
+      # Test code is not a request path. Matched by module name: Semgrep's
+      # Rust matcher does not see `#[cfg(test)]` on a module.
+      - pattern-not-inside: |
+          mod tests { ... }
+      - pattern-not-inside: |
+          mod cov_tests { ... }
+      - pattern-not-inside: |
+          #[test]
+          fn $F(...) { ... }
+      - pattern-not-inside: |
+          #[tokio::test]
+          async fn $F(...) { ... }
+    paths:
+      include:
+        - "src/http/"
+        - "src/protocol/"
+        - "src/query/parser.rs"
+      exclude:
+        - "*_tests.rs"
+        - "*_cov_tests*.rs"
+        - "**/tests.rs"
+
+  - id: samyama-store-write-lock-outside-mutate
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      A write lock on the store taken outside `AppState::mutate` skips what
+      `mutate` does around every write: the write log, persistence, the
+      tenant quota admission (#1483, #2225) and degraded-mode refusal
+      (#1274). Route the write through `mutate`.
+    patterns:
+      # One match per lock: `.write()` alone, so `.write().await` is not
+      # counted a second time.
+      - pattern-either:
+          - pattern: $S.store.write()
+          - pattern: store.write()
+      - pattern-not-inside: |
+          fn mutate(...) { ... }
+      - pattern-not-inside: |
+          async fn mutate(...) { ... }
+      # Test code is not a request path. Matched by module name: Semgrep's
+      # Rust matcher does not see `#[cfg(test)]` on a module.
+      - pattern-not-inside: |
+          mod tests { ... }
+      - pattern-not-inside: |
+          mod cov_tests { ... }
+      - pattern-not-inside: |
+          #[tokio::test]
+          async fn $F(...) { ... }
+    # HTTP only: `AppState::mutate` is the HTTP server's write path. RESP
+    # (src/protocol/) persists through its own command handler.
+    paths:
+      include:
+        - "src/http/"
+      exclude:
+        - "*_tests.rs"
+        - "*_cov_tests*.rs"
+        - "**/tests.rs"
+
+  - id: samyama-cypher-built-with-format
+    languages: [rust]
+    severity: ERROR
+    message: >-
+      Cypher assembled with `format!` and run: a value spliced into query text
+      is an injection the moment it comes from a caller. Bind it as a
+      parameter (`$name` with `BoundParams`) instead.
+    patterns:
+      - pattern-either:
+          - pattern: $E.execute(&format!(...), ...)
+          - pattern: $E.execute_mut(&format!(...), ...)
+          - pattern: $E.execute_with_params(&format!(...), ...)
+          - pattern: $E.execute_with_params_within(&format!(...), ...)
+          - pattern: $E.execute_mut_with_params_within(&format!(...), ...)
+          - pattern: $E.execute_cached(&format!(...), ...)
+      # Test code is not a request path. Matched by module name: Semgrep's
+      # Rust matcher does not see `#[cfg(test)]` on a module.
+      - pattern-not-inside: |
+          mod tests { ... }
+      - pattern-not-inside: |
+          mod cov_tests { ... }
+    paths:
+      include:
+        - "src/"
+      exclude:
+        - "*_tests.rs"
+        - "*_cov_tests*.rs"
+        - "**/tests.rs"
+        - "src/bin/"

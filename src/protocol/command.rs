@@ -107,6 +107,8 @@ impl CommandHandler {
             }
             // These name no graph: the transaction is on the only one served.
             "GRAPH.COMMIT" | "GRAPH.ROLLBACK" => (Some("default".to_string()), None),
+            // A subgraph definition is part of the tenant graph's catalog (#337).
+            "GRAPH.SUBGRAPH.CREATE" | "GRAPH.SUBGRAPH.DROP" => (Some("default".to_string()), None),
             _ => return None,
         };
         Some(AuditEntry { command, tenant, query_hash })
@@ -174,6 +176,10 @@ impl CommandHandler {
             "GRAPH.DELETE" => self.handle_graph_delete(args, store, auth).await,
             "GRAPH.LIST" => self.handle_graph_list(args, store, auth).await,
             "GRAPH.SLOWLOG" => self.handle_graph_slowlog(args, auth),
+            "GRAPH.SUBGRAPH.CREATE" => self.handle_subgraph_create(args, store, auth).await,
+            "GRAPH.SUBGRAPH.DROP" => self.handle_subgraph_drop(args, store, auth).await,
+            "GRAPH.SUBGRAPH.LIST" => self.handle_subgraph_list(args, store, auth).await,
+            "GRAPH.SUBGRAPH.INFO" => self.handle_subgraph_info(args, store, auth).await,
             "PING" => self.handle_ping(args),
             "ECHO" => self.handle_echo(args),
             "INFO" => self.handle_info(store).await,
@@ -241,12 +247,6 @@ impl CommandHandler {
             Ok(None) => return RespValue::Error("ERR null graph name".to_string()),
             Err(e) => return RespValue::Error(format!("ERR {}", e)),
         };
-        if graph_name != "default" {
-            return RespValue::Error(format!(
-                "ERR this build serves a single graph ('default'); graph '{}' does not exist",
-                graph_name
-            ));
-        }
         let query_str = match args[2].as_string() {
             Ok(Some(s)) => s,
             Ok(None) => return RespValue::Error("ERR null query".to_string()),
@@ -256,6 +256,17 @@ impl CommandHandler {
             Ok(p) => p,
             Err(e) => return RespValue::Error(format!("ERR {e}")),
         };
+        if graph_name != "default" {
+            // A read of a named subgraph sees the transaction's own writes (#337).
+            if let Some(scope) = store.subgraph(&graph_name) {
+                return self.run_in_subgraph(&scope, &query_str, &params, store, auth);
+            }
+            return RespValue::Error(format!(
+                "ERR this build serves a single graph ('default'); graph '{}' does not exist, \
+                 and no named subgraph has that name",
+                graph_name
+            ));
+        }
         // Tenant binding and the statement's role (#1328).
         if let Some(user) = auth {
             if let Err(e) = user.authorize_statement(&graph_name, self.query_engine.statement_is_write(&query_str)) {
@@ -343,8 +354,13 @@ impl CommandHandler {
             Err(e) => return RespValue::Error(format!("ERR {}", e)),
         };
         if graph_name != "default" {
+            // A named subgraph of the tenant graph is addressed the same way (#337).
+            if let Some(reply) = self.query_named_subgraph(&graph_name, args, store, auth).await {
+                return reply;
+            }
             return RespValue::Error(format!(
-                "ERR this build serves a single graph ('default'); graph '{}' does not exist. \
+                "ERR this build serves a single graph ('default'); graph '{}' does not exist, \
+                 and no named subgraph has that name (GRAPH.SUBGRAPH.LIST). \
                  The name was previously ignored and the query ran against 'default', \
                  merging datasets. Use 'default', or run a separate instance per dataset.",
                 graph_name
@@ -398,7 +414,7 @@ impl CommandHandler {
         // Stages of the command's trace (#2077), as on HTTP.
         let mut store_guard = {
             use tracing::Instrument;
-            store.write().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write")).await
+            crate::store_lock::write(store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write")).await
         };
 
             // Record what the statement changes, so persistence does not depend on
@@ -463,7 +479,7 @@ impl CommandHandler {
         } else {
             let store_guard = {
                 use tracing::Instrument;
-                store.read().instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+                crate::store_lock::read(store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
             };
             let res = self
                 .query_engine
@@ -568,6 +584,247 @@ impl CommandHandler {
         }
     }
 
+    /// A GRAPH.QUERY or GRAPH.RO_QUERY whose graph name is a named subgraph
+    /// of the tenant graph (#337). `None` if there is no subgraph by that name.
+    ///
+    /// The query runs as written, under a planner that confines every operator
+    /// to the view. A write is refused: a view has no clear meaning for one.
+    async fn query_named_subgraph(
+        &self,
+        name: &str,
+        args: &[RespValue],
+        store: &Arc<RwLock<GraphStore>>,
+        auth: Option<&crate::auth::Credential>,
+    ) -> Option<RespValue> {
+        let guard = {
+            use tracing::Instrument;
+            crate::store_lock::read(store).instrument(tracing::debug_span!("samyama.lock.acquire", mode = "read")).await
+        };
+        let scope = guard.subgraph(name)?;
+        let query_str = match args[2].as_string() {
+            Ok(Some(s)) => s,
+            Ok(None) => return Some(RespValue::Error("ERR null query".to_string())),
+            Err(e) => return Some(RespValue::Error(format!("ERR {}", e))),
+        };
+        let params = match Self::params_from_args(&query_str, &args[3..]) {
+            Ok(p) => p,
+            Err(e) => return Some(RespValue::Error(format!("ERR {e}"))),
+        };
+        Some(self.run_in_subgraph(&scope, &query_str, &params, &guard, auth))
+    }
+
+    /// Run a read in `scope` against `store`. Shared by the plain and the
+    /// transaction paths.
+    fn run_in_subgraph(
+        &self,
+        scope: &crate::query::executor::operator::SubgraphScopeRef,
+        query_str: &str,
+        params: &crate::query::BoundParams,
+        store: &GraphStore,
+        auth: Option<&crate::auth::Credential>,
+    ) -> RespValue {
+        // The view is part of the tenant graph, so the tenant's binding and
+        // roles apply as to any query of it.
+        if let Some(user) = auth {
+            if let Err(e) = user.authorize_statement("default", self.query_engine.statement_is_write(query_str)) {
+                return RespValue::Error(format!("ERR {e}"));
+            }
+        }
+        if self.query_engine.statement_is_write(query_str).unwrap_or(false) {
+            return RespValue::Error(format!("ERR {}", crate::graph::subgraph::WRITE_REFUSED));
+        }
+        let time_limit = self.tenant_manager.query_time_limit("default");
+        match self.query_engine.execute_in_subgraph(query_str, store, params, time_limit, scope) {
+            Ok(batch) => self.format_query_result(batch),
+            Err(e) => RespValue::Error(format!("ERR {e}")),
+        }
+    }
+
+    /// GRAPH.SUBGRAPH.CREATE name LABELS a,b [EDGETYPES x,y] [WHERE Label predicate]...
+    ///
+    /// Defines a named subgraph of the tenant graph (#337). A `WHERE` names the
+    /// label it restricts; when the subgraph has one label the label may be
+    /// left out. The definition is written to the index catalog before the
+    /// reply, so it survives a restart.
+    async fn handle_subgraph_create(
+        &self,
+        args: &[RespValue],
+        store: &Arc<RwLock<GraphStore>>,
+        auth: Option<&crate::auth::Credential>,
+    ) -> RespValue {
+        if let Some(user) = auth {
+            if let Err(e) = user.authorize_statement("default", Ok::<bool, ()>(true)) {
+                return RespValue::Error(format!("ERR {e}"));
+            }
+        }
+        let words: Vec<String> = match args[1..]
+            .iter()
+            .map(|a| a.as_string().map_err(|e| e.to_string()).and_then(|s| s.ok_or_else(|| "null argument".to_string())))
+            .collect::<Result<_, _>>()
+        {
+            Ok(w) => w,
+            Err(e) => return RespValue::Error(format!("ERR {e}")),
+        };
+        let definition = match Self::parse_subgraph_definition(&words) {
+            Ok(d) => d,
+            Err(e) => return RespValue::Error(format!("ERR {e}")),
+        };
+        // persistence: the catalog is written below, before the reply, and the
+        // definition taken back out if that write fails.
+        let mut guard = crate::store_lock::write(store).await;
+        let scope = match guard.create_subgraph(definition) {
+            Ok(s) => s,
+            Err(e) => return RespValue::Error(format!("ERR {e}")),
+        };
+        if let Some(pm) = &self.persistence {
+            if let Err(e) = pm.persist_index_catalog("default", &guard) {
+                guard.drop_subgraph(scope.name());
+                return RespValue::Error(format!("ERR the subgraph could not be saved: {e}"));
+            }
+        }
+        RespValue::SimpleString("OK".to_string())
+    }
+
+    /// The arguments of GRAPH.SUBGRAPH.CREATE, read into a definition.
+    fn parse_subgraph_definition(words: &[String]) -> Result<crate::graph::subgraph::SubgraphDefinition, String> {
+        const USAGE: &str = "usage: GRAPH.SUBGRAPH.CREATE <name> LABELS <label>[,<label>...] \
+                             [EDGETYPES <type>[,<type>...]] [WHERE [<label>] <predicate>]...";
+        let list = |s: &str| -> Vec<String> {
+            s.split(',').map(str::trim).filter(|x| !x.is_empty()).map(str::to_string).collect()
+        };
+        let mut it = words.iter().peekable();
+        let name = it.next().ok_or(USAGE)?.clone();
+        let mut labels = Vec::new();
+        let mut edge_types = Vec::new();
+        let mut wheres: Vec<Vec<String>> = Vec::new();
+        while let Some(word) = it.next() {
+            match word.to_ascii_uppercase().as_str() {
+                "LABELS" => labels.extend(list(it.next().ok_or(USAGE)?)),
+                "EDGETYPES" | "TYPES" => edge_types.extend(list(it.next().ok_or(USAGE)?)),
+                "WHERE" => {
+                    let mut parts = Vec::new();
+                    while let Some(next) = it.peek() {
+                        if matches!(next.to_ascii_uppercase().as_str(), "LABELS" | "EDGETYPES" | "TYPES" | "WHERE") {
+                            break;
+                        }
+                        parts.push(it.next().cloned().unwrap_or_default());
+                    }
+                    if parts.is_empty() {
+                        return Err(USAGE.to_string());
+                    }
+                    wheres.push(parts);
+                }
+                other => return Err(format!("unexpected '{other}'; {USAGE}")),
+            }
+        }
+        let mut predicates = std::collections::BTreeMap::new();
+        for parts in wheres {
+            // `WHERE Label pred` as two or more arguments, or one argument
+            // `Label: pred`, or the predicate alone when there is one label.
+            let (label, text) = if parts.len() >= 2 && labels.contains(&parts[0]) {
+                (parts[0].clone(), parts[1..].join(" "))
+            } else if parts.len() == 1 && labels.len() == 1 {
+                (labels[0].clone(), parts[0].clone())
+            } else {
+                return Err(format!(
+                    "WHERE must name the label it restricts, one of {labels:?}: \
+                     WHERE <label> \"<predicate>\""
+                ));
+            };
+            if predicates.insert(label.clone(), text).is_some() {
+                return Err(format!("label '{label}' has more than one WHERE; combine them with AND"));
+            }
+        }
+        Ok(crate::graph::subgraph::SubgraphDefinition { name, labels, edge_types, predicates })
+    }
+
+    /// GRAPH.SUBGRAPH.DROP name. The data the view showed is untouched.
+    async fn handle_subgraph_drop(
+        &self,
+        args: &[RespValue],
+        store: &Arc<RwLock<GraphStore>>,
+        auth: Option<&crate::auth::Credential>,
+    ) -> RespValue {
+        if let Some(user) = auth {
+            if let Err(e) = user.authorize_statement("default", Ok::<bool, ()>(true)) {
+                return RespValue::Error(format!("ERR {e}"));
+            }
+        }
+        let name = match (args.len(), args.get(1).map(|a| a.as_string())) {
+            (2, Some(Ok(Some(n)))) => n,
+            _ => return RespValue::Error("ERR usage: GRAPH.SUBGRAPH.DROP <name>".to_string()),
+        };
+        // persistence: the catalog is written below, before the reply, and the
+        // definition put back if that write fails.
+        let mut guard = crate::store_lock::write(store).await;
+        let Some(old) = guard.drop_subgraph(&name) else {
+            return RespValue::Error(format!("ERR no named subgraph '{name}'"));
+        };
+        if let Some(pm) = &self.persistence {
+            if let Err(e) = pm.persist_index_catalog("default", &guard) {
+                let _ = guard.create_subgraph(old.definition().clone());
+                return RespValue::Error(format!("ERR the drop could not be saved: {e}"));
+            }
+        }
+        RespValue::Integer(1)
+    }
+
+    /// GRAPH.SUBGRAPH.LIST: the names of the tenant graph's subgraphs.
+    async fn handle_subgraph_list(
+        &self,
+        _args: &[RespValue],
+        store: &Arc<RwLock<GraphStore>>,
+        auth: Option<&crate::auth::Credential>,
+    ) -> RespValue {
+        if let Some(user) = auth {
+            if let Err(e) = user.authorize_statement("default", Ok::<bool, ()>(false)) {
+                return RespValue::Error(format!("ERR {e}"));
+            }
+        }
+        let guard = crate::store_lock::read(store).await;
+        RespValue::Array(
+            guard
+                .subgraphs()
+                .map(|s| RespValue::BulkString(Some(s.name().as_bytes().to_vec())))
+                .collect(),
+        )
+    }
+
+    /// GRAPH.SUBGRAPH.INFO name: the definition, as JSON, and the view's
+    /// node and relationship counts, as a flat field/value array.
+    async fn handle_subgraph_info(
+        &self,
+        args: &[RespValue],
+        store: &Arc<RwLock<GraphStore>>,
+        auth: Option<&crate::auth::Credential>,
+    ) -> RespValue {
+        if let Some(user) = auth {
+            if let Err(e) = user.authorize_statement("default", Ok::<bool, ()>(false)) {
+                return RespValue::Error(format!("ERR {e}"));
+            }
+        }
+        let name = match (args.len(), args.get(1).map(|a| a.as_string())) {
+            (2, Some(Ok(Some(n)))) => n,
+            _ => return RespValue::Error("ERR usage: GRAPH.SUBGRAPH.INFO <name>".to_string()),
+        };
+        let guard = crate::store_lock::read(store).await;
+        let Some(scope) = guard.subgraph(&name) else {
+            return RespValue::Error(format!("ERR no named subgraph '{name}'"));
+        };
+        let schema = guard.subgraph_schema(&scope);
+        let text = |s: &str| RespValue::BulkString(Some(s.as_bytes().to_vec()));
+        RespValue::Array(vec![
+            text("name"),
+            text(scope.name()),
+            text("definition"),
+            text(&serde_json::to_string(scope.definition()).unwrap_or_default()),
+            text("nodes"),
+            RespValue::Integer(schema.total_nodes as i64),
+            text("relationships"),
+            RespValue::Integer(schema.total_edges as i64),
+        ])
+    }
+
     /// Handle GRAPH.RO_QUERY (read-only query)
     async fn handle_graph_ro_query(
         &self,
@@ -658,7 +915,7 @@ impl CommandHandler {
                 Err(e) => return RespValue::Error(format!("ERR {e}")),
             };
         // Snapshot the schema and drop the read guard before the LLM call.
-        let schema = store.read().await.schema_summary();
+        let schema = crate::store_lock::read(store).await.schema_summary();
         // `text_to_cypher` refuses a generated write, as it does for /api/nlq.
         match pipeline.text_to_cypher(question, &schema).await {
             Ok(cypher) => RespValue::BulkString(Some(cypher.into_bytes())),
@@ -719,7 +976,7 @@ impl CommandHandler {
         // persistence: the durable half is `drop_graph` above, which removes the
         // rows outright. `clear()` journals nothing and does not need to -- one
         // journal entry per node of a dropped graph is the wrong shape for it.
-        let mut store_guard = store.write().await;
+        let mut store_guard = crate::store_lock::write(store).await;
         store_guard.clear();
         let _ = store_guard.take_write_log();
         drop(store_guard);
@@ -777,7 +1034,7 @@ impl CommandHandler {
 
     /// Handle INFO command
     async fn handle_info(&self, store: &Arc<RwLock<GraphStore>>) -> RespValue {
-        match tokio::time::timeout(INFO_STORE_WAIT, store.read()).await {
+        match tokio::time::timeout(INFO_STORE_WAIT, crate::store_lock::read(store)).await {
             Ok(guard) => self.info_on(Some(&guard)),
             Err(_) => self.info_on(None),
         }
@@ -993,7 +1250,7 @@ mod tests {
         let offenders: Vec<(usize, &str)> = lines
             .iter()
             .enumerate()
-            .filter(|(_, l)| l.contains("store.write().await"))
+            .filter(|(_, l)| l.contains("store_lock::write("))
             .filter(|(i, _)| {
                 let above = &lines[i.saturating_sub(8)..*i];
                 let waived = above
@@ -1207,7 +1464,7 @@ mod tests {
         ]);
         let _ = handler.handle_command(&cmd, &store, None).await;
         assert_eq!(
-            store.read().await.get_nodes_by_label(&crate::graph::Label::new("Leak")).len(),
+            crate::store_lock::read(&store).await.get_nodes_by_label(&crate::graph::Label::new("Leak")).len(),
             0,
             "a rejected query must not write to the default graph"
         );
@@ -2096,7 +2353,7 @@ mod tests {
                 )
                 .await;
             assert!(err_text(&r).contains("bound to tenant 'acme'"), "{r:?}");
-            assert_eq!(st.read().await.node_count(), 0);
+            assert_eq!(crate::store_lock::read(&st).await.node_count(), 0);
         }
 
         #[tokio::test]
@@ -2114,7 +2371,7 @@ mod tests {
                 err_text(&r),
                 "ERR GRAPH.RO_QUERY was given a write; use GRAPH.QUERY"
             );
-            assert_eq!(st.read().await.node_count(), 0);
+            assert_eq!(crate::store_lock::read(&st).await.node_count(), 0);
             let r = handler
                 .handle_command(
                     &cmd(&["GRAPH.RO_QUERY", "default", "RETURN 5 AS five"]),
@@ -2135,7 +2392,7 @@ mod tests {
         async fn graph_delete_refuses_foreign_and_non_string_names_and_keeps_the_data() {
             let handler = CommandHandler::new(None);
             let st = store();
-            st.write().await.create_node("Keep");
+            crate::store_lock::write(&st).await.create_node("Keep");
             let r = handler
                 .handle_command(&cmd(&["GRAPH.DELETE", "analytics"]), &st, None)
                 .await;
@@ -2157,7 +2414,7 @@ mod tests {
                 .await;
             assert!(err_text(&r).contains("bound to tenant"), "{r:?}");
             assert_eq!(
-                st.read().await.node_count(),
+                crate::store_lock::read(&st).await.node_count(),
                 1,
                 "a refused delete cleared the store"
             );
@@ -2183,7 +2440,7 @@ mod tests {
                 .handle_command(&cmd(&["GRAPH.DELETE", "default"]), &st, Some(&admin))
                 .await;
             assert_eq!(r, RespValue::SimpleString("OK".into()));
-            assert_eq!(st.read().await.node_count(), 0);
+            assert_eq!(crate::store_lock::read(&st).await.node_count(), 0);
             assert_eq!(
                 pm.recover("default").unwrap().0.len(),
                 0,
@@ -2269,7 +2526,7 @@ mod tests {
             use crate::persistence::tenant::LLMProvider;
             let handler = CommandHandler::new(None);
             let s = store();
-            s.write().await.create_node("Person");
+            crate::store_lock::write(&s).await.create_node("Person");
             // A model that answers with a destructive statement beginning MATCH,
             // the shape the old prefix check let through (#1156).
             let srv = MockHttp::serve(vec![(
@@ -2285,7 +2542,7 @@ mod tests {
                 .await;
             assert!(err_text(&r).contains("write operations"), "{r:?}");
             assert_eq!(srv.requests().len(), 3, "invalid structured output is repaired twice");
-            assert_eq!(s.read().await.node_count(), 1, "nothing was deleted");
+            assert_eq!(crate::store_lock::read(&s).await.node_count(), 1, "nothing was deleted");
         }
 
         #[tokio::test]

@@ -527,6 +527,18 @@ fn max_nesting_depth(input: &str) -> usize {
 }
 
 pub fn parse_query(input: &str) -> ParseResult<Query> {
+    parse_query_checked(input, true)
+}
+
+/// [`parse_query`] without the semantic checks of `validate`: the grammar's
+/// verdict only. For a caller that parses a fragment it will rewrite before
+/// it is a query -- a named subgraph's predicate names properties as bare
+/// variables (#337) -- and that validates the rewritten form itself.
+pub(crate) fn parse_query_unvalidated(input: &str) -> ParseResult<Query> {
+    parse_query_checked(input, false)
+}
+
+fn parse_query_checked(input: &str, validate: bool) -> ParseResult<Query> {
     // Before any recursion, including pest's own. See `MAX_NESTING_DEPTH`.
     let depth = max_nesting_depth(input);
     let limit = nesting_limit();
@@ -634,8 +646,10 @@ pub fn parse_query(input: &str) -> ParseResult<Query> {
     // arity, CREATE over an already-bound variable. Reported as a parse
     // failure because that is what they are to a caller: the query was never
     // well-formed, and running it would answer a question nobody asked.
-    crate::query::validate::validate(&query)
-        .map_err(|e| ParseError::Coded { code: e.code(), message: e.to_string() })?;
+    if validate {
+        crate::query::validate::validate(&query)
+            .map_err(|e| ParseError::Coded { code: e.code(), message: e.to_string() })?;
+    }
 
     Ok(query)
 }
