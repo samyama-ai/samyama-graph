@@ -163,7 +163,7 @@ fn histograms_order_temporal_values_and_text_on_their_own_axes() {
     let mut s = GraphStore::new();
     for i in 0..400i32 {
         let n = s.create_node_with_labels([Label::new("E")]);
-        s.set_node_property("default", n, "d", PropertyValue::Date(18_262 + i)).unwrap();
+        s.set_node_property("default", n, "d", PropertyValue::Date(18_262 + i as i64)).unwrap();
         s.set_node_property("default", n, "name", PropertyValue::String(format!("n{}", 1000 + i))).unwrap();
     }
     let stats = s.statistics();
