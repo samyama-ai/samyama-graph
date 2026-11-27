@@ -277,6 +277,16 @@ test = true
 name = "supply_chain_demo"
 test = true
 
+# Instruction counts under Valgrind for the PR gate (#2207). Linux only, as
+# Valgrind is; the runner binary must be the same version (CI installs
+# gungraun-runner 0.20.0).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gungraun = "=0.20.0"
+
+[[bench]]
+name = "instruction_counts"
+harness = false
+
 [[bench]]
 name = "aggregate_throughput"
 harness = false
