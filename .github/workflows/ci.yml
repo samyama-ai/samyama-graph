@@ -1322,6 +1322,52 @@ jobs:
           SAMYAMA_BIN: ${{ github.workspace }}/target/release/samyama
         run: python -m pytest -v tests/
 
+  # SEC-MAC (#2218, REL-16): the shipped AppArmor profile, enforced on a real
+  # server through writes, an index build, a restart and a snapshot export and
+  # import -- failing on any denial -- then a confined root process must be
+  # refused /etc/shadow and starting a program, with both refusals in the
+  # kernel log. See scripts/apparmor_check.py. The KubeArmor policy is held to
+  # the same paths by tests/mac_profiles_agree.rs.
+  apparmor:
+    name: apparmor (shipped profile under a real workload)
+    needs: [changes, gates]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Discard any cached release executable
+        run: rm -f target/release/samyama
+
+      - name: Take the release binary from the test job
+        id: mac_release_binary
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: samyama-release
+          path: target/release
+
+      - name: Use it if it arrived, otherwise build it
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.mac_release_binary.outcome }}" = "success" ] && [ -f target/release/samyama ]; then
+            # An artifact download does not preserve the executable bit.
+            chmod +x target/release/samyama
+            echo "using the binary built by the test job"
+          else
+            echo "::notice::no release artifact; building the engine"
+            rm -f target/release/samyama
+            cargo build --release --bin samyama --locked
+          fi
+
+      - name: SEC-MAC
+        run: |
+          sudo apt-get install -y --no-install-recommends apparmor apparmor-utils >/dev/null
+          sudo python3 scripts/apparmor_check.py --bin target/release/samyama
+
   # API-09: the SDKs users already have keep working against this build.
   #
   # docs/VERSIONING.md promises that the previous minor's SDKs work against the
@@ -1622,6 +1668,7 @@ jobs:
       - test
       - gates
       - docs-gate
+      - apparmor
       - sdks
       - snapshot-portability
       - snapshot-portability-read
