@@ -191,6 +191,22 @@ jobs:
   # Built per target on its own runner rather than cross-compiled: a binary
   # produced by a cross toolchain has not been shown to start on the machine it
   # is for, and the smoke step below is the point of the job.
+
+  # The snap (#2203): built, installed and checked under strict confinement on
+  # each architecture, then published to stable when the store credentials
+  # are configured. The workflow is shared with pull requests (snap.yml).
+  snap:
+    name: Build, check and publish the snap
+    needs: tag
+    if: needs.tag.outputs.new == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/snap.yml
+    with:
+      ref: v${{ needs.tag.outputs.version }}
+      publish: true
+    secrets:
+      SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
   binaries:
     name: Build and attach the release binaries
     needs: tag
