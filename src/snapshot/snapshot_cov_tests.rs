@@ -138,8 +138,10 @@ fn an_unsupported_version_is_refused() {
 // Export details
 // ------------------------------------------------------------------
 
+/// The column wins, as on every read (#2000). Export let the row win, so a
+/// round trip turned `RETURN n.k` = "column" into "row".
 #[test]
-fn export_prefers_the_row_value_over_the_column() {
+fn export_prefers_the_column_value_over_the_row() {
     let mut store = GraphStore::new();
     let n = store.create_node("Doc");
     store.set_column_property(n, "k", PropertyValue::String("column".into()));
@@ -151,7 +153,12 @@ fn export_prefers_the_row_value_over_the_column() {
     let id = dst.node_ids_by_label(&Label::new("Doc"), None)[0];
     assert_eq!(
         dst.node_property(id, "k"),
-        Some(PropertyValue::String("row".into()))
+        store.node_property(n, "k"),
+        "the export disagrees with a read of the source"
+    );
+    assert_eq!(
+        dst.node_property(id, "k"),
+        Some(PropertyValue::String("column".into()))
     );
 }
 
@@ -182,10 +189,14 @@ fn a_v1_snapshot_imports_through_full_nodes_and_edges() {
         .iter()
         .find(|&&id| store.node_property(id, "name") == Some(PropertyValue::String("Ann".into())))
         .unwrap();
-    // v1 writes the row map, not the column.
+    // v1 writes the column, as v2 does, and leaves the row empty (#2000).
     assert_eq!(
-        store.get_node(ann).unwrap().get_property("age"),
-        Some(&PropertyValue::Integer(30))
+        store.node_property(ann, "age"),
+        Some(PropertyValue::Integer(30))
+    );
+    assert!(
+        store.get_node(ann).unwrap().properties.is_empty(),
+        "a v1 import left a row copy"
     );
     let edges = store.get_edges_by_type(&EdgeType::new("KNOWS"));
     assert_eq!(edges.len(), 2);
@@ -251,14 +262,6 @@ fn a_dedup_merge_adds_list_values_without_overwriting() {
             PropertyValue::String("asia".into()),
             PropertyValue::String("south".into())
         ])
-    );
-    assert!(
-        store
-            .get_node(existing)
-            .unwrap()
-            .get_property("tags")
-            .is_some(),
-        "row copy too"
     );
     assert_eq!(store.label_node_count(&Label::new("Country")), 2);
 }

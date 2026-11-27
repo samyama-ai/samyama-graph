@@ -2879,12 +2879,16 @@ NodeDeleted { id, .. } => {
             }
             self.catalog.on_label_removed(label);
         }
-        let event = crate::graph::event::IndexEvent::NodeDeleted {
+        // Every property, wherever it is held: the row alone has been empty
+        // since #1188, so the event a subscriber received carried none (#2000).
+        let properties = self.node_properties_full(id);
+        // Built only for a subscriber; nothing local reads it.
+        let event = self.index_sender.as_ref().map(|_| crate::graph::event::IndexEvent::NodeDeleted {
             tenant_id: tenant_id.to_string(),
             id,
             labels: latest_node.labels.iter().cloned().collect(),
-            properties: latest_node.properties.clone(),
-        };
+            properties: properties.clone(),
+        });
 
         // Removed from the property index here, not on a channel: a delete the
         // index has not yet learned about hands the next lookup a node that is
@@ -2893,13 +2897,13 @@ NodeDeleted { id, .. } => {
         // Read with the column, not off the row: the row has been empty since
         // #1188, so the values were never removed at all, and a deleted node's
         // key stayed taken under its unique constraint (#542).
-        for (key, value) in &self.node_properties_full(id) {
+        for (key, value) in &properties {
             for label in &latest_node.labels {
                 self.property_index.index_remove(label, key, value, id);
                 self.property_index.constraint_remove(label, key, value, id);
             }
         }
-        if let Some(sender) = &self.index_sender {
+        if let (Some(sender), Some(event)) = (&self.index_sender, event) {
             let _ = sender.send(event);
         }
 
@@ -5406,16 +5410,12 @@ NodeDeleted { id, .. } => {
                 // both tiers, so large labels (e.g. Problem) are no longer left empty.
                 // Accept a numeric array as well as a Vector: an embedding written with
                 // whole numbers (`[1, 0, 0]`) is a list of integers, not a float vector.
-                let inline = self
-                    .get_node(nid)
-                    .and_then(|n| n.get_property(&key.property_key).and_then(|p| p.to_vector()));
-                let vec = match inline {
-                    Some(v) => Some(v),
-                    None => self
-                        .node_columns
-                        .get_property(nid.as_u64() as usize, &key.property_key)
-                        .to_vector(),
-                };
+                //
+                // One read through `node_property`, column first, as every other
+                // reader resolves a property (#2000).
+                let vec = self
+                    .node_property(nid, &key.property_key)
+                    .and_then(|p| p.to_vector());
                 if let Some(vec) = vec {
                     vectors.push((nid, vec));
                 }
@@ -6995,16 +6995,13 @@ NodeDeleted { id, .. } => {
         // `node.properties` indexes a graph built by CREATE and misses one that
         // was imported.
         let mut entries = Vec::new();
+        //
+        // Through `node_property`, column first: reading the row first indexed a
+        // value the row still held after a store write had replaced it in the
+        // column, so the index disagreed with every read (#2000).
         for node in self.get_nodes_by_label(label) {
-            if let Some(val) = node.get_property(property) {
-                entries.push((node.id, val.clone()));
-            } else {
-                let col_val = self
-                    .node_columns
-                    .get_property(node.id.as_u64() as usize, property);
-                if !col_val.is_null() {
-                    entries.push((node.id, col_val));
-                }
+            if let Some(val) = self.node_property(node.id, property) {
+                entries.push((node.id, val));
             }
         }
         let filled = entries.len();
@@ -7710,11 +7707,23 @@ NodeDeleted { id, .. } => {
 
     /// Insert a recovered node (used during recovery from persistence)
     /// Unlike create_node(), this preserves the node's existing ID
-    pub fn insert_recovered_node(&mut self, node: Node) {
+    ///
+    /// The node's properties go to the column store, and the row it carried
+    /// in is left empty (#2000). Every store write keeps the column as the only
+    /// copy (#1188), but recovery put a restarted graph's every value in the
+    /// row, so after a restart the row was the main copy, not a legacy one,
+    /// and any reader that asked the column alone missed all of it. A stored
+    /// `Null` is no value at all, as on every setter (#952), so it is dropped.
+    pub fn insert_recovered_node(&mut self, mut node: Node) {
         self.bump_epoch();
         let node_id = node.id;
         self.structure_log.node_added(node_id);
         let idx = node_id.as_u64() as usize;
+        for (key, value) in std::mem::take(&mut node.properties) {
+            if !value.is_null() {
+                self.node_columns.set_property(idx, &key, value);
+            }
+        }
 
         // Ensure storage capacity
         if idx >= self.nodes.len() {
@@ -7795,8 +7804,12 @@ NodeDeleted { id, .. } => {
             self.edge_type_ids.resize(idx + 1, Self::EDGE_TYPE_UNSET);
         }
         self.edge_type_ids[idx] = type_id;
-        if !edge.properties.is_empty() {
-            self.edge_properties.insert(edge_id, edge.properties);
+        // Into the column, as every store write does since #545: the row map
+        // is left to `get_edge_properties_mut` alone (#2000).
+        for (key, value) in edge.properties {
+            if !value.is_null() {
+                self.edge_columns.set_property(idx, &key, value);
+            }
         }
 
         // Update edge type index

@@ -904,15 +904,7 @@ pub(crate) fn resolve_pinned_node(store: &GraphStore, pattern: &NodePattern) -> 
 /// has nothing in the sparse map, and a pin that silently never matched would turn the
 /// rewrite off exactly where it matters most.
 fn node_property_equals(store: &GraphStore, id: NodeId, key: &str, want: &PropertyValue) -> bool {
-    let columnar = store.node_columns.get_property(id.as_u64() as usize, key);
-    let actual = match columnar {
-        PropertyValue::Null => match store.get_node(id).and_then(|n| n.get_property(key)) {
-            Some(v) => v.clone(),
-            None => return false,
-        },
-        v => v,
-    };
-    &actual == want
+    store.node_property(id, key).as_ref() == Some(want)
 }
 
 #[cfg(test)]

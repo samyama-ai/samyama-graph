@@ -98,11 +98,10 @@
 //! let alice = store.create_node("Person");
 //! let bob = store.create_node("Person");
 //!
-//! // Set properties
-//! if let Some(node) = store.get_node_mut(alice) {
-//!     node.set_property("name", "Alice");
-//!     node.set_property("age", 30i64);
-//! }
+//! // Set properties: through the store, which holds them and indexes them
+//! store.set_node_property("default", alice, "name", "Alice").unwrap();
+//! store.set_node_property("default", alice, "age", 30i64).unwrap();
+//! assert_eq!(store.node_property(alice, "age"), Some(30i64.into()));
 //!
 //! // Create edge
 //! let knows_edge = store.create_edge(alice, bob, "KNOWS").unwrap();

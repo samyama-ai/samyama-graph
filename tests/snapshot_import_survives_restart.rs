@@ -151,7 +151,7 @@ async fn an_import_survives_a_restart_next_to_an_ordinary_write() {
     assert_eq!(store.get_nodes_by_label(&Label::new("Before")).len(), 1);
     let mut is: Vec<_> = imported_ids(&store)
         .into_iter()
-        .map(|id| store.get_node(id).unwrap().properties.get("i").cloned())
+        .map(|id| store.node_property(id, "i"))
         .collect();
     is.sort_by_key(|v| format!("{v:?}"));
     assert_eq!(is.len(), 10);
@@ -188,8 +188,8 @@ async fn edits_to_imported_nodes_after_the_import_survive_a_restart() {
     let store = server.state.store.read().await;
     assert_eq!(imported_ids(&store), vec![ids[0], ids[1]]);
     assert_eq!(
-        store.get_node(kept).unwrap().properties.get("edited"),
-        Some(&PropertyValue::Boolean(true))
+        store.node_property(kept, "edited"),
+        Some(PropertyValue::Boolean(true))
     );
     drop(store);
     stop(server);

@@ -238,11 +238,13 @@ fn every_query_answers_the_same_after_a_persistence_restart() {
         "the restart lost nodes, so any answer comparison below is moot"
     );
 
-    // The precondition that makes this test mean anything: the restored store must
-    // actually hold its properties somewhere different from the built one.
-    // `insert_recovered_node` fills the row copy and never touches the columns, so
-    // if the columns are populated here the recovery path has changed and this test
-    // is comparing a store against itself.
+    // The precondition, re-derived for #2000. This test was written when
+    // `insert_recovered_node` filled the row copy and left the columns empty, so a
+    // restart produced a row-only store and this compared the two representations.
+    // Recovery now writes the column like every other store write, and the row is
+    // empty: what this guards is that the restart's columnar store answers every
+    // query as the store that was persisted does. A row-only store is no longer a
+    // state any production path produces.
     let a_person = restored
         .get_nodes_by_label(&"Person".into())
         .first()
@@ -250,14 +252,12 @@ fn every_query_answers_the_same_after_a_persistence_restart() {
         .expect("no Person survived the restart");
     let idx = a_person.as_u64() as usize;
     assert!(
-        restored.node_columns.get_property_keys(idx).is_empty(),
-        "recovery now populates the column store, so this test no longer exercises \
-         the row-only representation it was written for — re-derive it rather than \
-         deleting this assertion"
+        !restored.node_columns.get_property_keys(idx).is_empty(),
+        "recovery populated no column, so its values are somewhere else (#2000)"
     );
     assert!(
-        !restored.get_node(a_person).unwrap().properties.is_empty(),
-        "recovery populated neither representation"
+        restored.get_node(a_person).unwrap().properties.is_empty(),
+        "recovery left a row copy next to the column (#2000)"
     );
 
     // The reference is the store that was persisted, not a second build of the

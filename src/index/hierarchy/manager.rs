@@ -533,16 +533,8 @@ fn read_node_measure(store: &GraphStore, id: NodeId, measure: &MeasureSpec) -> O
             return None;
         }
     }
-    let columnar = store
-        .node_columns
-        .get_property(id.as_u64() as usize, &measure.property);
-    let value = match columnar {
-        PropertyValue::Null => store
-            .get_node(id)
-            .and_then(|n| n.get_property(&measure.property).cloned())
-            .unwrap_or(PropertyValue::Null),
-        v => v,
-    };
+    // Wherever the value is held, through the store's one reader (#2000).
+    let value = store.node_property(id, &measure.property)?;
     to_rollup_value(&value)
 }
 

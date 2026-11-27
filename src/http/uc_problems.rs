@@ -72,11 +72,9 @@ impl UC2DosingProblem {
         let mut drug_id = HashMap::<&str, crate::graph::NodeId>::new();
         for (did, name, max_dose) in UC2_DRUGS {
             let nid = store.create_node("Drug");
-            if let Some(n) = store.get_node_mut(nid) {
-                n.set_property("did", *did);
-                n.set_property("name", *name);
-                n.set_property("max_dose_mg", *max_dose);
-            }
+            let _ = store.set_node_property("default", nid, "did", *did);
+            let _ = store.set_node_property("default", nid, "name", *name);
+            let _ = store.set_node_property("default", nid, "max_dose_mg", *max_dose);
             drug_id.insert(*did, nid);
         }
         let mut genes: Vec<&str> = UC2_TARGETS.iter().map(|(_, g)| *g).collect();
@@ -84,7 +82,7 @@ impl UC2DosingProblem {
         let mut gene_id = HashMap::<&str, crate::graph::NodeId>::new();
         for g in &genes {
             let nid = store.create_node("Gene");
-            if let Some(n) = store.get_node_mut(nid) { n.set_property("gid", *g); }
+            let _ = store.set_node_property("default", nid, "gid", *g);
             gene_id.insert(*g, nid);
         }
         let mut pathways: Vec<&str> = UC2_PART_OF.iter().map(|(_, p)| *p).collect();
@@ -92,11 +90,11 @@ impl UC2DosingProblem {
         let mut pathway_id = HashMap::<&str, crate::graph::NodeId>::new();
         for p in &pathways {
             let nid = store.create_node("Pathway");
-            if let Some(n) = store.get_node_mut(nid) { n.set_property("pid", *p); }
+            let _ = store.set_node_property("default", nid, "pid", *p);
             pathway_id.insert(*p, nid);
         }
         let dz = store.create_node("Disease");
-        if let Some(n) = store.get_node_mut(dz) { n.set_property("did", UC2_DISEASE); }
+        let _ = store.set_node_property("default", dz, "did", UC2_DISEASE);
 
         for (d, g) in UC2_TARGETS {
             store.create_edge(drug_id[d], gene_id[g], "TARGETS").unwrap();

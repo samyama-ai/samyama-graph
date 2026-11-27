@@ -1727,18 +1727,14 @@ fn demo_property_graph() {
     let mut store = GraphStore::new();
 
     let alice = store.create_node("Person");
-    if let Some(node) = store.get_node_mut(alice) {
-        node.set_property("name", "Alice");
-        node.set_property("age", 30i64);
-        println!("Created Person: Alice");
-    }
+    let _ = store.set_node_property("default", alice, "name", "Alice");
+    let _ = store.set_node_property("default", alice, "age", 30i64);
+    println!("Created Person: Alice");
 
     let bob = store.create_node("Person");
-    if let Some(node) = store.get_node_mut(bob) {
-        node.set_property("name", "Bob");
-        node.set_property("age", 25i64);
-        println!("Created Person: Bob");
-    }
+    let _ = store.set_node_property("default", bob, "name", "Bob");
+    let _ = store.set_node_property("default", bob, "age", 25i64);
+    println!("Created Person: Bob");
 
     store.create_edge(alice, bob, "KNOWS").unwrap();
     println!("Created: Alice -[KNOWS]-> Bob");
@@ -1750,16 +1746,12 @@ fn demo_cypher_queries() {
     let mut store = GraphStore::new();
 
     let alice = store.create_node("Person");
-    if let Some(node) = store.get_node_mut(alice) {
-        node.set_property("name", "Alice");
-        node.set_property("age", 30i64);
-    }
+    let _ = store.set_node_property("default", alice, "name", "Alice");
+    let _ = store.set_node_property("default", alice, "age", 30i64);
 
     let bob = store.create_node("Person");
-    if let Some(node) = store.get_node_mut(bob) {
-        node.set_property("name", "Bob");
-        node.set_property("age", 25i64);
-    }
+    let _ = store.set_node_property("default", bob, "name", "Bob");
+    let _ = store.set_node_property("default", bob, "age", 25i64);
 
     store.create_edge(alice, bob, "KNOWS").unwrap();
 
@@ -1851,11 +1843,9 @@ fn build_social_network(store: &mut GraphStore) {
     let mut city_ids: Vec<NodeId> = Vec::with_capacity(30);
     for (name, country, population) in &city_data {
         let id = store.create_node("City");
-        if let Some(node) = store.get_node_mut(id) {
-            node.set_property("name", *name);
-            node.set_property("country", *country);
-            node.set_property("population", *population);
-        }
+        let _ = store.set_node_property("default", id, "name", *name);
+        let _ = store.set_node_property("default", id, "country", *country);
+        let _ = store.set_node_property("default", id, "population", *population);
         city_ids.push(id);
     }
 
@@ -1863,12 +1853,10 @@ fn build_social_network(store: &mut GraphStore) {
     let mut company_ids: Vec<NodeId> = Vec::with_capacity(20);
     for (i, (name, industry, size)) in company_data.iter().enumerate() {
         let id = store.create_node("Company");
-        if let Some(node) = store.get_node_mut(id) {
-            node.set_property("name", *name);
-            node.set_property("industry", *industry);
-            node.set_property("employees", *size);
-            node.set_property("founded", 1990i64 + (i as i64 * 3) % 35);
-        }
+        let _ = store.set_node_property("default", id, "name", *name);
+        let _ = store.set_node_property("default", id, "industry", *industry);
+        let _ = store.set_node_property("default", id, "employees", *size);
+        let _ = store.set_node_property("default", id, "founded", 1990i64 + (i as i64 * 3) % 35);
         // LOCATED_IN edge: company → city
         let city = city_ids[i % city_ids.len()];
         let _ = store.create_edge(id, city, "LOCATED_IN");
@@ -1879,9 +1867,7 @@ fn build_social_network(store: &mut GraphStore) {
     let mut tag_ids: Vec<NodeId> = Vec::with_capacity(20);
     for tag in &tags {
         let id = store.create_node("Tag");
-        if let Some(node) = store.get_node_mut(id) {
-            node.set_property("name", *tag);
-        }
+        let _ = store.set_node_property("default", id, "name", *tag);
         tag_ids.push(id);
     }
 
@@ -1892,11 +1878,9 @@ fn build_social_network(store: &mut GraphStore) {
         let first = first_names[i % first_names.len()];
         let last = last_names[i / first_names.len() % last_names.len()];
         let id = store.create_node("Person");
-        if let Some(node) = store.get_node_mut(id) {
-            node.set_property("name", format!("{} {}", first, last));
-            node.set_property("age", 22i64 + (i as i64 * 7) % 45);
-            node.set_property("email", format!("{}.{}@example.com", first.to_lowercase(), last.to_lowercase()));
-        }
+        let _ = store.set_node_property("default", id, "name", format!("{} {}", first, last));
+        let _ = store.set_node_property("default", id, "age", 22i64 + (i as i64 * 7) % 45);
+        let _ = store.set_node_property("default", id, "email", format!("{}.{}@example.com", first.to_lowercase(), last.to_lowercase()));
         // LIVES_IN edge: person → city
         let city = city_ids[i % city_ids.len()];
         let _ = store.create_edge(id, city, "LIVES_IN");
@@ -1935,7 +1919,7 @@ fn build_social_network(store: &mut GraphStore) {
     let mut post_ids: Vec<NodeId> = Vec::with_capacity(num_posts);
     for i in 0..num_posts {
         let id = store.create_node("Post");
-        if let Some(node) = store.get_node_mut(id) {
+        {
             let topic = post_topics[i % post_topics.len()];
             let repeat = i / post_topics.len();
             let title = if repeat == 0 {
@@ -1943,10 +1927,10 @@ fn build_social_network(store: &mut GraphStore) {
             } else {
                 format!("{} #{}", topic, repeat + 1)
             };
-            node.set_property("title", title.as_str());
-            node.set_property("content", format!("{}. This is post #{} with detailed thoughts on the topic.", topic, i));
-            node.set_property("created_at", 1700000000000i64 + (i as i64 * 3_600_000));
-            node.set_property("views", (i as i64 * 17) % 5000);
+            let _ = store.set_node_property("default", id, "title", title.as_str());
+            let _ = store.set_node_property("default", id, "content", format!("{}. This is post #{} with detailed thoughts on the topic.", topic, i));
+            let _ = store.set_node_property("default", id, "created_at", 1700000000000i64 + (i as i64 * 3_600_000));
+            let _ = store.set_node_property("default", id, "views", (i as i64 * 17) % 5000);
         }
         // WROTE edge: person → post
         let author = person_ids[i % num_persons];
@@ -1965,10 +1949,8 @@ fn build_social_network(store: &mut GraphStore) {
     let mut comment_ids: Vec<NodeId> = Vec::with_capacity(num_comments);
     for i in 0..num_comments {
         let id = store.create_node("Comment");
-        if let Some(node) = store.get_node_mut(id) {
-            node.set_property("text", format!("Comment #{}: Great point! Here are my thoughts...", i));
-            node.set_property("created_at", 1700100000000i64 + (i as i64 * 1_800_000));
-        }
+        let _ = store.set_node_property("default", id, "text", format!("Comment #{}: Great point! Here are my thoughts...", i));
+        let _ = store.set_node_property("default", id, "created_at", 1700100000000i64 + (i as i64 * 1_800_000));
         // WROTE edge: person → comment
         let author = person_ids[i % num_persons];
         let _ = store.create_edge(author, id, "WROTE");
@@ -2060,10 +2042,8 @@ fn load_graphalytics_dataset(
             }
             if let Ok(vid) = trimmed.parse::<u64>() {
                 let node_id = store.create_node("Vertex");
-                if let Some(node) = store.get_node_mut(node_id) {
-                    node.set_property("vid", vid as i64);
-                    node.set_property("dataset", dataset);
-                }
+                let _ = store.set_node_property("default", node_id, "vid", vid as i64);
+                let _ = store.set_node_property("default", node_id, "dataset", dataset);
                 vid_to_node.insert(vid, node_id);
             }
         }
