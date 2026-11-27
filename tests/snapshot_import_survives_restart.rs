@@ -69,6 +69,7 @@ fn boot(dir: &std::path::Path, side: &std::path::Path, max_nodes: Option<usize>)
         persistence: Some(pm.clone()),
         snapshot_key: None,
         transactions: Default::default(),
+        query_catalogs: Default::default(),
     };
     Server { state, pm }
 }
