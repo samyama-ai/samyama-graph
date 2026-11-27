@@ -227,6 +227,7 @@ impl PhysicalOperator for CreateStructureIndexOperator {
         }
         let registry = Arc::clone(&store.structure_registry);
         registry.upsert(convention.clone());
+        store.mark_index_catalog_changed();
         Ok(Some(convention_record(&convention, Some(points))))
     }
 
@@ -351,6 +352,7 @@ impl PhysicalOperator for DropStructureIndexOperator {
                 self.name
             )));
         }
+        store.mark_index_catalog_changed();
         let mut record = Record::new();
         record.bind("name".to_string(), text(&self.name));
         record.bind("dropped".to_string(), Value::Property(PropertyValue::Boolean(true)));

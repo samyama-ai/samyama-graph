@@ -97,6 +97,28 @@ pub enum IndexDefinition {
         edge_types: Vec<String>,
         predicates: Vec<(String, String)>,
     },
+    /// A named in-memory graph projection. The view is rebuilt from the graph
+    /// on restore; the declaration is the reversible schema state.
+    Projection {
+        name: String,
+        node_label: Option<String>,
+        edge_type: Option<String>,
+        weight_property: Option<String>,
+    },
+    /// Declarative hierarchy index; the order embedding is rebuilt from graph
+    /// relationships when the catalog is restored.
+    Hierarchy {
+        name: String,
+        edge_types: Vec<String>,
+        reverse: bool,
+        measure_label: Option<String>,
+        measure_property: Option<String>,
+        aggregates: Vec<String>,
+    },
+    /// Declarative structural convention used to rebuild its spatial index.
+    Structure {
+        convention: crate::index::structure::StructuralConvention,
+    },
 }
 
 /// Every index declaration a tenant has, as one record.

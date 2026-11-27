@@ -1576,6 +1576,75 @@ impl GraphStore {
         }
     }
 
+    /// Number of mutations currently in the write log. A handler can take this
+    /// before a statement and use [`Self::write_log_since`] afterwards to
+    /// describe only that statement, while leaving the log intact for storage.
+    pub fn write_log_len(&self) -> usize {
+        self.write_log.as_ref().map_or(0, Vec::len)
+    }
+
+    /// Copy mutations appended since `start` without draining the log.
+    pub fn write_log_since(&self, start: usize) -> Vec<crate::graph::event::Mutation> {
+        self.write_log
+            .as_ref()
+            .and_then(|log| log.get(start..))
+            .unwrap_or_default()
+            .to_vec()
+    }
+
+    /// Discard mutations recorded after a statement checkpoint. Used only
+    /// after the corresponding session transaction has been rolled back.
+    pub fn truncate_write_log(&mut self, start: usize) {
+        if let Some(log) = &mut self.write_log {
+            log.truncate(start);
+        }
+    }
+
+    /// A node and its complete property map as they stood at an MVCC version.
+    /// During a session transaction this also sees entities deleted by that
+    /// transaction, whose ordinary MVCC history is removed by `delete_node`.
+    pub fn node_snapshot_at_version(
+        &self,
+        id: NodeId,
+        version: u64,
+    ) -> Option<(Node, PropertyMap)> {
+        if let Some((node, properties)) = self
+            .session_txn
+            .as_ref()
+            .and_then(|txn| txn.deleted_nodes.iter().find(|(node, _)| node.id == id))
+        {
+            return Some((node.clone(), properties.clone()));
+        }
+
+        let mut node = self.get_node_at_version(id, version)?;
+        let mut properties = self.node_properties_full(id);
+        if let Some(history) = self.node_history.get(&id) {
+            for entry in history.undo.iter().rev().take_while(|entry| entry.at() > version) {
+                if let NodeUndo::Property { key, old, .. } = entry {
+                    match old {
+                        Some(value) => { properties.insert(key.clone(), value.clone()); }
+                        None => { properties.remove(key); }
+                    }
+                }
+            }
+        }
+        node.properties = properties.clone();
+        Some((node, properties))
+    }
+
+    /// An edge as it stood at an MVCC version, including an edge deleted by
+    /// the open session transaction.
+    pub fn edge_snapshot_at_version(&self, id: EdgeId, version: u64) -> Option<Edge> {
+        if let Some(edge) = self
+            .session_txn
+            .as_ref()
+            .and_then(|txn| txn.deleted_edges.iter().find(|edge| edge.id == id))
+        {
+            return Some(edge.clone());
+        }
+        self.get_edge_at_version(id, version)
+    }
+
     /// Set the ceiling this statement's writes are admitted against, and start
     /// a fresh tally (#1483).
     ///
@@ -6937,6 +7006,31 @@ NodeDeleted { id, .. } => {
                 predicates: d.predicates.iter().map(|(l, p)| (l.clone(), p.clone())).collect(),
             }
         }));
+        definitions.extend(self.graph_projections.list(self.data_changes()).into_iter().map(|projection| {
+            IndexDefinition::Projection {
+                name: projection.name,
+                node_label: projection.spec.node_label,
+                edge_type: projection.spec.edge_type,
+                weight_property: projection.spec.weight_property,
+            }
+        }));
+        definitions.extend(self.hierarchy_index.specs().into_iter().map(|spec| {
+            let (measure_label, measure_property) = spec.measure.map(|measure| (
+                measure.label.map(|label| label.as_str().to_string()),
+                Some(measure.property),
+            )).unwrap_or((None, None));
+            IndexDefinition::Hierarchy {
+                name: spec.name,
+                edge_types: spec.edge_types.into_iter().map(|edge_type| edge_type.as_str().to_string()).collect(),
+                reverse: spec.reverse,
+                measure_label,
+                measure_property,
+                aggregates: spec.ops.into_iter().map(|op| op.name().to_string()).collect(),
+            }
+        }));
+        definitions.extend(self.structure_registry.list().into_iter().map(|convention| {
+            IndexDefinition::Structure { convention }
+        }));
         // Sorted so two runs of the same DDL produce byte-identical records and
         // a diff of the catalog is a diff of the indexes, not of hash order.
         definitions.sort_by_key(|d| match d {
@@ -6969,6 +7063,15 @@ NodeDeleted { id, .. } => {
             }
             IndexDefinition::Subgraph { name, .. } => {
                 (8u8, name.clone(), String::new(), String::new())
+            }
+            IndexDefinition::Projection { name, .. } => {
+                (9u8, name.clone(), String::new(), String::new())
+            }
+            IndexDefinition::Hierarchy { name, .. } => {
+                (10u8, name.clone(), String::new(), String::new())
+            }
+            IndexDefinition::Structure { convention } => {
+                (11u8, convention.name.clone(), String::new(), String::new())
             }
         });
         IndexCatalog { definitions }
@@ -7125,6 +7228,310 @@ NodeDeleted { id, .. } => {
         true
     }
 
+    /// Remove a uniqueness constraint while leaving its backing property index
+    /// in place. A later catalog diff decides whether that index was itself
+    /// introduced by the constraint and should also be dropped.
+    pub fn drop_unique_constraint(&mut self, label: &Label, property: &str) -> bool {
+        if !self.property_index.has_unique_constraint(label, property) {
+            return false;
+        }
+        self.bump_epoch();
+        self.property_index.drop_unique_constraint(label, property);
+        self.mark_index_catalog_changed();
+        true
+    }
+
+    /// Replace one index catalog family only if the live catalog still equals
+    /// `expected`. This prevents a partial apply or rollback from discarding a
+    /// concurrent schema change.
+    pub fn replace_schema_catalog(
+        &mut self,
+        expected: &crate::index::catalog::IndexCatalog,
+        target: &crate::index::catalog::IndexCatalog,
+    ) -> Result<(), String> {
+        use crate::index::catalog::IndexDefinition;
+        if &self.index_catalog() != expected {
+            return Err("schema catalog changed since the proposal was recorded".to_string());
+        }
+        let family = |definition: &IndexDefinition| match definition {
+            IndexDefinition::Property { .. } | IndexDefinition::UniqueConstraint { .. } => 0,
+            IndexDefinition::FullText { .. } => 1,
+            IndexDefinition::Vector { .. } | IndexDefinition::VectorParams { .. } | IndexDefinition::VectorKind { .. } => 2,
+            IndexDefinition::Point { .. } => 3,
+            IndexDefinition::Retention { .. } => 4,
+            IndexDefinition::Subgraph { .. } => 5,
+            IndexDefinition::Projection { .. } => 6,
+            IndexDefinition::Hierarchy { .. } => 7,
+            IndexDefinition::Structure { .. } => 8,
+        };
+        let changed_families: Vec<u8> = (0..=8)
+            .filter(|id| {
+                let definitions = |catalog: &crate::index::catalog::IndexCatalog| {
+                    catalog.definitions.iter().filter(|definition| family(definition) == *id).cloned().collect::<Vec<_>>()
+                };
+                definitions(expected) != definitions(target)
+            })
+            .collect();
+        if changed_families.len() != 1 || changed_families[0] > 8 {
+            return Err("this operation must change exactly one supported schema family".to_string());
+        }
+        // Some declarations (notably projections, hierarchy and structure
+        // metadata) are held outside the ordinary index managers. Mark the
+        // catalog before applying so persistence also records a partial state
+        // if a manager reports an unexpected failure after mutation.
+        self.mark_index_catalog_changed();
+
+        let property_pairs = |catalog: &crate::index::catalog::IndexCatalog| {
+            catalog.definitions.iter().filter_map(|definition| match definition {
+                IndexDefinition::Property { label, property } => Some((label.clone(), property.clone())),
+                _ => None,
+            }).collect::<std::collections::BTreeSet<_>>()
+        };
+        let unique_pairs = |catalog: &crate::index::catalog::IndexCatalog| {
+            catalog.definitions.iter().filter_map(|definition| match definition {
+                IndexDefinition::UniqueConstraint { label, property } => Some((label.clone(), property.clone())),
+                _ => None,
+            }).collect::<std::collections::BTreeSet<_>>()
+        };
+        if changed_families[0] == 0 {
+        let current_unique = unique_pairs(expected);
+        let target_properties = property_pairs(target);
+        let target_unique = unique_pairs(target);
+
+        // Constraints first: creating one also creates its backing property
+        // index, and validation fails before any destructive step is reached.
+        for (label, property) in target_unique.difference(&current_unique) {
+            self.create_unique_constraint(&Label::new(label), property)?;
+        }
+        let after_constraints = property_pairs(&self.index_catalog());
+        for (label, property) in target_properties.difference(&after_constraints) {
+            self.create_property_index(&Label::new(label), property);
+        }
+        for (label, property) in current_unique.difference(&target_unique) {
+            self.drop_unique_constraint(&Label::new(label), property);
+        }
+        let after_drops = property_pairs(&self.index_catalog());
+        for (label, property) in after_drops.difference(&target_properties) {
+            self.drop_property_index(&Label::new(label), property);
+        }
+        } else if changed_families[0] == 1 {
+            let named = |catalog: &crate::index::catalog::IndexCatalog| {
+                catalog.definitions.iter().filter_map(|definition| match definition {
+                    IndexDefinition::FullText { name, label, property } => Some((name.clone(), (label.clone(), property.clone()))),
+                    _ => None,
+                }).collect::<std::collections::BTreeMap<String, (String, String)>>()
+            };
+            let current = named(expected);
+            let desired = named(target);
+            for (name, old) in &current {
+                if desired.get(name) != Some(old) { self.drop_fulltext_index(name); }
+            }
+            for (name, (label, property)) in &desired {
+                if current.get(name) != Some(&(label.clone(), property.clone())) {
+                    self.create_fulltext_index(name, label, property);
+                }
+            }
+        } else if changed_families[0] == 3 {
+            let named = |catalog: &crate::index::catalog::IndexCatalog| {
+                catalog.definitions.iter().filter_map(|definition| match definition {
+                    IndexDefinition::Point { name, label, property } => Some((name.clone(), (label.clone(), property.clone()))),
+                    _ => None,
+                }).collect::<std::collections::BTreeMap<String, (String, String)>>()
+            };
+            let current = named(expected);
+            let desired = named(target);
+            for (name, old) in &current {
+                if desired.get(name) != Some(old) { self.drop_point_index(name); }
+            }
+            for (name, (label, property)) in &desired {
+                if current.get(name) != Some(&(label.clone(), property.clone())) {
+                    self.create_point_index(name, label, property);
+                }
+            }
+        } else if changed_families[0] == 2 {
+            let vector_defs = |catalog: &crate::index::catalog::IndexCatalog| {
+                catalog.definitions.iter().filter_map(|definition| match definition {
+                    IndexDefinition::Vector { name, label, property, dimensions, metric, quantization } => {
+                        Some(((label.clone(), property.clone()), (name.clone(), *dimensions, *metric, *quantization)))
+                    }
+                    _ => None,
+                }).collect::<std::collections::BTreeMap<_, _>>()
+            };
+            let current = vector_defs(expected);
+            let desired = vector_defs(target);
+            let params_for = |catalog: &crate::index::catalog::IndexCatalog, key: &(String, String)| {
+                catalog.definitions.iter().find_map(|definition| match definition {
+                    IndexDefinition::VectorParams { label, property, m, ef_construction, ef } if label == &key.0 && property == &key.1 => {
+                        Some(crate::vector::HnswParams { m: *m, ef_construction: *ef_construction, ef: *ef })
+                    }
+                    _ => None,
+                }).unwrap_or_default()
+            };
+            let kind_for = |catalog: &crate::index::catalog::IndexCatalog, key: &(String, String)| {
+                catalog.definitions.iter().find_map(|definition| match definition {
+                    IndexDefinition::VectorKind { label, property, kind } if label == &key.0 && property == &key.1 => Some(*kind),
+                    _ => None,
+                }).unwrap_or_default()
+            };
+            for (key, (name, dimensions, metric, quantization)) in &desired {
+                if let Some(name) = name {
+                    if desired.iter().any(|(other_key, (other_name, ..))| other_key != key && other_name.as_ref() == Some(name)) {
+                        return Err(format!("vector index name '{name}' is used by multiple definitions"));
+                    }
+                }
+                params_for(target, key).validate().map_err(|error| error.to_string())?;
+                kind_for(target, key).validate().map_err(|error| error.to_string())?;
+                if *dimensions == 0 { return Err("vector index dimensions must be positive".to_string()); }
+                let _ = (metric, quantization);
+            }
+            for key in current.keys().filter(|key| !desired.contains_key(*key)) {
+                self.drop_vector_index(&key.0, &key.1);
+            }
+            let mut rebuild = false;
+            for (key, (name, dimensions, metric, quantization)) in &desired {
+                if current.get(key) == Some(&(name.clone(), *dimensions, *metric, *quantization)) {
+                    self.vector_index.set_params(&key.0, &key.1, params_for(target, key)).map_err(|error| error.to_string())?;
+                    self.vector_index.set_kind(&key.0, &key.1, kind_for(target, key)).map_err(|error| error.to_string())?;
+                } else {
+                    self.drop_vector_index(&key.0, &key.1);
+                    self.create_vector_index_with_kind(
+                        name.as_deref(), &key.0, &key.1, *dimensions, *metric, *quantization,
+                        params_for(target, key), kind_for(target, key),
+                    ).map_err(|error| error.to_string())?;
+                    rebuild = true;
+                }
+            }
+            if rebuild { self.rebuild_vector_index(); }
+        } else if changed_families[0] == 4 {
+            let rules = |catalog: &crate::index::catalog::IndexCatalog| {
+                catalog.definitions.iter().filter_map(|definition| match definition {
+                    IndexDefinition::Retention { label, max_age_ms, max_records } => Some((
+                        label.clone(), crate::graph::retention::RetentionRule { max_age_ms: *max_age_ms, max_records: *max_records },
+                    )),
+                    _ => None,
+                }).collect::<std::collections::BTreeMap<_, _>>()
+            };
+            let current = rules(expected);
+            let desired = rules(target);
+            for label in current.keys().filter(|label| !desired.contains_key(*label)) {
+                self.drop_retention(label);
+            }
+            for (label, rule) in &desired {
+                if current.get(label) != Some(rule) {
+                    self.set_retention(label, *rule);
+                }
+            }
+        } else if changed_families[0] == 5 {
+            let definitions = |catalog: &crate::index::catalog::IndexCatalog| {
+                catalog.definitions.iter().filter_map(|definition| match definition {
+                    IndexDefinition::Subgraph { name, labels, edge_types, predicates } => Some((
+                        name.clone(), crate::graph::subgraph::SubgraphDefinition {
+                            name: name.clone(), labels: labels.clone(), edge_types: edge_types.clone(),
+                            predicates: predicates.iter().cloned().collect(),
+                        },
+                    )),
+                    _ => None,
+                }).collect::<std::collections::BTreeMap<_, _>>()
+            };
+            let current = definitions(expected);
+            let desired = definitions(target);
+            for (name, definition) in &desired {
+                if current.get(name) != Some(definition) {
+                    crate::graph::subgraph::SubgraphScope::compile(definition.clone())?;
+                }
+            }
+            for (name, definition) in &current {
+                if desired.get(name) != Some(definition) {
+                    self.drop_subgraph(name);
+                }
+            }
+            for (name, definition) in &desired {
+                if current.get(name) != Some(definition) {
+                    self.create_subgraph(definition.clone())?;
+                }
+            }
+        } else if changed_families[0] == 6 {
+            let definitions = |catalog: &crate::index::catalog::IndexCatalog| {
+                catalog.definitions.iter().filter_map(|definition| match definition {
+                    IndexDefinition::Projection { name, node_label, edge_type, weight_property } => Some((
+                        name.clone(), crate::graph::projection::ProjectionSpec {
+                            node_label: node_label.clone(), edge_type: edge_type.clone(), weight_property: weight_property.clone(),
+                        },
+                    )),
+                    _ => None,
+                }).collect::<std::collections::BTreeMap<_, _>>()
+            };
+            let current = definitions(expected);
+            let desired = definitions(target);
+            for (name, spec) in &current {
+                if desired.get(name) != Some(spec) {
+                    self.graph_projections.drop_projection(name, true).map_err(|error| error.to_string())?;
+                }
+            }
+            for (name, spec) in &desired {
+                if current.get(name) != Some(spec) {
+                    self.graph_projections.create(self, name, spec.clone(), false).map_err(|error| error.to_string())?;
+                }
+            }
+            self.mark_index_catalog_changed();
+        } else if changed_families[0] == 7 {
+            let specs = |catalog: &crate::index::catalog::IndexCatalog| {
+                catalog.definitions.iter().filter_map(|definition| match definition {
+                    IndexDefinition::Hierarchy { name, edge_types, reverse, measure_label, measure_property, aggregates } => {
+                        let mut spec = crate::index::hierarchy::HierarchySpec::new(
+                            name.clone(), edge_types.iter().map(EdgeType::new).collect(),
+                        );
+                        spec.reverse = *reverse;
+                        if let Some(property) = measure_property {
+                            let ops = aggregates.iter().filter_map(|name| crate::index::hierarchy::RollupOp::parse(name)).collect::<Vec<_>>();
+                            spec = spec.with_measure(measure_label.as_deref().map(Label::new), property.clone(), ops);
+                        }
+                        Some((name.clone(), spec))
+                    }
+                    _ => None,
+                }).collect::<std::collections::BTreeMap<_, _>>()
+            };
+            let current = specs(expected);
+            let desired = specs(target);
+            for name in current.keys().filter(|name| !desired.contains_key(*name)) {
+                self.hierarchy_index.drop_index(name).map_err(|error| error.to_string())?;
+            }
+            for (name, spec) in &desired {
+                if current.get(name) != Some(spec) {
+                    let manager = Arc::clone(&self.hierarchy_index);
+                    if current.contains_key(name) {
+                        manager.replace(self, spec.clone()).map_err(|error| error.to_string())?;
+                    } else {
+                        manager.create(self, spec.clone()).map_err(|error| error.to_string())?;
+                    }
+                }
+            }
+            self.mark_index_catalog_changed();
+        } else {
+            let conventions = |catalog: &crate::index::catalog::IndexCatalog| {
+                catalog.definitions.iter().filter_map(|definition| match definition {
+                    IndexDefinition::Structure { convention } => Some((convention.name.clone(), convention.clone())),
+                    _ => None,
+                }).collect::<std::collections::BTreeMap<_, _>>()
+            };
+            let current = conventions(expected);
+            let desired = conventions(target);
+            for name in current.keys().filter(|name| !desired.contains_key(*name)) {
+                self.structure_registry.remove(name);
+            }
+            for (name, convention) in &desired {
+                if current.get(name) != Some(convention) {
+                    self.structure_registry.upsert(convention.clone());
+                }
+            }
+            self.mark_index_catalog_changed();
+        }
+        if &self.index_catalog() != target {
+            return Err("schema catalog did not match the requested target after restoration".to_string());
+        }
+        Ok(())
+    }
+
     /// Re-declare every index in `catalog` and build it from the rows already in
     /// the store (#1477).
     ///
@@ -7211,6 +7618,39 @@ NodeDeleted { id, .. } => {
                             report.failed += 1;
                         }
                     }
+                }
+                IndexDefinition::Projection { name, node_label, edge_type, weight_property } => {
+                    let spec = crate::graph::projection::ProjectionSpec {
+                        node_label: node_label.clone(),
+                        edge_type: edge_type.clone(),
+                        weight_property: weight_property.clone(),
+                    };
+                    let projections = Arc::clone(&self.graph_projections);
+                    match projections.create(self, name, spec, false) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            tracing::warn!("could not restore graph projection '{name}': {error}");
+                            report.failed += 1;
+                        }
+                    }
+                }
+                IndexDefinition::Hierarchy { name, edge_types, reverse, measure_label, measure_property, aggregates } => {
+                    let mut spec = crate::index::hierarchy::HierarchySpec::new(
+                        name.clone(), edge_types.iter().map(EdgeType::new).collect(),
+                    );
+                    spec.reverse = *reverse;
+                    if let Some(property) = measure_property {
+                        let ops = aggregates.iter().filter_map(|name| crate::index::hierarchy::RollupOp::parse(name)).collect::<Vec<_>>();
+                        spec = spec.with_measure(measure_label.as_deref().map(Label::new), property.clone(), ops);
+                    }
+                    let manager = Arc::clone(&self.hierarchy_index);
+                    if let Err(error) = manager.create(self, spec) {
+                        tracing::warn!("could not restore hierarchy index '{name}': {error}");
+                        report.failed += 1;
+                    }
+                }
+                IndexDefinition::Structure { convention } => {
+                    self.structure_registry.upsert(convention.clone());
                 }
                 IndexDefinition::VectorParams { label, property, m, ef_construction, ef } => {
                     vector_params.push((
@@ -7487,6 +7927,16 @@ NodeDeleted { id, .. } => {
         )?;
         self.mark_index_catalog_changed();
         Ok(())
+    }
+
+    /// Drop the vector index declaration on `label.property_key`.
+    pub fn drop_vector_index(&self, label: &str, property_key: &str) -> bool {
+        let dropped = self.vector_index.drop_index(label, property_key);
+        if dropped {
+            self.bump_epoch();
+            self.mark_index_catalog_changed();
+        }
+        dropped
     }
 
     /// The (label, property) a vector index name refers to, and every known name.
@@ -8026,6 +8476,7 @@ mod tests {
         // once X stops bumping.
         const EXEMPT: &[(&str, &str)] = &[
             ("enable_write_log", "recording flag; the writes it records bump on their own path"),
+            ("truncate_write_log", "truncates audit bookkeeping after a rolled-back statement; it does not change graph data or query results"),
             ("begin_deferred_bulk_load", "raises the deferral counter; it changes when the held-back finish runs, not what any read returns -- every structure it holds back is guarded against being read short (#1807)"),
             ("take_write_log", "drains the journal; the data it describes is committed and already bumped"),
             ("set_write_admission", "stores the quota ceiling this statement is admitted under; it refuses writes, it does not change one (#1483)"),

@@ -160,6 +160,7 @@ impl PhysicalOperator for CreateHierarchyIndexOperator {
         let info = mgr
             .create(store, self.spec.clone())
             .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
+        store.mark_index_catalog_changed();
         Ok(Some(info_record(&info)))
     }
 
@@ -221,6 +222,7 @@ impl PhysicalOperator for DropHierarchyIndexOperator {
             .hierarchy_index
             .drop_index(&self.name)
             .map_err(|e| ExecutionError::RuntimeError(e.to_string()))?;
+        store.mark_index_catalog_changed();
         Ok(None)
     }
 

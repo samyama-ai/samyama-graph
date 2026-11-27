@@ -1561,18 +1561,102 @@ paths:
                   report:
                     type: object
                     properties:
-                      nodes_processed:
-                        type: integer
-                      properties_removed:
-                        type: integer
-                      edges_removed:
-                        type: integer
-                      nodes_removed:
-                        type: integer
+                      nodes_processed: {type: integer}
+                      properties_removed: {type: integer}
+                      edges_removed: {type: integer}
+                      nodes_removed: {type: integer}
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
           description: Writes are refused because persistence is degraded
+
+  /api/agent/changes/{id}:
+    get:
+      operationId: getAgentChange
+      summary: Retrieve an audited agent change
+      description: Returns the recorded statement, agent attribution, affected entities, and before/after snapshots. Requires an authenticated Admin and `--audit-log`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Audited change found
+          content:
+            application/json:
+              schema: {type: object}
+        '401': {description: Authenticated Admin required}
+        '404': {description: Agent change not found}
+        '503': {description: Audit logging is disabled}
+
+  /api/agent/changes/{id}/revert:
+    post:
+      operationId: revertAgentChange
+      summary: Revert an audited agent change
+      description: Reverts a recorded agent change only if its affected graph state has not changed since the write. Requires an authenticated Admin and `--audit-log`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Change reverted
+          content:
+            application/json:
+              schema: {type: object}
+        '401': {description: Authenticated Admin required}
+        '404': {description: Agent change not found}
+        '409': {description: Affected graph state changed after the original write}
+        '503': {description: Audit logging is disabled or writes are unavailable}
+
+  /api/agent/schema/proposals:
+    post:
+      operationId: proposeAgentSchemaChange
+      summary: Submit a schema change proposal
+      description: Records a supported schema DDL proposal and its catalog diff. Applying the proposal is a separate Admin action. Requires `--audit-log`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent_id, statement, rationale]
+              properties:
+                agent_id: {type: string, minLength: 1, maxLength: 128}
+                statement: {type: string}
+                rationale: {type: string, minLength: 1, maxLength: 2000}
+      responses:
+        '200':
+          description: Proposal recorded
+          content:
+            application/json:
+              schema: {type: object}
+        '400': {description: Invalid proposal or unsupported DDL}
+        '503': {description: Audit logging is disabled}
+
+  /api/agent/schema/proposals/{id}/apply:
+    post:
+      operationId: applyAgentSchemaProposal
+      summary: Apply an approved schema proposal
+      description: Applies a recorded proposal after an authenticated Admin approves it, provided the catalog has not changed since proposal time. Requires `--audit-log`.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Proposal applied and an audited schema change recorded
+          content:
+            application/json:
+              schema: {type: object}
+        '401': {description: Authenticated Admin required}
+        '403': {description: Admin role required}
+        '404': {description: Schema proposal not found}
+        '409': {description: Schema catalog changed since proposal time}
+        '503': {description: Audit logging is disabled or writes are unavailable}
   /api/nlq:
     post:
       operationId: naturalLanguageQuery

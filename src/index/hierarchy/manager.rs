@@ -272,6 +272,25 @@ impl HierarchyIndexManager {
             .ok_or_else(|| HierarchyError::NoSuchIndex(name.to_string()))
     }
 
+    /// Replace a declaration atomically after successfully rebuilding it.
+    /// A failed build leaves the existing named index untouched.
+    pub fn replace(&self, store: &GraphStore, spec: HierarchySpec) -> HierarchyResult<HierarchyInfo> {
+        let entry = Self::build_entry(store, spec)?;
+        let info = Self::info_for(&entry);
+        self.entries.write().unwrap().insert(
+            entry.spec.name.clone(),
+            Arc::new(RwLock::new(entry)),
+        );
+        Ok(info)
+    }
+
+    /// Declarations in name order, for durable catalog snapshots.
+    pub fn specs(&self) -> Vec<HierarchySpec> {
+        self.entries.read().unwrap().values()
+            .map(|entry| entry.read().unwrap().spec.clone())
+            .collect()
+    }
+
     /// Fetch an entry by name, stale or not.
     pub fn get(&self, name: &str) -> Option<Arc<RwLock<HierarchyEntry>>> {
         self.entries.read().unwrap().get(name).cloned()

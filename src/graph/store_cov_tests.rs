@@ -1585,6 +1585,9 @@ fn index_catalog_lists_every_kind_in_a_stable_order() {
             IndexDefinition::VectorKind { .. } => 6,
             IndexDefinition::Retention { .. } => 7,
             IndexDefinition::Subgraph { .. } => 8,
+            IndexDefinition::Projection { .. } => 9,
+            IndexDefinition::Hierarchy { .. } => 10,
+            IndexDefinition::Structure { .. } => 11,
         })
         .collect();
     let mut sorted = kinds.clone();
