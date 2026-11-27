@@ -258,7 +258,7 @@ self-contained, LDBC needs a data download.
 | openCypher TCK | 3,845 / 3,847 evaluated scenarios, 98.7% corpus coverage (2026-09-15) |
 | LDBC SNB Interactive (SF1) | 21/21 complete, 21/21 return rows (`CH-BENCH-LDBC`) |
 | LDBC SNB BI (SF1) | 20/20 complete, 0 timeouts (`CH-BENCH-LDBC`) |
-| LDBC Graphalytics | 12/12 agree with the LDBC reference (`CH-BENCH-GALX`) |
+| LDBC Graphalytics | 22/22 agree with the LDBC reference at S and M, up to 129M edges (`CH-BENCH-GALX`; see docs/BENCHMARKS.md) |
 | HIER (subsumption and roll-up) | Latest: **108/108 agree** — `benches/hier/results/PROVENANCE.json`, engine commit `30d0731` with `"dirty": true`, so it is not a reproducible commit; 4 further corpus queries are specified but uncontrolled and are not in that denominator. Covers ground LDBC and FinBench do not |
 | Memory | 200 resident bytes per edge on SNB SF10, 176M edges (`CH-MEM-01`, against a 256 B/edge target) |
 | Cross-KG biomedical | 96 / 100 queries return real data, measured 2026-04-02 — the first demo above |
