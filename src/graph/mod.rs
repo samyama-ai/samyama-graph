@@ -70,6 +70,7 @@ pub mod structure_log;
 pub use edge::{Edge, EdgeView};
 pub use node::Node;
 pub use property::{PropertyMap, PropertyValue};
+pub use store::{EntityRef, GraphDiff, LabelChange, PropertyChange, RollbackConflict, RollbackStats};
 pub use store::{IntegrityViolation, GraphError, GraphResult, GraphStore, GraphStatistics, PropertyStats, Histogram, HistogramAxis, IsolationLevel, TxnId, TxnStatus, Transaction, TypeAdjacency, WriteAdmission};
 pub use types::{EdgeId, EdgeType, Label, NodeId};
 pub use catalog::GraphCatalog;
