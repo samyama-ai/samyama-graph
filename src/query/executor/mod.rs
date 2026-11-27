@@ -87,6 +87,7 @@ pub mod retention_ops;
 pub mod projection_ops;
 pub mod structure_ops;
 pub mod point_ops;
+pub mod shacl_call;
 pub mod rag_ops;
 pub mod hybrid_ops;
 pub mod vector_ops;

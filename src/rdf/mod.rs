@@ -44,6 +44,7 @@ mod graph_as_rdf;
 mod namespace;
 mod serialization;
 mod schema;
+pub mod shacl;
 
 pub use types::{
     RdfTerm, RdfSubject, RdfPredicate, RdfObject,
