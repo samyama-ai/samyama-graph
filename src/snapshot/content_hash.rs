@@ -179,10 +179,20 @@ fn put_value(h: &mut Sha256, v: &PropertyValue) {
             h.update([5u8]);
             h.update(ms.to_le_bytes());
         }
-        PropertyValue::Date(d) => {
-            h.update([6u8]);
-            h.update(d.to_le_bytes());
-        }
+        // Four bytes when the day number fits an `i32`, as before `Date` was
+        // widened (#1009), so no existing snapshot's content hash moves. A
+        // wider date takes its own tag rather than eight bytes under tag 6,
+        // which could collide with an `i32` date followed by other data.
+        PropertyValue::Date(d) => match i32::try_from(*d) {
+            Ok(narrow) => {
+                h.update([6u8]);
+                h.update(narrow.to_le_bytes());
+            }
+            Err(_) => {
+                h.update([15u8]);
+                h.update(d.to_le_bytes());
+            }
+        },
         PropertyValue::LocalTime(n) => {
             h.update([7u8]);
             h.update(n.to_le_bytes());

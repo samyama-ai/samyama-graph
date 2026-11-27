@@ -39,7 +39,7 @@ fn sample_ldt() -> PropertyValue {
 
 fn trunc_date(unit: &str) -> i64 {
     match truncate("date", unit, &sample_ldt(), &HashMap::new()).unwrap() {
-        PropertyValue::Date(d) => d as i64,
+        PropertyValue::Date(d) => d,
         other => panic!("expected a date, got {other:?}"),
     }
 }
@@ -101,7 +101,7 @@ fn out_of_range_time_components_are_errors_not_wraps() {
 fn calendar_date_defaults_month_and_day_to_one() {
     assert_eq!(date_days(&map(&[("year", 1970)])).unwrap(), 0);
     assert_eq!(
-        date_days(&map(&[("year", 2015), ("month", 7), ("day", 21)])).unwrap() as i64,
+        date_days(&map(&[("year", 2015), ("month", 7), ("day", 21)])).unwrap(),
         days(2015, 7, 21)
     );
 }
@@ -127,16 +127,16 @@ fn week_dates_map_every_iso_weekday() {
     // ISO week 1 of 1970 starts on Monday 1969-12-29.
     for dow in 1..=7 {
         let d = date_days(&map(&[("year", 1970), ("week", 1), ("dayOfWeek", dow)])).unwrap();
-        assert_eq!(d as i64, days(1969, 12, 29) + dow - 1, "dayOfWeek {dow}");
+        assert_eq!(d, days(1969, 12, 29) + dow - 1, "dayOfWeek {dow}");
     }
     // Week alone defaults to Monday.
     assert_eq!(
-        date_days(&map(&[("year", 1970), ("week", 2)])).unwrap() as i64,
+        date_days(&map(&[("year", 1970), ("week", 2)])).unwrap(),
         days(1970, 1, 5)
     );
     // dayOfWeek alone defaults to week 1.
     assert_eq!(
-        date_days(&map(&[("year", 1970), ("dayOfWeek", 3)])).unwrap() as i64,
+        date_days(&map(&[("year", 1970), ("dayOfWeek", 3)])).unwrap(),
         days(1969, 12, 31)
     );
 }
@@ -156,7 +156,7 @@ fn week_date_errors() {
 #[test]
 fn quarter_dates() {
     assert_eq!(
-        date_days(&map(&[("year", 1970), ("quarter", 2), ("dayOfQuarter", 1)])).unwrap() as i64,
+        date_days(&map(&[("year", 1970), ("quarter", 2), ("dayOfQuarter", 1)])).unwrap(),
         days(1970, 4, 1)
     );
     assert_eq!(
@@ -165,12 +165,12 @@ fn quarter_dates() {
             ("quarter", 3),
             ("dayOfQuarter", 21)
         ]))
-        .unwrap() as i64,
+        .unwrap(),
         days(2015, 7, 21)
     );
     // dayOfQuarter alone: first quarter.
     assert_eq!(
-        date_days(&map(&[("year", 1970), ("dayOfQuarter", 32)])).unwrap() as i64,
+        date_days(&map(&[("year", 1970), ("dayOfQuarter", 32)])).unwrap(),
         days(1970, 2, 1)
     );
     assert!(
@@ -301,14 +301,14 @@ fn parse_timezone_returns_offset_and_zone() {
 fn parse_date_wraps_a_date_value() {
     assert_eq!(
         parse_date("2015-07-21").unwrap(),
-        PropertyValue::Date(days(2015, 7, 21) as i32)
+        PropertyValue::Date(days(2015, 7, 21))
     );
     assert!(parse_date("nope").is_err());
 }
 
 #[test]
 fn iso_dates_in_every_spelling() {
-    let want = days(2015, 7, 21) as i32;
+    let want = days(2015, 7, 21);
     for s in [
         "2015-07-21",
         "20150721",
@@ -321,14 +321,14 @@ fn iso_dates_in_every_spelling() {
     ] {
         assert_eq!(parse_iso_date(s).unwrap(), want, "{s}");
     }
-    assert_eq!(parse_iso_date("2015-07").unwrap() as i64, days(2015, 7, 1));
-    assert_eq!(parse_iso_date("2015").unwrap() as i64, days(2015, 1, 1));
+    assert_eq!(parse_iso_date("2015-07").unwrap(), days(2015, 7, 1));
+    assert_eq!(parse_iso_date("2015").unwrap(), days(2015, 1, 1));
     assert_eq!(
-        parse_iso_date("2015-W30").unwrap() as i64,
+        parse_iso_date("2015-W30").unwrap(),
         days(2015, 7, 20)
     );
     assert_eq!(
-        parse_iso_date("2015w30-7").unwrap() as i64,
+        parse_iso_date("2015w30-7").unwrap(),
         days(2015, 7, 26)
     );
 }
@@ -336,11 +336,11 @@ fn iso_dates_in_every_spelling() {
 #[test]
 fn signed_and_wide_years() {
     assert_eq!(
-        parse_iso_date("-0001-01-01").unwrap() as i64,
+        parse_iso_date("-0001-01-01").unwrap(),
         days(-1, 1, 1)
     );
     assert_eq!(
-        parse_iso_date("123456-01-01").unwrap() as i64,
+        parse_iso_date("123456-01-01").unwrap(),
         days(123456, 1, 1)
     );
 }
@@ -532,7 +532,7 @@ fn truncating_an_out_of_range_date_is_an_error() {
         msg(truncate(
             "date",
             "day",
-            &PropertyValue::Date(i32::MAX),
+            &PropertyValue::Date(crate::graph::civil::MAX_DAY + 1),
             &HashMap::new()
         )
         .unwrap_err()),
@@ -543,7 +543,7 @@ fn truncating_an_out_of_range_date_is_an_error() {
 #[test]
 fn date_overrides_apply_after_truncation() {
     let got = truncate("date", "millennium", &sample_ldt(), &map(&[("day", 2)])).unwrap();
-    assert_eq!(got, PropertyValue::Date(days(2000, 1, 2) as i32));
+    assert_eq!(got, PropertyValue::Date(days(2000, 1, 2)));
     let got = truncate(
         "date",
         "year",
@@ -551,13 +551,13 @@ fn date_overrides_apply_after_truncation() {
         &map(&[("year", 1999), ("month", 3)]),
     )
     .unwrap();
-    assert_eq!(got, PropertyValue::Date(days(1999, 3, 1) as i32));
+    assert_eq!(got, PropertyValue::Date(days(1999, 3, 1)));
 }
 
 #[test]
 fn a_day_of_week_override_moves_within_the_week() {
     let got = truncate("date", "week", &sample_ldt(), &map(&[("dayOfWeek", 2)])).unwrap();
-    assert_eq!(got, PropertyValue::Date(days(2017, 11, 7) as i32));
+    assert_eq!(got, PropertyValue::Date(days(2017, 11, 7)));
 }
 
 #[test]
@@ -635,7 +635,7 @@ fn truncating_a_date_to_a_datetime_starts_at_midnight_utc() {
     let got = truncate(
         "datetime",
         "hour",
-        &PropertyValue::Date(days(2017, 11, 11) as i32),
+        &PropertyValue::Date(days(2017, 11, 11)),
         &HashMap::new(),
     )
     .unwrap();

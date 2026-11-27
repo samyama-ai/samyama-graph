@@ -249,14 +249,25 @@ fn time_and_offset_rendering() {
 }
 
 #[test]
-fn out_of_range_dates_are_reported_not_clamped() {
-    assert!(fmt_date(i32::MAX).starts_with("<date out of range"));
-    assert!(PropertyValue::LocalDateTime {
-        secs: i64::MAX,
-        nanos: 0
-    }
-    .to_cypher_string()
-    .starts_with("<datetime out of range"));
+fn dates_past_chrono_render_in_expanded_form() {
+    // These used to render as an out-of-range marker, because the calendar
+    // came from chrono (±262,143 years). It now covers every day number, and
+    // a year past 9999 is written with its sign, as ISO 8601 and java.time
+    // write it (#1009).
+    assert_eq!(fmt_date(i32::MAX as i64), "+5881580-07-11");
+    assert_eq!(fmt_date(i32::MIN as i64), "-5877641-06-23");
+    assert_eq!(
+        fmt_date(crate::graph::civil::days_from_civil(-999_999_999, 1, 1)),
+        "-999999999-01-01"
+    );
+    assert_eq!(
+        PropertyValue::LocalDateTime {
+            secs: crate::graph::civil::days_from_civil(999_999_999, 12, 31) * 86_400 + 86_399,
+            nanos: 0
+        }
+        .to_cypher_string(),
+        "+999999999-12-31T23:59:59"
+    );
 }
 
 #[test]
