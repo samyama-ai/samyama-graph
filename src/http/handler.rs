@@ -5,7 +5,7 @@ use crate::http::server::{AppState, AuditEnabled, AuditedChange, Subject};
 use crate::query::Value;
 use axum::http::StatusCode;
 use axum::{
-    extract::{Extension, Json, Multipart, Query, State},
+    extract::{Extension, Json, Multipart, Path, Query, State},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[derive(Deserialize)]
 pub struct QueryRequest {
     pub query: String,
+    /// Attribute this write to the calling agent. Agent-attributed writes are
+    /// accepted only with the audit log enabled; the engine records their
+    /// affected entities and before/after values in the same transaction.
+    #[serde(default)]
+    pub agent_id: Option<String>,
     #[serde(default = "default_graph")]
     pub graph: String,
     /// Which language's defaults to read this statement under (#1642, #1644).
@@ -649,6 +654,7 @@ pub(crate) fn read_only_refusal(state: &AppState, payload: &QueryRequest) -> Opt
 pub async fn query_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
+    audit_enabled: Option<Extension<AuditEnabled>>,
     headers: axum::http::HeaderMap,
     Json(mut payload): Json<QueryRequest>,
 ) -> axum::response::Response {
@@ -664,6 +670,50 @@ pub async fn query_handler(
         )
             .into_response();
     }
+    if let Some(agent_id) = payload.agent_id.as_deref() {
+        if !valid_agent_id(agent_id) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "agent_id must be 1-128 ASCII letters, digits, or -_.:/" })),
+            )
+                .into_response();
+        }
+        if audit_enabled.is_none() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "agent-attributed writes require --audit-log" })),
+            )
+                .into_response();
+        }
+        if !state.engine.statement_is_write(&payload.query).unwrap_or(false) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "agent_id is valid only for a write statement" })),
+            )
+                .into_response();
+        }
+        if is_schema_ddl(&payload.query) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "agent schema DDL must use the schema proposal workflow" })),
+            )
+                .into_response();
+        }
+        if payload.graph != default_graph() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "agent-attributed writes currently require the default graph" })),
+            )
+                .into_response();
+        }
+        if payload.tx.is_some() || accepts_ndjson(&headers) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "agent-attributed writes cannot use an open transaction or streaming response" })),
+            )
+                .into_response();
+        }
+    }
     // What the audit layer cannot see from outside: it never reads the body,
     // so the statement's kind, graph and hash travel back on the response
     // (#2081). A statement that does not parse counts as a write, as on RESP.
@@ -672,7 +722,8 @@ pub async fn query_handler(
         is_write: state.engine.statement_is_write(&payload.query).unwrap_or(true),
         query_hash: crate::http::server::query_hash(&payload.query),
     };
-    let mut res = run_query(State(state), subject, headers, Json(payload))
+    let audit_log = audit_enabled.map(|Extension(enabled)| enabled.0);
+    let mut res = run_query(State(state), subject, headers, Json(payload), audit_log)
         .await
         .into_response();
     res.extensions_mut().insert(audit);
@@ -684,6 +735,7 @@ async fn run_query(
     subject: Option<Extension<Subject>>,
     headers: axum::http::HeaderMap,
     Json(payload): Json<QueryRequest>,
+    audit_log: Option<std::sync::Arc<crate::http::server::AuditLog>>,
 ) -> impl IntoResponse {
     // A named subgraph of the tenant graph is addressed by `graph` (#337).
     if payload.graph != default_graph() {
@@ -787,6 +839,7 @@ async fn run_query(
     let want_hash = payload.include_snapshot_hash;
     let mut stats = QueryStats { is_write, ..QueryStats::default() };
     let asked = std::time::Instant::now();
+    let mut agent_change = None;
     let (result, full_props) = if is_write {
         // `mutate` records the changes and persists them: a write here used to reach
         // memory only, and returned 200 all the same (#1094).
@@ -794,6 +847,14 @@ async fn run_query(
             .mutate(&payload.graph, |store| {
                 stats.lock_wait_ms = ms(asked.elapsed());
                 let started = std::time::Instant::now();
+                let agent_log_start = if audit_log.is_some() && payload.agent_id.is_some() {
+                    store.enable_write_log();
+                    let start = store.write_log_len();
+                    let _ = store.begin_session_transaction();
+                    Some((start, store.current_version.saturating_sub(1)))
+                } else {
+                    None
+                };
                 let result = state.engine.execute_mut_with_params_within(
                     &payload.query,
                     store,
@@ -802,6 +863,36 @@ async fn run_query(
                     time_limit,
                 );
                 stats.elapsed_ms = ms(started.elapsed());
+                if let (Some((log_start, before_version)), Some(agent_id)) =
+                    (agent_log_start, payload.agent_id.as_deref())
+                {
+                    match &result {
+                        Ok(_) => {
+                            let mutations = store.write_log_since(log_start);
+                            let (before, after, node_ids, edge_ids) =
+                                agent_write_audit_snapshots(store, &mutations, before_version);
+                            let _ = store.commit_session_transaction();
+                            agent_change = Some(AuditedChange {
+                                statement: payload.query.clone(),
+                                agent_id: Some(agent_id.to_string()),
+                                change_id: Some(new_agent_change_id()),
+                                change_kind: Some("data".to_string()),
+                                node_ids,
+                                edge_ids,
+                                before,
+                                after,
+                            });
+                            let _ = store.gc_auto();
+                            if state.persistence.is_none() {
+                                let _ = store.take_write_log();
+                            }
+                        }
+                        Err(_) => {
+                            let _ = store.rollback_session_transaction();
+                            store.truncate_write_log(log_start);
+                        }
+                    }
+                }
                 let props = result
                     .as_ref()
                     .map(|b| merged_node_properties(&b.records, store))
@@ -862,7 +953,104 @@ async fn run_query(
         (result, props)
     };
 
-    render_query_result(result, &full_props, served_from_cache, snapshot_version, snapshot_hash, stats)
+    let mut response = render_query_result(
+        result,
+        &full_props,
+        served_from_cache,
+        snapshot_version,
+        snapshot_hash,
+        stats,
+    )
+    .into_response();
+    if let Some(change) = agent_change {
+        if let Some(log) = &audit_log {
+            log.register_change(change.clone());
+        }
+        if let Some(id) = &change.change_id {
+            if let Ok(value) = axum::http::HeaderValue::from_str(id) {
+                response.headers_mut().insert("x-samyama-change-id", value);
+            }
+        }
+        response.extensions_mut().insert(change);
+    }
+    response
+}
+
+pub(crate) fn new_agent_change_id() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    format!("{now}-{}", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
+pub(crate) fn valid_agent_id(agent_id: &str) -> bool {
+    !agent_id.trim().is_empty()
+        && agent_id.len() <= 128
+        && agent_id.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.:/".contains(&b))
+}
+
+pub(crate) fn validate_agent_attribution(
+    agent_id: Option<String>,
+    audit_enabled: bool,
+) -> Result<Option<String>, axum::response::Response> {
+    if let Some(id) = agent_id.as_deref() {
+        if !valid_agent_id(id) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "agent_id must be 1-128 ASCII letters, digits, or -_.:/" })),
+            )
+                .into_response());
+        }
+        if !audit_enabled {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "agent-attributed lifecycle operations require --audit-log" })),
+            )
+                .into_response());
+        }
+    }
+    Ok(agent_id)
+}
+
+pub(crate) fn attach_agent_change(
+    response: &mut axum::response::Response,
+    audit: Option<&Extension<AuditEnabled>>,
+    change: AuditedChange,
+) {
+    if let Some(id) = &change.change_id {
+        if let Some(Extension(audit)) = audit {
+            audit.0.register_change(change.clone());
+        }
+        if let Ok(value) = axum::http::HeaderValue::from_str(id) {
+            response.headers_mut().insert("x-samyama-change-id", value);
+        }
+    }
+    response.extensions_mut().insert(change);
+}
+
+fn is_schema_ddl(statement: &str) -> bool {
+    let Ok(query) = crate::query::parser::parse_query(statement) else {
+        return false;
+    };
+    query.create_index_clause.is_some()
+        || query.drop_index_clause.is_some()
+        || query.create_constraint_clause.is_some()
+        || query.create_vector_index_clause.is_some()
+        || query.create_fulltext_index_clause.is_some()
+        || query.drop_fulltext_index_clause.is_some()
+        || query.point_index_ddl.is_some()
+        || query.create_hierarchy_index_clause.is_some()
+        || query.drop_hierarchy_index.is_some()
+        || query.rebuild_hierarchy_index.is_some()
+        || query.create_structure_index_clause.is_some()
+        || query.drop_structure_index.is_some()
+        || query.rebuild_structure_index.is_some()
+        || query.graph_projection_ddl.is_some()
+        || query.call_clause.as_ref().is_some_and(|call| {
+            matches!(call.procedure_name.to_ascii_lowercase().as_str(), "db.retention.set" | "db.retention.drop")
+        })
 }
 
 /// The media type a client sends in `Accept` to ask for a streamed result.
@@ -3873,6 +4061,672 @@ use crate::agent::enrich::{self, EnrichConfig};
 #[derive(Deserialize)]
 pub struct EnrichRequest {
     pub query: String,
+    /// Attribute this lifecycle operation to the calling agent. When present,
+    /// the request requires the audit log and its response returns a change ID
+    /// that can be looked up or reverted through `/api/agent/changes`.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct AgentSchemaProposalRequest {
+    pub agent_id: String,
+    pub statement: String,
+    pub rationale: String,
+}
+
+fn sorted_index_catalog(mut catalog: crate::index::catalog::IndexCatalog) -> crate::index::catalog::IndexCatalog {
+    use crate::index::catalog::IndexDefinition;
+    catalog.definitions.sort_by_key(|definition| match definition {
+        IndexDefinition::Property { label, property } => (0u8, label.clone(), property.clone(), String::new()),
+        IndexDefinition::UniqueConstraint { label, property } => (1u8, label.clone(), property.clone(), String::new()),
+        IndexDefinition::FullText { name, label, property } => (2u8, label.clone(), property.clone(), name.clone()),
+        IndexDefinition::Vector { name, label, property, .. } => (3u8, label.clone(), property.clone(), name.clone().unwrap_or_default()),
+        IndexDefinition::Point { name, label, property } => (4u8, label.clone(), property.clone(), name.clone()),
+        IndexDefinition::VectorParams { label, property, .. } => (5u8, label.clone(), property.clone(), String::new()),
+        IndexDefinition::VectorKind { label, property, .. } => (6u8, label.clone(), property.clone(), String::new()),
+        IndexDefinition::Retention { label, .. } => (7u8, label.clone(), String::new(), String::new()),
+        IndexDefinition::Subgraph { name, .. } => (8u8, name.clone(), String::new(), String::new()),
+        IndexDefinition::Projection { name, .. } => (9u8, name.clone(), String::new(), String::new()),
+        IndexDefinition::Hierarchy { name, .. } => (10u8, name.clone(), String::new(), String::new()),
+        IndexDefinition::Structure { convention } => (11u8, convention.name.clone(), String::new(), String::new()),
+    });
+    catalog
+}
+
+fn agent_schema_target(
+    statement: &str,
+    before: &crate::index::catalog::IndexCatalog,
+    store: &crate::graph::GraphStore,
+) -> Result<crate::index::catalog::IndexCatalog, String> {
+    use crate::index::catalog::IndexDefinition;
+    use crate::query::ast::PointIndexDdl;
+    let query = crate::query::parser::parse_query(statement).map_err(|error| error.to_string())?;
+    let supported = [
+        query.create_index_clause.is_some(),
+        query.drop_index_clause.is_some(),
+        query.create_constraint_clause.is_some(),
+        query.create_fulltext_index_clause.is_some(),
+        query.drop_fulltext_index_clause.is_some(),
+        query.create_vector_index_clause.is_some(),
+        query.point_index_ddl.is_some(),
+        query.call_clause.as_ref().is_some_and(|call| {
+            matches!(call.procedure_name.to_ascii_lowercase().as_str(), "db.retention.set" | "db.retention.drop")
+        }),
+        query.graph_projection_ddl.as_ref().is_some_and(|ddl| {
+            matches!(ddl, crate::query::ast::GraphProjectionDdl::Create { .. } | crate::query::ast::GraphProjectionDdl::Drop { .. })
+        }),
+        query.create_hierarchy_index_clause.is_some(),
+        query.drop_hierarchy_index.is_some(),
+        query.create_structure_index_clause.is_some(),
+        query.drop_structure_index.is_some(),
+    ];
+    if supported.iter().filter(|enabled| **enabled).count() != 1 {
+        return Err("schema proposals support one catalog-backed index, retention, projection, hierarchy, or structure create/drop operation; subgraph definitions use `/api/subgraphs`".to_string());
+    }
+
+    let mut target = before.clone();
+    if let Some(clause) = query.create_index_clause {
+        for property in std::iter::once(clause.property).chain(clause.additional_properties) {
+            let definition = IndexDefinition::Property { label: clause.label.as_str().to_string(), property };
+            if !target.definitions.contains(&definition) {
+                target.definitions.push(definition);
+            }
+        }
+    } else if let Some(clause) = query.drop_index_clause {
+        target.definitions.retain(|definition| !matches!(definition,
+            IndexDefinition::Property { label, property }
+                if label == clause.label.as_str() && property == &clause.property));
+    } else if let Some(clause) = query.create_constraint_clause {
+        let label = clause.label.as_str().to_string();
+        for definition in [
+            IndexDefinition::Property { label: label.clone(), property: clause.property.clone() },
+            IndexDefinition::UniqueConstraint { label, property: clause.property },
+        ] {
+            if !target.definitions.contains(&definition) {
+                target.definitions.push(definition);
+            }
+        }
+    } else if let Some(clause) = query.create_fulltext_index_clause {
+        if clause.property_keys.len() != 1 {
+            return Err("agent schema proposals currently support one property per full-text index".to_string());
+        }
+        target.definitions.retain(|definition| !matches!(definition,
+            IndexDefinition::FullText { name, .. } if name == &clause.index_name));
+        target.definitions.push(IndexDefinition::FullText {
+            name: clause.index_name,
+            label: clause.label.as_str().to_string(),
+            property: clause.property_keys.into_iter().next().unwrap(),
+        });
+    } else if let Some(clause) = query.drop_fulltext_index_clause {
+        target.definitions.retain(|definition| !matches!(definition,
+            IndexDefinition::FullText { name, .. } if name == &clause.index_name));
+    } else if let Some(clause) = query.create_vector_index_clause {
+        let metric = match clause.similarity.to_ascii_lowercase().as_str() {
+            "cosine" => crate::vector::DistanceMetric::Cosine,
+            "l2" | "euclidean" => crate::vector::DistanceMetric::L2,
+            "inner_product" | "dot" => crate::vector::DistanceMetric::InnerProduct,
+            _ => return Err(format!("unsupported vector similarity metric: {}", clause.similarity)),
+        };
+        let label = clause.label.as_str().to_string();
+        let property = clause.property_key;
+        if let Some(name) = clause.index_name.as_deref() {
+            if before.definitions.iter().any(|definition| matches!(definition,
+                IndexDefinition::Vector { name: Some(existing), label: old_label, property: old_property, .. }
+                    if existing == name && (old_label != &label || old_property != &property)))
+            {
+                return Err(format!("vector index name '{name}' is already used by another definition"));
+            }
+        }
+        target.definitions.retain(|definition| !matches!(definition,
+            IndexDefinition::Vector { label: old_label, property: old_property, .. }
+                | IndexDefinition::VectorParams { label: old_label, property: old_property, .. }
+                | IndexDefinition::VectorKind { label: old_label, property: old_property, .. }
+                if old_label == &label && old_property == &property));
+        target.definitions.push(IndexDefinition::Vector {
+            name: clause.index_name,
+            label: label.clone(),
+            property: property.clone(),
+            dimensions: clause.dimensions,
+            metric,
+            quantization: clause.quantization,
+        });
+        if clause.params != crate::vector::HnswParams::default() {
+            target.definitions.push(IndexDefinition::VectorParams {
+                label: label.clone(), property: property.clone(),
+                m: clause.params.m, ef_construction: clause.params.ef_construction, ef: clause.params.ef,
+            });
+        }
+        if clause.kind != crate::vector::IndexKind::Hnsw {
+            target.definitions.push(IndexDefinition::VectorKind { label, property, kind: clause.kind });
+        }
+    } else if let Some(ddl) = query.point_index_ddl {
+        match ddl {
+            PointIndexDdl::Create { name, label, property } => {
+                target.definitions.retain(|definition| !matches!(definition,
+                    IndexDefinition::Point { name: old_name, .. } if old_name == &name));
+                target.definitions.push(IndexDefinition::Point {
+                    name, label: label.as_str().to_string(), property,
+                });
+            }
+            PointIndexDdl::Drop { name } => {
+                target.definitions.retain(|definition| !matches!(definition,
+                    IndexDefinition::Point { name: old_name, .. } if old_name == &name));
+            }
+        }
+    } else if let Some(call) = query.call_clause {
+        use crate::query::executor::operator::eval_expression;
+        use crate::query::executor::Record;
+        let procedure = call.procedure_name.to_ascii_lowercase();
+        if procedure == "db.retention.drop" {
+            if call.arguments.len() != 1 {
+                return Err("db.retention.drop takes one label argument".to_string());
+            }
+            let label = match eval_expression(&call.arguments[0], &Record::new(), store)
+                .map_err(|error| error.to_string())?
+            {
+                crate::query::Value::Property(crate::graph::PropertyValue::String(label)) if !label.trim().is_empty() => label,
+                other => return Err(format!("db.retention.drop label must be a non-empty string, got {other:?}")),
+            };
+            target.definitions.retain(|definition| !matches!(definition,
+                IndexDefinition::Retention { label: old_label, .. } if old_label == &label));
+        } else if procedure == "db.retention.set" {
+            if call.arguments.len() != 2 {
+                return Err("db.retention.set takes a label and a rule map".to_string());
+            }
+            let label = match eval_expression(&call.arguments[0], &Record::new(), store)
+                .map_err(|error| error.to_string())?
+            {
+                crate::query::Value::Property(crate::graph::PropertyValue::String(label)) if !label.trim().is_empty() => label,
+                other => return Err(format!("db.retention.set label must be a non-empty string, got {other:?}")),
+            };
+            let config = match eval_expression(&call.arguments[1], &Record::new(), store)
+                .map_err(|error| error.to_string())?
+            {
+                crate::query::Value::Property(crate::graph::PropertyValue::Map(map)) => map,
+                other => return Err(format!("db.retention.set rule must be a map, got {other:?}")),
+            };
+            if let Some(key) = config.keys().find(|key| key.as_str() != "maxAge" && key.as_str() != "maxRecords") {
+                return Err(format!("db.retention.set has unknown rule key '{key}'"));
+            }
+            let max_age_ms = match config.get("maxAge") {
+                None | Some(crate::graph::PropertyValue::Null) => None,
+                Some(crate::graph::PropertyValue::String(value)) => Some(crate::graph::retention::parse_duration(value)?),
+                Some(crate::graph::PropertyValue::Integer(value)) if *value > 0 => Some(*value as u64),
+                Some(other) => return Err(format!("db.retention.set maxAge is invalid: {other:?}")),
+            };
+            let max_records = match config.get("maxRecords") {
+                None | Some(crate::graph::PropertyValue::Null) => None,
+                Some(crate::graph::PropertyValue::Integer(value)) if *value > 0 => Some(*value as u64),
+                Some(other) => return Err(format!("db.retention.set maxRecords is invalid: {other:?}")),
+            };
+            if max_age_ms.is_none() && max_records.is_none() {
+                return Err("db.retention.set requires maxAge, maxRecords, or both".to_string());
+            }
+            target.definitions.retain(|definition| !matches!(definition,
+                IndexDefinition::Retention { label: old_label, .. } if old_label == &label));
+            target.definitions.push(IndexDefinition::Retention { label, max_age_ms, max_records });
+        }
+    } else if let Some(ddl) = query.graph_projection_ddl {
+        match ddl {
+            crate::query::ast::GraphProjectionDdl::Create { name, spec, if_not_exists } => {
+                let exists = before.definitions.iter().any(|definition| matches!(definition,
+                    IndexDefinition::Projection { name: existing_name, .. } if existing_name == &name));
+                if exists {
+                    if if_not_exists { return Err("the projection already exists; IF NOT EXISTS would make no change".to_string()); }
+                    return Err(format!("graph projection '{name}' already exists; drop it before proposing a replacement"));
+                }
+                target.definitions.push(IndexDefinition::Projection {
+                    name, node_label: spec.node_label, edge_type: spec.edge_type, weight_property: spec.weight_property,
+                });
+            }
+            crate::query::ast::GraphProjectionDdl::Drop { name, if_exists: _ } => {
+                target.definitions.retain(|definition| !matches!(definition,
+                    IndexDefinition::Projection { name: old_name, .. } if old_name == &name));
+            }
+            crate::query::ast::GraphProjectionDdl::Refresh { .. } | crate::query::ast::GraphProjectionDdl::Show => {
+                return Err("graph projection refresh/show is not a reversible schema proposal".to_string());
+            }
+        }
+    } else if let Some(clause) = query.create_hierarchy_index_clause {
+        if before.definitions.iter().any(|definition| matches!(definition,
+            IndexDefinition::Hierarchy { name, .. } if name == &clause.name)) {
+            return Err(format!("hierarchy index '{}' already exists; drop it before proposing a replacement", clause.name));
+        }
+        let aggregates = if clause.measure_property.is_none() {
+            vec!["count".to_string()]
+        } else if clause.aggregates.is_empty() {
+            vec!["sum".to_string()]
+        } else {
+            clause.aggregates.iter().map(|name| {
+                crate::index::hierarchy::RollupOp::parse(name)
+                    .map(|op| op.name().to_string())
+                    .ok_or_else(|| format!("unsupported hierarchy aggregate '{name}'"))
+            }).collect::<Result<Vec<_>, _>>()?
+        };
+        target.definitions.push(IndexDefinition::Hierarchy {
+            name: clause.name,
+            edge_types: clause.edge_types.iter().map(|edge_type| edge_type.as_str().to_string()).collect(),
+            reverse: clause.reverse,
+            measure_label: clause.measure_label.map(|label| label.as_str().to_string()),
+            measure_property: clause.measure_property,
+            aggregates,
+        });
+    } else if let Some(name) = query.drop_hierarchy_index {
+        target.definitions.retain(|definition| !matches!(definition,
+            IndexDefinition::Hierarchy { name: old_name, .. } if old_name == &name));
+    } else if let Some(clause) = query.create_structure_index_clause {
+        let convention = crate::query::executor::structure_ops::convention_from_clause(&clause);
+        let index = crate::index::structure::SgiIndex::build(store, convention.clone());
+        if index.points.is_empty() {
+            return Err(format!("structure index '{}' has no nodes with the declared coordinates", convention.name));
+        }
+        target.definitions.retain(|definition| !matches!(definition,
+            IndexDefinition::Structure { convention: old } if old.name == convention.name));
+        target.definitions.push(IndexDefinition::Structure { convention });
+    } else if let Some(name) = query.drop_structure_index {
+        target.definitions.retain(|definition| !matches!(definition,
+            IndexDefinition::Structure { convention } if convention.name == name));
+    }
+    let target = sorted_index_catalog(target);
+    if &target == before {
+        return Err("the proposed DDL does not change the current schema catalog".to_string());
+    }
+    Ok(target)
+}
+
+/// Let an agent submit a schema proposal. The response contains the exact
+/// catalog diff; a separate Admin action is required to apply it.
+pub async fn propose_agent_schema_handler(
+    State(state): State<AppState>,
+    audit: Option<Extension<AuditEnabled>>,
+    Json(request): Json<AgentSchemaProposalRequest>,
+) -> axum::response::Response {
+    let Some(Extension(audit)) = audit else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "schema proposals require --audit-log" }))).into_response();
+    };
+    if !valid_agent_id(&request.agent_id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "agent_id must be 1-128 ASCII letters, digits, or -_.:/" }))).into_response();
+    }
+    if request.rationale.trim().is_empty() || request.rationale.len() > 2_000 {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "rationale must contain 1-2000 characters" }))).into_response();
+    }
+    let store = crate::store_lock::read(&state.store).await;
+    let before = store.index_catalog();
+    let after = match agent_schema_target(&request.statement, &before, &store) {
+        Ok(catalog) => catalog,
+        Err(error) => return (StatusCode::BAD_REQUEST, Json(json!({ "error": error }))).into_response(),
+    };
+    let added: Vec<_> = after.definitions.iter().filter(|definition| !before.definitions.contains(definition)).cloned().collect();
+    let removed: Vec<_> = before.definitions.iter().filter(|definition| !after.definitions.contains(definition)).cloned().collect();
+    let change = AuditedChange {
+        statement: request.statement,
+        agent_id: Some(request.agent_id),
+        change_id: Some(new_agent_change_id()),
+        change_kind: Some("schema_proposal".to_string()),
+        node_ids: Vec::new(),
+        edge_ids: Vec::new(),
+        before: json!({ "catalog": before, "rationale": request.rationale }),
+        after: json!({ "catalog": after }),
+    };
+    audit.0.register_change(change.clone());
+    let id = change.change_id.clone().unwrap_or_default();
+    let mut response = (StatusCode::OK, Json(json!({
+        "proposal_id": id,
+        "status": "proposed",
+        "added": added,
+        "removed": removed,
+        "requires_admin_approval": true,
+    }))).into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&id) {
+        response.headers_mut().insert("x-samyama-change-id", value);
+    }
+    response.extensions_mut().insert(change);
+    response
+}
+
+/// Apply a recorded schema proposal after an Admin explicitly approves it.
+pub async fn apply_agent_schema_proposal_handler(
+    State(state): State<AppState>,
+    subject: Option<Extension<Subject>>,
+    audit: Option<Extension<AuditEnabled>>,
+    Path(proposal_id): Path<String>,
+) -> axum::response::Response {
+    let Some(Extension(approver)) = subject else {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "schema application requires an authenticated Admin approver" }))).into_response();
+    };
+    if !approver.0.roles.contains(&crate::auth::Role::Admin) {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "schema application requires an Admin approver" }))).into_response();
+    }
+    let Some(Extension(audit)) = audit else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "schema application requires --audit-log" }))).into_response();
+    };
+    let Some(proposal) = audit.0.change(&proposal_id).filter(|change| change.change_kind.as_deref() == Some("schema_proposal")) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "schema proposal not found" }))).into_response();
+    };
+    if let Some(refusal) = state.writes_refused() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": refusal }))).into_response();
+    }
+    let before: crate::index::catalog::IndexCatalog = match serde_json::from_value(proposal.before["catalog"].clone()) {
+        Ok(catalog) => catalog,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("invalid proposal catalog: {error}") }))).into_response(),
+    };
+    let after: crate::index::catalog::IndexCatalog = match serde_json::from_value(proposal.after["catalog"].clone()) {
+        Ok(catalog) => catalog,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("invalid proposed catalog: {error}") }))).into_response(),
+    };
+    let proposal_for_apply = proposal.clone();
+    let before_for_apply = before.clone();
+    let after_for_apply = after.clone();
+    let apply = state.mutate("default", move |store| {
+        store.replace_schema_catalog(&before_for_apply, &after_for_apply)
+    }).await;
+    if let Err(error) = apply {
+        return (StatusCode::CONFLICT, Json(json!({ "error": error }))).into_response();
+    }
+    let applied = AuditedChange {
+        statement: proposal_for_apply.statement,
+        agent_id: proposal_for_apply.agent_id,
+        change_id: Some(new_agent_change_id()),
+        change_kind: Some("schema".to_string()),
+        node_ids: Vec::new(),
+        edge_ids: Vec::new(),
+        before: json!({ "catalog": before }),
+        after: json!({ "catalog": after }),
+    };
+    audit.0.register_change(applied.clone());
+    let id = applied.change_id.clone().unwrap_or_default();
+    let mut response = (StatusCode::OK, Json(json!({ "applied": proposal_id, "change_id": id }))).into_response();
+    if let Ok(value) = axum::http::HeaderValue::from_str(&id) {
+        response.headers_mut().insert("x-samyama-change-id", value);
+    }
+    response.extensions_mut().insert(applied);
+    response
+}
+
+/// Return an agent write's durable before/after record by its response header
+/// `x-samyama-change-id`.
+pub async fn get_agent_change_handler(
+    subject: Option<Extension<Subject>>,
+    audit: Option<Extension<AuditEnabled>>,
+    Path(change_id): Path<String>,
+) -> axum::response::Response {
+    if !subject.as_ref().is_some_and(|Extension(subject)| subject.0.roles.contains(&crate::auth::Role::Admin)) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "agent change lookup requires an authenticated Admin" }))).into_response();
+    }
+    let Some(Extension(audit)) = audit else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "agent change lookup requires --audit-log" }))).into_response();
+    };
+    match audit.0.change(&change_id) {
+        Some(change) if change.agent_id.is_some() => (StatusCode::OK, Json(change)).into_response(),
+        _ => (StatusCode::NOT_FOUND, Json(json!({ "error": "agent change not found" }))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct AgentNodeImage {
+    id: u64,
+    labels: BTreeSet<String>,
+    properties: crate::graph::PropertyMap,
+}
+
+#[derive(Deserialize)]
+struct AgentEdgeImage {
+    id: u64,
+    source: u64,
+    target: u64,
+    #[serde(rename = "type")]
+    edge_type: String,
+    properties: crate::graph::PropertyMap,
+}
+
+#[derive(Deserialize)]
+struct AgentGraphImage {
+    nodes: Vec<AgentNodeImage>,
+    edges: Vec<AgentEdgeImage>,
+}
+
+/// Revert an agent-attributed query only if every affected entity still has
+/// the exact post-write image recorded at commit time.
+pub async fn revert_agent_change_handler(
+    State(state): State<AppState>,
+    subject: Option<Extension<Subject>>,
+    audit: Option<Extension<AuditEnabled>>,
+    Path(change_id): Path<String>,
+) -> axum::response::Response {
+    if !subject.as_ref().is_some_and(|Extension(subject)| subject.0.roles.contains(&crate::auth::Role::Admin)) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({ "error": "agent change revert requires an authenticated Admin" }))).into_response();
+    }
+    let Some(Extension(audit)) = audit else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": "agent change revert requires --audit-log" }))).into_response();
+    };
+    let Some(change) = audit.0.change(&change_id).filter(|change| change.agent_id.is_some()) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "agent change not found" }))).into_response();
+    };
+    if matches!(change.change_kind.as_deref(), Some("schema" | "schema_revert")) {
+        return revert_agent_schema_change(state, audit.0.clone(), change_id, change).await;
+    }
+    if change.change_kind.as_deref() == Some("schema_proposal") {
+        return (StatusCode::CONFLICT, Json(json!({ "error": "a proposal cannot be reverted because it was not applied" }))).into_response();
+    }
+    if let Some(refusal) = state.writes_refused() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": refusal }))).into_response();
+    }
+    let before_image: AgentGraphImage = match serde_json::from_value(change.before.clone()) {
+        Ok(image) => image,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("invalid stored before image: {error}") }))).into_response(),
+    };
+    let after_image: AgentGraphImage = match serde_json::from_value(change.after.clone()) {
+        Ok(image) => image,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("invalid stored after image: {error}") }))).into_response(),
+    };
+
+    let expected = change.clone();
+    let has_persistence = state.persistence.is_some();
+    let outcome = state.mutate("default", move |store| {
+        let mutations = expected.node_ids.iter().map(|id| crate::graph::event::Mutation::NodeUpserted(crate::graph::NodeId(*id)))
+            .chain(expected.edge_ids.iter().map(|id| crate::graph::event::Mutation::EdgeUpserted(crate::graph::EdgeId(*id))))
+            .collect::<Vec<_>>();
+        let (_, live, _, _) = agent_write_audit_snapshots(store, &mutations, store.current_version);
+        if live != expected.after {
+            return Err((StatusCode::CONFLICT, "an affected node or edge changed after this agent write".to_string()));
+        }
+        let changed_edges: BTreeSet<u64> = expected.edge_ids.iter().copied().collect();
+        for node in &after_image.nodes {
+            if before_image.nodes.iter().all(|old| old.id != node.id) {
+                let id = crate::graph::NodeId(node.id);
+                let attached: BTreeSet<u64> = store.get_outgoing_edges(id).into_iter()
+                    .chain(store.get_incoming_edges(id)).map(|edge| edge.id.as_u64()).collect();
+                if !attached.is_subset(&changed_edges) {
+                    return Err((StatusCode::CONFLICT, format!("node {} has relationships created after the agent write", node.id)));
+                }
+            }
+        }
+
+        store.enable_write_log();
+        let log_start = store.write_log_len();
+        if store.begin_session_transaction().is_err() {
+            return Err((StatusCode::CONFLICT, "another graph transaction is active".to_string()));
+        }
+        match apply_agent_revert(store, &before_image, &after_image) {
+            Ok(id_maps) => {
+                let _ = store.commit_session_transaction();
+                let mut mutations = store.write_log_since(log_start);
+                mutations.extend(expected.node_ids.iter().map(|id| {
+                    crate::graph::event::Mutation::NodeUpserted(crate::graph::NodeId(*id))
+                }));
+                mutations.extend(expected.edge_ids.iter().map(|id| {
+                    crate::graph::event::Mutation::EdgeUpserted(crate::graph::EdgeId(*id))
+                }));
+                let (_, after, node_ids, edge_ids) = agent_write_audit_snapshots(
+                    store,
+                    &mutations,
+                    store.current_version.saturating_sub(1),
+                );
+                let before = expected.after.clone();
+                let _ = store.gc_auto();
+                if !has_persistence {
+                    let _ = store.take_write_log();
+                }
+                Ok((before, after, node_ids, edge_ids, id_maps))
+            }
+            Err(error) => {
+                let _ = store.rollback_session_transaction();
+                store.truncate_write_log(log_start);
+                Err((StatusCode::CONFLICT, error))
+            }
+        }
+    }).await;
+
+    match outcome {
+        Ok((before, after, node_ids, edge_ids, id_maps)) => {
+            let reverted = AuditedChange {
+                statement: format!("revert agent change {change_id}"),
+                agent_id: change.agent_id.clone(),
+                change_id: Some(new_agent_change_id()),
+                change_kind: Some("revert".to_string()),
+                node_ids,
+                edge_ids,
+                before,
+                after,
+            };
+            audit.0.register_change(reverted.clone());
+            let mut response = (StatusCode::OK, Json(json!({ "reverted": change_id, "id_maps": id_maps, "revert_change_id": reverted.change_id }))).into_response();
+            if let Some(id) = &reverted.change_id {
+                if let Ok(value) = axum::http::HeaderValue::from_str(id) {
+                    response.headers_mut().insert("x-samyama-change-id", value);
+                }
+            }
+            response.extensions_mut().insert(reverted);
+            response
+        }
+        Err((status, error)) => (status, Json(json!({ "error": error }))).into_response(),
+    }
+}
+
+async fn revert_agent_schema_change(
+    state: AppState,
+    audit: std::sync::Arc<crate::http::server::AuditLog>,
+    change_id: String,
+    change: AuditedChange,
+) -> axum::response::Response {
+    if let Some(refusal) = state.writes_refused() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": refusal }))).into_response();
+    }
+    let before: crate::index::catalog::IndexCatalog = match serde_json::from_value(change.before["catalog"].clone()) {
+        Ok(catalog) => catalog,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("invalid stored schema before image: {error}") }))).into_response(),
+    };
+    let after: crate::index::catalog::IndexCatalog = match serde_json::from_value(change.after["catalog"].clone()) {
+        Ok(catalog) => catalog,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": format!("invalid stored schema after image: {error}") }))).into_response(),
+    };
+    let expected = after.clone();
+    let target = before.clone();
+    let restored = state.mutate("default", move |store| {
+        store.replace_schema_catalog(&expected, &target)
+    }).await;
+    if let Err(error) = restored {
+        return (StatusCode::CONFLICT, Json(json!({ "error": error }))).into_response();
+    }
+    let reverted = AuditedChange {
+        statement: format!("revert schema change {change_id}"),
+        agent_id: change.agent_id,
+        change_id: Some(new_agent_change_id()),
+        change_kind: Some("schema_revert".to_string()),
+        node_ids: Vec::new(),
+        edge_ids: Vec::new(),
+        before: json!({ "catalog": after }),
+        after: json!({ "catalog": before }),
+    };
+    audit.register_change(reverted.clone());
+    let mut response = (StatusCode::OK, Json(json!({ "reverted": change_id, "change_id": reverted.change_id }))).into_response();
+    if let Some(id) = &reverted.change_id {
+        if let Ok(value) = axum::http::HeaderValue::from_str(id) {
+            response.headers_mut().insert("x-samyama-change-id", value);
+        }
+    }
+    response.extensions_mut().insert(reverted);
+    response
+}
+
+fn apply_agent_revert(
+    store: &mut crate::graph::GraphStore,
+    before: &AgentGraphImage,
+    after: &AgentGraphImage,
+) -> Result<serde_json::Value, String> {
+    use crate::graph::{EdgeId, Label, NodeId};
+
+    let before_nodes: HashMap<u64, &AgentNodeImage> = before.nodes.iter().map(|image| (image.id, image)).collect();
+    let after_nodes: HashMap<u64, &AgentNodeImage> = after.nodes.iter().map(|image| (image.id, image)).collect();
+    let before_edges: HashMap<u64, &AgentEdgeImage> = before.edges.iter().map(|image| (image.id, image)).collect();
+    let after_edges: HashMap<u64, &AgentEdgeImage> = after.edges.iter().map(|image| (image.id, image)).collect();
+    let mut node_map = HashMap::<u64, u64>::new();
+    let mut edge_map = HashMap::<u64, u64>::new();
+
+    // Remove relationships created by the original write before removing nodes.
+    for id in after_edges.keys().filter(|id| !before_edges.contains_key(id)) {
+        store.delete_edge(EdgeId(*id)).map_err(|error| error.to_string())?;
+    }
+
+    // Restore deleted nodes with new engine IDs, and remove nodes created by the
+    // original write. Existing IDs remain stable for updates.
+    for old in before.nodes.iter().filter(|old| !after_nodes.contains_key(&old.id)) {
+        let labels = old.labels.iter().map(Label::new).collect::<Vec<_>>();
+        let new_id = store.create_node_with_labels(labels);
+        for (key, value) in &old.properties {
+            store.set_node_property("default", new_id, key.clone(), value.clone()).map_err(|error| error.to_string())?;
+        }
+        node_map.insert(old.id, new_id.as_u64());
+    }
+    for id in after_nodes.keys().filter(|id| !before_nodes.contains_key(id)) {
+        store.delete_node("default", NodeId(*id)).map_err(|error| error.to_string())?;
+    }
+    for (id, old) in &before_nodes {
+        let Some(current) = after_nodes.get(id) else { continue };
+        let node_id = NodeId(*id);
+        let current_props = store.node_properties_full(node_id);
+        for key in current_props.keys().filter(|key| !old.properties.contains_key(*key)) {
+            store.remove_node_property(node_id, key);
+        }
+        for (key, value) in &old.properties {
+            store.set_node_property("default", node_id, key.clone(), value.clone()).map_err(|error| error.to_string())?;
+        }
+        let current_labels: Vec<Label> = store.get_node(node_id).ok_or_else(|| format!("node {id} disappeared during revert"))?
+            .labels.iter().cloned().collect();
+        for label in current_labels.iter().filter(|label| !old.labels.contains(label.as_str())) {
+            store.remove_label_from_node(node_id, label).map_err(|error| error.to_string())?;
+        }
+        for label in old.labels.iter().filter(|label| !current.labels.contains(*label)) {
+            store.add_label_to_node("default", node_id, Label::new(label)).map_err(|error| error.to_string())?;
+        }
+    }
+
+    // Recreate relationships removed by the original write after their endpoint
+    // nodes have been restored. Relationship IDs may change and are returned.
+    for old in before.edges.iter().filter(|old| !after_edges.contains_key(&old.id)) {
+        let source = *node_map.get(&old.source).unwrap_or(&old.source);
+        let target = *node_map.get(&old.target).unwrap_or(&old.target);
+        let id = store.create_edge_with_properties(NodeId(source), NodeId(target), old.edge_type.clone(), old.properties.clone())
+            .map_err(|error| error.to_string())?;
+        edge_map.insert(old.id, id.as_u64());
+    }
+    for (id, old) in &before_edges {
+        if !after_edges.contains_key(id) { continue; }
+        let edge_id = EdgeId(*id);
+        let current_props = store.edge_properties_merged(edge_id);
+        for key in current_props.keys().filter(|key| !old.properties.contains_key(*key)) {
+            store.remove_edge_property(edge_id, key);
+        }
+        for (key, value) in &old.properties {
+            store.set_edge_property_sparse(edge_id, key.clone(), value.clone());
+        }
+    }
+
+    Ok(json!({
+        "nodes": node_map.iter().map(|(old, new)| (old.to_string(), *new)).collect::<HashMap<_, _>>(),
+        "edges": edge_map.iter().map(|(old, new)| (old.to_string(), *new)).collect::<HashMap<_, _>>(),
+    }))
 }
 
 /// POST /api/enrich/policy — set the single-graph enrichment policy (`EnrichConfig`).
@@ -3895,6 +4749,10 @@ pub async fn enrich_handler(
     Json(req): Json<EnrichRequest>,
 ) -> axum::response::Response {
     let capture_audit = audit_enabled.is_some();
+    let agent_id = match validate_agent_attribution(req.agent_id, capture_audit) {
+        Ok(agent_id) => agent_id,
+        Err(response) => return response,
+    };
     let statement = req.query;
     let cfg = enrich::global_config().read().unwrap().clone();
 
@@ -3997,13 +4855,18 @@ pub async fn enrich_handler(
     .into_response();
     if let (Some(before), Some(after)) = (before, after) {
         let (node_ids, edge_ids) = audit_entity_ids(&before, &after);
-        response.extensions_mut().insert(AuditedChange {
+        let change_id = (agent_id.is_some() && before != after).then(new_agent_change_id);
+        let change = AuditedChange {
             statement,
+            agent_id,
+            change_id,
+            change_kind: Some("enrich".to_string()),
             node_ids,
             edge_ids,
             before,
             after,
-        });
+        };
+        attach_agent_change(&mut response, audit_enabled.as_ref(), change);
     }
     response
 }
@@ -4016,6 +4879,10 @@ pub async fn verify_handler(
     Json(req): Json<EnrichRequest>,
 ) -> axum::response::Response {
     let capture_audit = audit_enabled.is_some();
+    let agent_id = match validate_agent_attribution(req.agent_id, capture_audit) {
+        Ok(agent_id) => agent_id,
+        Err(response) => return response,
+    };
     if state.engine.statement_is_write(&req.query).unwrap_or(true) {
         return (
             StatusCode::BAD_REQUEST,
@@ -4055,19 +4922,104 @@ pub async fn verify_handler(
     let mut response = (StatusCode::OK, Json(report)).into_response();
     if let (Some(before), Some(after)) = (before, after) {
         let (node_ids, edge_ids) = audit_entity_ids(&before, &after);
-        response.extensions_mut().insert(AuditedChange {
+        let change_id = (agent_id.is_some() && before != after).then(new_agent_change_id);
+        let change = AuditedChange {
             statement,
+            agent_id,
+            change_id,
+            change_kind: Some("verify".to_string()),
             node_ids,
             edge_ids,
             before,
             after,
-        });
+        };
+        attach_agent_change(&mut response, audit_enabled.as_ref(), change);
     }
     response
 }
 
 /// Snapshot the selected nodes and model-generated outgoing subgraph for the
 /// before/after record attached to an agent retraction audit entry.
+fn agent_write_audit_snapshots(
+    store: &crate::graph::GraphStore,
+    mutations: &[crate::graph::event::Mutation],
+    before_version: u64,
+) -> (serde_json::Value, serde_json::Value, Vec<u64>, Vec<u64>) {
+    use crate::graph::event::Mutation;
+
+    let mut node_ids = BTreeSet::new();
+    let mut edge_ids = BTreeSet::new();
+    for mutation in mutations {
+        match mutation {
+            Mutation::NodeUpserted(id) | Mutation::NodeDeleted(id) => {
+                node_ids.insert(id.as_u64());
+            }
+            Mutation::EdgeUpserted(id) | Mutation::EdgeDeleted(id) => {
+                edge_ids.insert(id.as_u64());
+            }
+        }
+    }
+
+    fn snapshot(
+        store: &crate::graph::GraphStore,
+        node_ids: &BTreeSet<u64>,
+        edge_ids: &BTreeSet<u64>,
+        version: Option<u64>,
+    ) -> serde_json::Value {
+        let mut nodes = Vec::new();
+        for raw_id in node_ids {
+            let id = crate::graph::NodeId(*raw_id);
+            let captured = match version {
+                Some(version) => store.node_snapshot_at_version(id, version),
+                None => store.get_node(id).cloned().map(|node| {
+                    let properties = store.node_properties_full(id);
+                    (node, properties)
+                }),
+            };
+            if let Some((node, properties)) = captured {
+                let labels: BTreeSet<String> = node
+                    .labels
+                    .iter()
+                    .map(|label| label.as_str().to_owned())
+                    .collect();
+                nodes.push(json!({ "id": raw_id, "labels": labels, "properties": properties }));
+            }
+        }
+
+        let mut edges = Vec::new();
+        for raw_id in edge_ids {
+            let id = crate::graph::EdgeId(*raw_id);
+            let edge = match version {
+                Some(version) => store.edge_snapshot_at_version(id, version),
+                None => store.get_edge(id),
+            };
+            if let Some(edge) = edge {
+                let properties = match version {
+                    Some(_) => edge.properties.clone(),
+                    None => store.edge_properties_merged(id),
+                };
+                edges.push(json!({
+                    "id": raw_id,
+                    "source": edge.source.as_u64(),
+                    "target": edge.target.as_u64(),
+                    "type": edge.edge_type.as_str(),
+                    "properties": properties,
+                }));
+            }
+        }
+        json!({ "nodes": nodes, "edges": edges })
+    }
+
+    let before = snapshot(store, &node_ids, &edge_ids, Some(before_version));
+    let after = snapshot(store, &node_ids, &edge_ids, None);
+    (
+        before,
+        after,
+        node_ids.into_iter().collect(),
+        edge_ids.into_iter().collect(),
+    )
+}
+
 fn agent_data_audit_snapshot(
     store: &crate::graph::GraphStore,
     roots: &[crate::graph::NodeId],
@@ -4168,6 +5120,10 @@ pub async fn retract_handler(
     Json(req): Json<EnrichRequest>,
 ) -> axum::response::Response {
     let capture_audit = audit_enabled.is_some();
+    let agent_id = match validate_agent_attribution(req.agent_id, capture_audit) {
+        Ok(agent_id) => agent_id,
+        Err(response) => return response,
+    };
     if state.engine.statement_is_write(&req.query).unwrap_or(true) {
         return (
             StatusCode::BAD_REQUEST,
@@ -4214,13 +5170,18 @@ pub async fn retract_handler(
         .into_response();
     if let (Some(before), Some(after)) = (before, after) {
         let (node_ids, edge_ids) = audit_entity_ids(&before, &after);
-        response.extensions_mut().insert(AuditedChange {
+        let change_id = (agent_id.is_some() && before != after).then(new_agent_change_id);
+        let change = AuditedChange {
             statement,
+            agent_id,
+            change_id,
+            change_kind: Some("retract".to_string()),
             node_ids,
             edge_ids,
             before,
             after,
-        });
+        };
+        attach_agent_change(&mut response, audit_enabled.as_ref(), change);
     }
     response
 }

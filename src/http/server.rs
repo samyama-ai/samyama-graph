@@ -203,8 +203,15 @@ pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::a
         || path == "/api/snapshot/import"
         || path == "/api/enrich/policy"
         || path == "/api/retract"
+        || path.starts_with("/api/agent/changes")
         || path == "/api/slowlog"
     {
+        return Role::Admin;
+    }
+    if path == "/api/agent/schema/proposals" && *method == Method::POST {
+        return Role::Write;
+    }
+    if path.starts_with("/api/agent/schema/") {
         return Role::Admin;
     }
     if *method == Method::POST
@@ -406,9 +413,12 @@ pub struct AuditedQuery {
 
 /// Entity-level details supplied by a handler that can describe an agent
 /// mutation without teaching the outer audit middleware to parse bodies.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AuditedChange {
     pub statement: String,
+    pub agent_id: Option<String>,
+    pub change_id: Option<String>,
+    pub change_kind: Option<String>,
     pub node_ids: Vec<u64>,
     pub edge_ids: Vec<u64>,
     pub before: serde_json::Value,
@@ -416,8 +426,8 @@ pub struct AuditedChange {
 }
 
 /// Request marker present only when the server has an audit log configured.
-#[derive(Clone, Copy, Debug)]
-pub struct AuditEnabled;
+#[derive(Clone, Debug)]
+pub struct AuditEnabled(pub Arc<AuditLog>);
 
 /// SHA-256 of a statement, hex. Enough to tell two writes apart or to match one
 /// against a known query, without the text, which carries the data. One
@@ -437,6 +447,7 @@ pub fn query_hash(query: &str) -> String {
 pub struct AuditLog {
     sink: std::sync::Mutex<std::io::BufWriter<std::fs::File>>,
     path: std::path::PathBuf,
+    changes: std::sync::Mutex<std::collections::HashMap<String, AuditedChange>>,
 }
 
 impl std::fmt::Debug for AuditLog {
@@ -449,8 +460,41 @@ impl AuditLog {
     /// Open `path` for appending, creating it if absent.
     pub fn open(path: impl Into<std::path::PathBuf>) -> std::io::Result<Self> {
         let path = path.into();
+        let mut changes = std::collections::HashMap::new();
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            for line in contents.lines() {
+                let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+                let Some(change_id) = entry.get("change_id").and_then(serde_json::Value::as_str) else { continue };
+                let Ok(change) = serde_json::from_value::<AuditedChange>(serde_json::json!({
+                    "statement": entry.get("statement").cloned().unwrap_or(serde_json::Value::Null),
+                    "agent_id": entry.get("agent_id").cloned().unwrap_or(serde_json::Value::Null),
+                    "change_id": change_id,
+                    "change_kind": entry.get("change_kind").cloned().unwrap_or(serde_json::Value::Null),
+                    "node_ids": entry.get("node_ids").cloned().unwrap_or(serde_json::Value::Null),
+                    "edge_ids": entry.get("edge_ids").cloned().unwrap_or(serde_json::Value::Null),
+                    "before": entry.get("before").cloned().unwrap_or(serde_json::Value::Null),
+                    "after": entry.get("after").cloned().unwrap_or(serde_json::Value::Null),
+                })) else { continue };
+                changes.insert(change_id.to_string(), change);
+            }
+        }
         let file = std::fs::OpenOptions::new().create(true).append(true).open(&path)?;
-        Ok(Self { sink: std::sync::Mutex::new(std::io::BufWriter::new(file)), path })
+        Ok(Self {
+            sink: std::sync::Mutex::new(std::io::BufWriter::new(file)),
+            path,
+            changes: std::sync::Mutex::new(changes),
+        })
+    }
+
+    /// Keep the entity snapshots addressable for a safe revert. Records are
+    /// also written to the append-only audit file and reconstructed on reopen.
+    pub fn register_change(&self, change: AuditedChange) {
+        let Some(id) = change.change_id.clone() else { return };
+        self.changes.lock().unwrap_or_else(|e| e.into_inner()).insert(id, change);
+    }
+
+    pub fn change(&self, id: &str) -> Option<AuditedChange> {
+        self.changes.lock().unwrap_or_else(|e| e.into_inner()).get(id).cloned()
     }
 
     /// Record one entry. Failures are reported and do not fail the request:
@@ -484,6 +528,15 @@ impl AuditLog {
             // Details are present only for handlers that can supply an
             // entity-level diff. Ordinary Cypher literals remain out of logs.
             entry["statement"] = serde_json::json!(&change.statement);
+            if let Some(agent_id) = &change.agent_id {
+                entry["agent_id"] = serde_json::json!(agent_id);
+            }
+            if let Some(change_id) = &change.change_id {
+                entry["change_id"] = serde_json::json!(change_id);
+            }
+            if let Some(change_kind) = &change.change_kind {
+                entry["change_kind"] = serde_json::json!(change_kind);
+            }
             entry["node_ids"] = serde_json::json!(&change.node_ids);
             entry["edge_ids"] = serde_json::json!(&change.edge_ids);
             entry["before"] = change.before.clone();
@@ -552,13 +605,13 @@ async fn audit(
     use axum::http::Method;
 
     let method = req.method().clone();
-    if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
-        return next.run(req).await;
-    }
     let path = req.uri().path().to_string();
 
     let mut req = req;
-    req.extensions_mut().insert(AuditEnabled);
+    req.extensions_mut().insert(AuditEnabled(Arc::clone(&log)));
+    if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(req).await;
+    }
     let res = next.run(req).await;
     // Read off the *response*: this layer is outermost, so the credential layer
     // has not run yet when the request passes through it on the way in.
@@ -1106,6 +1159,10 @@ impl HttpServer {
             .route("/api/enrich", post(enrich_handler))
             .route("/api/verify", post(verify_handler))
             .route("/api/retract", post(retract_handler))
+            .route("/api/agent/changes/:id", get(super::handler::get_agent_change_handler))
+            .route("/api/agent/changes/:id/revert", post(super::handler::revert_agent_change_handler))
+            .route("/api/agent/schema/proposals", post(super::handler::propose_agent_schema_handler))
+            .route("/api/agent/schema/proposals/:id/apply", post(super::handler::apply_agent_schema_proposal_handler))
             .route("/api/nlq", post(nlq_handler))
             .route("/api/status", get(status_handler))
             .route("/api/sparql", post(super::sparql::sparql_handler))

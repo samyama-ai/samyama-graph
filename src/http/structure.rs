@@ -11,8 +11,11 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::graph::types::NodeId;
-use crate::http::handler::reject_foreign_graph;
-use crate::http::server::{AppState, Subject};
+use crate::http::handler::{
+    attach_agent_change, new_agent_change_id, reject_foreign_graph,
+    validate_agent_attribution,
+};
+use crate::http::server::{AppState, AuditEnabled, AuditedChange, Subject};
 use crate::index::structure::{
     build_structural_visual_cues, ManifoldSpec, SgiIndex, StructuralConvention,
 };
@@ -194,14 +197,21 @@ pub struct PutStructureRequest {
     #[serde(default = "default_graph")]
     pub graph: String,
     pub structures: Vec<StructuralConvention>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 /// `PUT /api/structure` — replace the graph's explicit [`StructuralConvention`]s (`#2035`).
 pub async fn put_structure_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
+    audit: Option<Extension<AuditEnabled>>,
     Json(payload): Json<PutStructureRequest>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let agent_id = match validate_agent_attribution(payload.agent_id, audit.is_some()) {
+        Ok(agent_id) => agent_id,
+        Err(response) => return response,
+    };
     if let Some(Extension(Subject(user))) = &subject {
         if let Err(e) = user.authorize_statement::<&str>(&payload.graph, Ok(true)) {
             return (StatusCode::FORBIDDEN, Json(json!({ "error": e }))).into_response();
@@ -227,16 +237,42 @@ pub async fn put_structure_handler(
         }
     }
 
-    let store = crate::store_lock::read(&state.store).await;
-    store.structure_registry.replace(payload.structures);
-    let explicit = store.structure_registry.list();
-    let effective = store.structure_registry.effective_conventions(&store);
-    Json(json!({
-        "format": "samyama.structure/1",
-        "explicit": explicit,
-        "effective": effective,
-    }))
-    .into_response()
+    if let Some(refusal) = state.writes_refused() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({ "error": refusal }))).into_response();
+    }
+    let structures = payload.structures;
+    let (mut response, before, after) = state.mutate(&payload.graph, move |store| {
+        let before = store.index_catalog();
+        store.structure_registry.replace(structures);
+        store.mark_index_catalog_changed();
+        let after = store.index_catalog();
+        let explicit = store.structure_registry.list();
+        let effective = store.structure_registry.effective_conventions(store);
+        let response = Json(json!({
+            "format": "samyama.structure/1",
+            "explicit": explicit,
+            "effective": effective,
+        })).into_response();
+        (response, before, after)
+    }).await;
+    if response.status().is_success() {
+        let change_id = (agent_id.is_some() && before != after).then(new_agent_change_id);
+        attach_agent_change(
+            &mut response,
+            audit.as_ref(),
+            AuditedChange {
+                statement: "PUT /api/structure".to_string(),
+                agent_id,
+                change_id,
+                change_kind: Some("schema".to_string()),
+                node_ids: Vec::new(),
+                edge_ids: Vec::new(),
+                before: json!({ "catalog": before }),
+                after: json!({ "catalog": after }),
+            },
+        );
+    }
+    response
 }
 
 /// Request body for `POST /api/structure/cues`.

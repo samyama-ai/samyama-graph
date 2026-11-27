@@ -162,6 +162,16 @@ impl IndexManager {
         self.create_index(label, property);
     }
 
+    /// Drop only the uniqueness registry entry. The ordinary property index is
+    /// kept because it may have existed before the constraint was added.
+    pub fn drop_unique_constraint(&self, label: &Label, property: &str) -> bool {
+        let key = PropertyIndexKey {
+            label: label.clone(),
+            property: property.to_string(),
+        };
+        self.unique_constraints.write().unwrap().remove(&key).is_some()
+    }
+
     /// Exact number of nodes an indexed equality would return, if such an index exists.
     ///
     /// Lets the planner cost an anchored lookup from the index itself instead of a

@@ -330,6 +330,21 @@ impl VectorIndexManager {
         }
     }
 
+    /// Remove one vector index declaration and its name/model metadata.
+    /// Returns `false` when no index covered the requested label/property.
+    pub fn drop_index(&self, label: &str, property_key: &str) -> bool {
+        let key = IndexKey {
+            label: label.to_string(),
+            property_key: property_key.to_string(),
+        };
+        let removed = self.indices.write().unwrap().remove(&key).is_some();
+        if removed {
+            self.names.write().unwrap().retain(|_, named_key| named_key != &key);
+            self.model_ids.write().unwrap().remove(&key);
+        }
+        removed
+    }
+
     /// Search an index.
     ///
     /// No index is an error, not an empty answer. It used to return `[]`, so a

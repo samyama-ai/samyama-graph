@@ -134,10 +134,13 @@ impl GraphProjectionOperator {
                 spec,
                 if_not_exists,
             } => {
-                match projections
+                let created = projections
                     .create(store, name, spec.clone(), *if_not_exists)
-                    .map_err(refused)?
-                {
+                    .map_err(refused)?;
+                if matches!(&created, Created::Built(_)) {
+                    store.mark_index_catalog_changed();
+                }
+                match created {
                     Created::Built(info) => vec![projection_record(info, STATUS_CREATED)],
                     Created::AlreadyThere(info) => {
                         vec![projection_record(info, STATUS_ALREADY_EXISTS)]
@@ -151,9 +154,12 @@ impl GraphProjectionOperator {
                 )]
             }
             GraphProjectionDdl::Drop { name, if_exists } => {
-                projections
+                let dropped = projections
                     .drop_projection(name, *if_exists)
                     .map_err(refused)?;
+                if dropped {
+                    store.mark_index_catalog_changed();
+                }
                 Vec::new()
             }
             GraphProjectionDdl::Show => Self::show(store),

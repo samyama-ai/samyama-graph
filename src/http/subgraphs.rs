@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -20,10 +20,11 @@ use serde_json::json;
 use crate::graph::subgraph::{SubgraphDefinition, SubgraphScope};
 use crate::graph::{GraphStore, PropertyValue};
 use crate::http::handler::{
-    accepts_ndjson, bound_params, merged_node_properties, ms, read_only_refusal,
-    render_query_result, QueryRequest, QueryStats, SCHEMA_PROPERTY_SAMPLE,
+    accepts_ndjson, attach_agent_change, bound_params, merged_node_properties, ms,
+    new_agent_change_id, read_only_refusal, render_query_result, validate_agent_attribution,
+    QueryRequest, QueryStats, SCHEMA_PROPERTY_SAMPLE,
 };
-use crate::http::server::{AppState, Subject};
+use crate::http::server::{AppState, AuditEnabled, AuditedChange, Subject};
 use crate::query::executor::operator::SubgraphScopeRef;
 
 /// The tenant graph a subgraph is a view of. This build serves one.
@@ -47,6 +48,44 @@ fn not_found(name: &str) -> axum::response::Response {
     error(StatusCode::NOT_FOUND, format!("no named subgraph '{name}'"))
 }
 
+#[derive(serde::Deserialize)]
+pub struct CreateSubgraphRequest {
+    #[serde(flatten)]
+    definition: SubgraphDefinition,
+    #[serde(default)]
+    agent_id: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+pub struct AgentAttributionQuery {
+    agent_id: Option<String>,
+}
+
+fn audit_subgraph_change(
+    response: &mut axum::response::Response,
+    audit: Option<&Extension<AuditEnabled>>,
+    agent_id: Option<String>,
+    statement: String,
+    before: crate::index::catalog::IndexCatalog,
+    after: crate::index::catalog::IndexCatalog,
+) {
+    let change_id = (agent_id.is_some() && before != after).then(new_agent_change_id);
+    attach_agent_change(
+        response,
+        audit,
+        AuditedChange {
+            statement,
+            agent_id,
+            change_id,
+            change_kind: Some("schema".to_string()),
+            node_ids: Vec::new(),
+            edge_ids: Vec::new(),
+            before: serde_json::json!({ "catalog": before }),
+            after: serde_json::json!({ "catalog": after }),
+        },
+    );
+}
+
 /// A subgraph's definition and the size of its view.
 fn describe(store: &GraphStore, scope: &SubgraphScope) -> serde_json::Value {
     let schema = store.subgraph_schema(scope);
@@ -66,14 +105,21 @@ fn describe(store: &GraphStore, scope: &SubgraphScope) -> serde_json::Value {
 pub async fn create_subgraph_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
-    Json(definition): Json<SubgraphDefinition>,
-) -> impl IntoResponse {
+    audit: Option<Extension<AuditEnabled>>,
+    Json(request): Json<CreateSubgraphRequest>,
+) -> axum::response::Response {
+    let agent_id = match validate_agent_attribution(request.agent_id, audit.is_some()) {
+        Ok(agent_id) => agent_id,
+        Err(response) => return response,
+    };
+    let definition = request.definition;
     if let Some(refusal) = authorize(&subject, true) {
         return refusal;
     }
     if let Some(refusal) = state.writes_refused() {
         return error(StatusCode::SERVICE_UNAVAILABLE, refusal);
     }
+    let definition_name = definition.name.clone();
     let exists = crate::store_lock::read(&state.store)
         .await
         .subgraph(&definition.name)
@@ -88,12 +134,19 @@ pub async fn create_subgraph_handler(
         );
     }
     // `mutate` persists the index catalog, which now holds the definition.
-    state
-        .mutate(TENANT, |store| match store.create_subgraph(definition) {
+    let (mut response, before, after) = state.mutate(TENANT, |store| {
+        let before = store.index_catalog();
+        let response = match store.create_subgraph(definition) {
             Ok(scope) => (StatusCode::CREATED, Json(describe(store, &scope))).into_response(),
             Err(e) => error(StatusCode::BAD_REQUEST, e),
-        })
-        .await
+        };
+        let after = store.index_catalog();
+        (response, before, after)
+    }).await;
+    if response.status().is_success() {
+        audit_subgraph_change(&mut response, audit.as_ref(), agent_id, format!("CREATE SUBGRAPH {definition_name}"), before, after);
+    }
+    response
 }
 
 /// `GET /api/subgraphs`: every subgraph of the tenant graph, by name.
@@ -129,8 +182,14 @@ pub async fn get_subgraph_handler(
 pub async fn delete_subgraph_handler(
     State(state): State<AppState>,
     subject: Option<Extension<Subject>>,
+    audit: Option<Extension<AuditEnabled>>,
+    Query(attribution): Query<AgentAttributionQuery>,
     Path(name): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let agent_id = match validate_agent_attribution(attribution.agent_id, audit.is_some()) {
+        Ok(agent_id) => agent_id,
+        Err(response) => return response,
+    };
     if let Some(refusal) = authorize(&subject, true) {
         return refusal;
     }
@@ -144,12 +203,20 @@ pub async fn delete_subgraph_handler(
     if !exists {
         return not_found(&name);
     }
-    state
-        .mutate(TENANT, |store| match store.drop_subgraph(&name) {
-            Some(_) => Json(json!({ "dropped": name })).into_response(),
-            None => not_found(&name),
-        })
-        .await
+    let name_for_mutation = name.clone();
+    let (mut response, before, after) = state.mutate(TENANT, move |store| {
+        let before = store.index_catalog();
+        let response = match store.drop_subgraph(&name_for_mutation) {
+            Some(_) => Json(json!({ "dropped": name_for_mutation })).into_response(),
+            None => not_found(&name_for_mutation),
+        };
+        let after = store.index_catalog();
+        (response, before, after)
+    }).await;
+    if response.status().is_success() {
+        audit_subgraph_change(&mut response, audit.as_ref(), agent_id, format!("DROP SUBGRAPH {name}"), before, after);
+    }
+    response
 }
 
 /// `GET /api/schema?subgraph=name`: the schema response, restricted to the
