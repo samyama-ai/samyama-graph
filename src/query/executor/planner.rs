@@ -4617,6 +4617,20 @@ impl QueryPlanner {
                 // Without this the aliases were parsed and dropped (#1318).
                 .with_aliases(&call_clause.yield_items),
             ))
+        } else if let Some(procedure) = crate::udf::procedure(&call_clause.procedure_name) {
+            // A procedure registered from Rust (LANG-10, #1674). After every
+            // built-in, and registering a built-in's name is refused.
+            let yields: Vec<(String, Option<String>)> = call_clause
+                .yield_items
+                .iter()
+                .map(|item| (item.name.clone(), item.alias.clone()))
+                .collect();
+            Ok(Box::new(super::udf_ops::UserProcedureOperator::new(
+                procedure,
+                &call_clause.arguments,
+                &yields,
+                store,
+            )?))
         } else {
             // Its own code: the procedure surface is fine and this name is not
             // on it, which is a different recovery from "the planner could not

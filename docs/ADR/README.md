@@ -72,6 +72,7 @@ Links to related ADRs
 | [040](./ADR-040-multi-hop-query-optimization.md) | Multi-Hop Query Optimization † | Proposed | 2026-07-31 |
 | [042](./ADR-042-incremental-algorithms.md) | Incremental PageRank, WCC and Degree on a Live Graph | Accepted | 2026-11-18 |
 | [043](./ADR-043-named-subgraphs.md) | Named Subgraphs — Persisted Scoped Views Over One Tenant Graph | Accepted (first phase shipped) | 2026-11-25 |
+| [044](./ADR-044-user-defined-functions.md) | User-Defined Functions and Procedures, Registered from Rust | Accepted | 2026-11-26 |
 
 > **† Renumbered from ADR-035.** `ADR-040-multi-hop-query-optimization.md` was filed
 > as ADR-035, the same number as `ADR-035-oeh-hierarchy-index.md`. The OEH record
@@ -79,8 +80,8 @@ Links to related ADRs
 > the multi-hop record took the next free number (#1515). Its content is unchanged
 > apart from a one-line renumbering note.
 
-> **Number gaps.** 018, 019, 031, 032 and 033 were never used. 041 is held for the structure index (SGI), which `structure_ops.rs` and the grammar already cite. 37 records are on
-> disk, all 37 are indexed above, and no two share a number.
+> **Number gaps.** 018, 019, 031, 032 and 033 were never used. 041 is held for the structure index (SGI), which `structure_ops.rs` and the grammar already cite. 38 records are on
+> disk, all 38 are indexed above, and no two share a number.
 
 ## Decision Process
 
