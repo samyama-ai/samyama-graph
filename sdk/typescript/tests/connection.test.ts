@@ -55,12 +55,14 @@ describe("connection management", () => {
       maxRetries: undefined,
       retryBaseDelayMs: undefined,
       maxConnections: undefined,
+      idempotencyKeys: undefined,
     });
     assert.deepEqual(t.connectionOptions, {
       timeoutMs: 30_000,
       maxRetries: 2,
       retryBaseDelayMs: 100,
       maxConnections: 10,
+      idempotencyKeys: true,
     });
   });
 
@@ -71,6 +73,7 @@ describe("connection management", () => {
       maxRetries: 0,
       retryBaseDelayMs: 100,
       maxConnections: 10,
+      idempotencyKeys: true,
     });
   });
 
@@ -88,6 +91,7 @@ describe("connection management", () => {
         maxRetries: 2,
         retryBaseDelayMs: 100,
         maxConnections: 10,
+        idempotencyKeys: true,
       });
     }
   });
