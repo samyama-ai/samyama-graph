@@ -1994,6 +1994,10 @@ fn conflicting_definition<'a>(
                 D::VectorKind { label: la, property: pa, .. },
                 D::VectorKind { label: lb, property: pb, .. },
             ) => la == lb && pa == pb,
+            // Another retention rule for the same label (#2217).
+            (D::Retention { label: a, .. }, D::Retention { label: b, .. }) => a == b,
+            // Another definition of the same named subgraph (#337).
+            (D::Subgraph { name: a, .. }, D::Subgraph { name: b, .. }) => a == b,
             _ => false,
         }
     })

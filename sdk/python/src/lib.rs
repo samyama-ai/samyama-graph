@@ -4,10 +4,10 @@
 
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
-use pyo3::types::PyDict;
+use pyo3::exceptions::{PyImportError, PyRuntimeError, PyValueError};
+use pyo3::types::{PyBytes, PyDict};
 use samyama_sdk::{
-    ConnectionConfig, EmbeddedClient, NlqSettings, RemoteClient, RowStream, SamyamaClient as SamyamaClientTrait,
+    ConnectionConfig, EmbeddedClient, ExportFormat, NlqSettings, RemoteClient, RowStream, SamyamaClient as SamyamaClientTrait,
     QueryResult as SdkQueryResult,
     AlgorithmClient, PageRankConfig, PcaConfig,
     VectorClient, DistanceMetric, NodeId,
@@ -388,6 +388,23 @@ impl SamyamaClient {
         }
     }
 
+    /// A read query's result as Arrow IPC or Parquet bytes, from whichever
+    /// client this is (#2267).
+    fn export_bytes(
+        &self,
+        py: Python<'_>,
+        cypher: &str,
+        graph: &str,
+        format: ExportFormat,
+        cancel: Option<&CancelToken>,
+    ) -> PyResult<Vec<u8>> {
+        let result = match &*self.inner {
+            ClientInner::Embedded(c) => wait(py, cancel, c.export(graph, cypher, format))?,
+            ClientInner::Remote(c) => wait(py, cancel, c.export(graph, cypher, format))?,
+        };
+        result.map_err(|e| PyRuntimeError::new_err(e.to_string()))
+    }
+
     /// Import `path` into `client`, as `import_snapshot` does.
     fn import_into(
         py: Python<'_>,
@@ -629,6 +646,73 @@ impl SamyamaClient {
                 })
             }
         }
+    }
+
+    /// Run a read query and return its result as a `pyarrow.Table` (ML-01,
+    /// #2267), with no file in between.
+    ///
+    /// ```python
+    /// tbl = client.query_arrow("MATCH (p:Person) RETURN p.name AS name, p.age AS age")
+    /// df = tbl.to_pandas()          # or polars.from_arrow(tbl)
+    /// ```
+    ///
+    /// Columns are typed -- an integer property is `int64`, a float `double`,
+    /// a list of strings `list<string>` -- by the engine's own export encoder,
+    /// the one behind `POST /api/query/export`. Embedded mode runs that encoder
+    /// in this process, so there is no server and no HTTP; remote mode reads
+    /// the endpoint. Both give the same table.
+    ///
+    /// pyarrow is not a dependency of this SDK: it is imported when this is
+    /// called, and `ImportError` names the package if it is missing. Reads
+    /// only, as the endpoint is: a write raises `RuntimeError` before it runs.
+    #[pyo3(signature = (cypher, graph="default", cancel=None))]
+    fn query_arrow(
+        &self,
+        py: Python<'_>,
+        cypher: &str,
+        graph: &str,
+        cancel: Option<CancelToken>,
+    ) -> PyResult<Py<PyAny>> {
+        // Before the query, so a missing pyarrow does not cost a full read.
+        let pa = py.import("pyarrow").map_err(|e| {
+            PyImportError::new_err(format!(
+                "query_arrow needs pyarrow: pip install pyarrow ({e})"
+            ))
+        })?;
+        let ipc = py.import("pyarrow.ipc")?;
+        let bytes = self.export_bytes(py, cypher, graph, ExportFormat::Arrow, cancel.as_ref())?;
+        let buffer = pa.call_method1("BufferReader", (PyBytes::new(py, &bytes),))?;
+        Ok(ipc
+            .call_method1("open_stream", (buffer,))?
+            .call_method0("read_all")?
+            .unbind())
+    }
+
+    /// Run a read query and return its result as encoded bytes: an Arrow IPC
+    /// stream (`format="arrow"`) or a Parquet file (`format="parquet"`).
+    ///
+    /// For writing a `.parquet` or `.arrows` file, or handing the bytes to a
+    /// reader of its own, without pyarrow installed. `query_arrow` is the same
+    /// result decoded into a table.
+    #[pyo3(signature = (cypher, graph="default", format="arrow", cancel=None))]
+    fn export(
+        &self,
+        py: Python<'_>,
+        cypher: &str,
+        graph: &str,
+        format: &str,
+        cancel: Option<CancelToken>,
+    ) -> PyResult<Py<PyBytes>> {
+        let format = ExportFormat::parse(format).ok_or_else(|| {
+            let choices: Vec<String> =
+                ExportFormat::NAMES.iter().map(|n| format!("'{n}'")).collect();
+            PyValueError::new_err(format!(
+                "unknown export format '{format}'; use {}",
+                choices.join(" or ")
+            ))
+        })?;
+        let bytes = self.export_bytes(py, cypher, graph, format, cancel.as_ref())?;
+        Ok(PyBytes::new(py, &bytes).unbind())
     }
 
     /// Translate a natural-language question into Cypher.

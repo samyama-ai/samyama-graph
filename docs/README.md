@@ -43,6 +43,7 @@ eight of eighteen documents (#1450).
 - **[FULL-TEXT-SEARCH.md](./FULL-TEXT-SEARCH.md)** — the full-text index and how it is queried.
 - **[HYBRID-RETRIEVAL.md](./HYBRID-RETRIEVAL.md)** — `db.hybrid.search`: BM25 and vector search fused, a bounded graph expansion around the hits, a rerank, and per-stage timings.
 - **[INDEX-CONTRACT.md](./INDEX-CONTRACT.md)** — the six clauses every index structure implements (build, maintain under MVCC, cost, plan, persist, snapshot), and how to add one.
+- **[NAMED-SUBGRAPHS.md](./NAMED-SUBGRAPHS.md)** — saved, read-only views of the tenant graph (labels, relationship types and per-label predicates), addressed by name where a graph name goes; nothing is copied.
 - **[GDS-COMPATIBILITY.md](./GDS-COMPATIBILITY.md)** — which `gds.*` names resolve here, and which deliberately do not.
 - **[ALGORITHM-CONVENTIONS.md](./ALGORITHM-CONVENTIONS.md)** — directedness, weights, self-loops, disconnected components, tie-breaking.
 
@@ -50,6 +51,7 @@ eight of eighteen documents (#1450).
 
 - **[ACID-GUARANTEES.md](./ACID-GUARANTEES.md)** — the transaction model: MVCC, the logical WAL, what durability `SAMYAMA_FSYNC` does and does not buy, and why there is no Raft replication to rely on.
 - **[FAILURE-MODES.md](./FAILURE-MODES.md)** — how the engine behaves when things go wrong.
+- **[QUERY-MEMORY.md](./QUERY-MEMORY.md)** — heap a Cypher query uses while it runs: peak per workload, what is released after success, failure and timeout, behaviour under concurrency, and the CI regression gate.
 - **[SOC2-CONTROL-SET.md](./SOC2-CONTROL-SET.md)** — SOC 2 gap analysis (documented, not certified): access control, audit, change management, backup and incident response, each control with its evidence and its gap.
 - **[BI-CONNECTIVITY.md](./BI-CONNECTIVITY.md)** — connecting BI tools.
 - **[ORCHESTRATION.md](./ORCHESTRATION.md)** — loading the graph from a scheduled pipeline: a retry-safe, parameter-bound load with validation, as reference pipelines for Airflow and Dagster that the test suite runs against a real server.

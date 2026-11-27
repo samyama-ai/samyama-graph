@@ -75,6 +75,7 @@ use rayon::prelude::*;
 use samyama_optimization::common::{
     duration_ms, gap_to_best_known, is_feasible, MultiObjectiveProblem, Problem, SolverConfig,
 };
+use samyama_optimization::budget::{Budget, Budgeted, StopReason};
 use samyama_optimization::constraints::{Constrained, ConstraintHandling};
 use samyama_optimization::algorithms::{JayaSolver, RaoSolver, RaoVariant, TLBOSolver, FireflySolver, CuckooSolver, GWOSolver, GASolver, SASolver, BatSolver, ABCSolver, GSASolver, NSGA2Solver, MOTLBOSolver, HSSolver, FPASolver, PSOSolver, DESolver, BMRSolver, BWRSolver, BMWRSolver, QOJayaSolver, SAMPJayaSolver, EHRJayaSolver, ITLBOSolver, GOTLBOSolver, QORaoSolver, SAPHRSolver, LSHADESolver, SPEA2Solver, MOEADSolver, CMAESSolver, MOBMWRSolver, MOBMWRVariant, MORaoDESolver};
 use ndarray::Array1;
@@ -3127,7 +3128,8 @@ pub const KNOWN_FUNCTIONS: &[&str] = &[
     "date", "date.truncate", "datetime", "datetime.fromepoch",
     "datetime.fromepochmillis", "datetime.truncate", "degrees", "distance", "duration",
     "duration.between", "duration.indays", "duration.inmonths", "duration.inseconds",
-    "duration_between", "e", "elementid", "endnode", "exists", "exp", "floor",
+    "duration_between", "e", "elementid", "endnode", "exists", "exp",
+    "feature.value", "feature.vector", "floor",
     "haslabels", "haversin", "head", "hierarchy_lca", "hierarchy_rollup", "id",
     "isempty", "isnan", "keys", "labels", "last", "left", "length", "localdatetime",
     "localdatetime.truncate", "localtime", "localtime.truncate", "log", "log10",
@@ -3331,6 +3333,8 @@ const MIN_ARITY: &[(&str, usize)] = &[
     ("haslabels", 2),
     ("point.distance", 2),
     ("point.withinbbox", 3),
+    ("feature.value", 2),
+    ("feature.vector", 2),
     ("vector.similarity.cosine", 2),
     ("vector.similarity.euclidean", 2),
     ("vector.similarity.maxsim", 2),
@@ -4865,6 +4869,33 @@ pub fn eval_function(name: &str, args: &[Value], store: Option<&GraphStore>) -> 
             }
             let inside = p.x >= ll.x && p.x <= ur.x && p.y >= ll.y && p.y <= ur.y;
             Ok(Value::Property(PropertyValue::Boolean(inside)))
+        }
+        // A materialized feature's value for one entity (ML-13, #1768), read
+        // per row: `MATCH (c:Customer) RETURN c.name, feature.value('spend', c)`.
+        // `feature.vector(['a', 'b'], c)` is the entity's feature vector, in
+        // the order named. Both read the latest materialization; null for an
+        // entity a feature has no value for. See `feature_ops`.
+        "feature.value" | "feature.vector" => {
+            let store = store.ok_or_else(|| ExecutionError::RuntimeError(format!(
+                "{name}() requires graph context")))?;
+            let who = if lowered == "feature.value" { "feature.value" } else { "feature.vector" };
+            let names = super::feature_ops::feature_names(&args[0], who)?;
+            if who == "feature.value" && names.len() != 1 {
+                return Err(ExecutionError::bad_argument(format!(
+                    "feature.value takes one feature name; for several, call \
+                     feature.vector({names:?}, n)")));
+            }
+            let Some(id) = super::feature_ops::entity_id(&args[1]) else {
+                return Err(ExecutionError::bad_argument(format!(
+                    "{who}: the entity must be a node or its integer id, got {:?}", args[1])));
+            };
+            let values = store.features.lookup(&names, id)
+                .map_err(|e| ExecutionError::bad_argument(e.to_string()))?;
+            if who == "feature.value" {
+                Ok(Value::Property(values.into_iter().next().flatten().unwrap_or(PropertyValue::Null)))
+            } else {
+                Ok(super::feature_ops::value_list(values))
+            }
         }
         // Neo4j 5's vector functions (#1980). The similarities are the
         // `score` of `db.index.vector.queryNodes` for the same pair, from the
@@ -6854,6 +6885,20 @@ pub trait PhysicalOperator: Send {
         Vec::new()
     }
 
+    /// Confine this operator to a named subgraph (#337). Returns whether it
+    /// can run inside one.
+    ///
+    /// `false` by default, so an operator nobody has reviewed for a view is
+    /// refused rather than run over the whole graph: a scoped query fails
+    /// closed. An operator that reads the graph itself (a scan, an expand)
+    /// keeps the scope and enforces it; one that only reshapes rows its
+    /// children produced returns `true` and does nothing. Called once per
+    /// operator by [`restrict_plan_to_subgraph`], which also walks the
+    /// children, so an implementation does not recurse.
+    fn restrict_to_subgraph(&mut self, _scope: &SubgraphScopeRef) -> bool {
+        false
+    }
+
     /// Whether this operator can take over the `Filter` directly above it and
     /// test rows as it produces them (#1615). See [`fuse_scan_filters`].
     fn can_absorb_filter(&self) -> bool {
@@ -7288,6 +7333,67 @@ pub fn undescribed_plan_lines(plan_text: &str) -> Vec<String> {
 /// Type alias for boxed operators
 pub type OperatorBox = Box<dyn PhysicalOperator>;
 
+/// A compiled named subgraph, shared by every operator of a scoped plan.
+pub type SubgraphScopeRef = std::sync::Arc<crate::graph::subgraph::SubgraphScope>;
+
+/// Confine every operator of a plan to a named subgraph (#337).
+///
+/// Refuses the plan if any operator cannot run inside one, or if an operator
+/// holds children its [`PhysicalOperator::children_mut`] does not hand out --
+/// a child the walk cannot reach is a child that would read the whole graph.
+pub fn restrict_plan_to_subgraph(slot: &mut OperatorBox, scope: &SubgraphScopeRef) -> ExecutionResult<()> {
+    let described = slot.describe();
+    let refuse = || {
+        ExecutionError::PlanningError(format!(
+            "{} is not supported inside a named subgraph yet; run the query against the tenant graph",
+            described.name
+        ))
+    };
+    if !slot.restrict_to_subgraph(scope) {
+        return Err(refuse());
+    }
+    let children = slot.children_mut();
+    if children.len() != described.children.len() {
+        return Err(refuse());
+    }
+    for child in children {
+        restrict_plan_to_subgraph(child, scope)?;
+    }
+    Ok(())
+}
+
+/// The scope's relationship types, kept to those `requested` names, for an
+/// expand to walk instead of every type (#337). `requested` empty means every
+/// type, so the scope's own list replaces it. An intersection that comes out
+/// empty is left as it was: an empty list means "any type" to the operators,
+/// and the per-edge check already rejects every edge of a type outside the
+/// view.
+fn scoped_edge_types(requested: &mut Vec<String>, scope: &SubgraphScopeRef) {
+    let scoped = &scope.definition().edge_types;
+    if scoped.is_empty() {
+        return;
+    }
+    if requested.is_empty() {
+        *requested = scoped.clone();
+        return;
+    }
+    let kept: Vec<String> = requested.iter().filter(|t| scoped.contains(t)).cloned().collect();
+    if !kept.is_empty() {
+        *requested = kept;
+    }
+}
+
+/// Operators that only reshape the rows their children produce: they read no
+/// node or relationship the children did not hand them, so a view needs
+/// nothing from them.
+macro_rules! row_operator_in_subgraph {
+    () => {
+        fn restrict_to_subgraph(&mut self, _scope: &SubgraphScopeRef) -> bool {
+            true
+        }
+    };
+}
+
 /// Selectivity assumed for an equality whose statistics are not to hand.
 const EQUALITY_SELECTIVITY: f64 = 0.1;
 /// Selectivity assumed for a range comparison.
@@ -7410,6 +7516,8 @@ pub struct NodeScanOperator {
     retained: Option<Vec<Option<PropertyValue>>>,
     /// Nodes the fused filter tested since `take_internal_rows` last asked.
     tested: usize,
+    /// The named subgraph this scan is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 impl NodeScanOperator {
@@ -7426,6 +7534,7 @@ impl NodeScanOperator {
             filter: None,
             retained: None,
             tested: 0,
+            subgraph: None,
         }
     }
 
@@ -7440,6 +7549,34 @@ impl NodeScanOperator {
             return;
         }
         self.initialized = true;
+
+        // Inside a named subgraph (#337) the candidates are the view's own
+        // labels, not every node, and the view's predicates are applied here
+        // rather than by a filter above: an early limit has to count members,
+        // and a limit taken before the membership test would count nodes the
+        // view excludes.
+        if let Some(scope) = self.subgraph.clone() {
+            let mut ids: Vec<NodeId> = match self.labels.first() {
+                None => store.subgraph_node_ids(&scope),
+                Some(first) => {
+                    let mut ids: Vec<NodeId> = store
+                        .node_ids_by_label(first, None)
+                        .into_iter()
+                        .filter(|id| {
+                            store.get_node(*id).is_some_and(|n| self.labels.iter().all(|l| n.has_label(l)))
+                                && scope.contains_node(store, *id)
+                        })
+                        .collect();
+                    ids.sort_unstable_by_key(|id| id.as_u64());
+                    ids
+                }
+            };
+            if let Some(limit) = self.early_limit {
+                ids.truncate(limit);
+            }
+            self.node_ids = ids;
+            return;
+        }
 
         // Three cases:
         //   1. No labels  → scan all nodes (rare)
@@ -7514,6 +7651,12 @@ impl NodeScanOperator {
 }
 
 impl PhysicalOperator for NodeScanOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        self.initialized = false;
+        true
+    }
+
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         self.initialize(store);
 
@@ -8404,6 +8547,8 @@ impl FilterOperator {
 }
 
 impl PhysicalOperator for FilterOperator {
+    row_operator_in_subgraph!();
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.input]
     }
@@ -8842,6 +8987,8 @@ pub struct ExpandOperator {
     fused_close: Option<FusedClose>,
     /// The closing edge of each entry of `current_edges`, when fused.
     current_close_edges: Vec<crate::graph::EdgeId>,
+    /// The named subgraph this expand is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 /// The closing hop a fused expand binds. See `ExpandOperator::fused_close`.
@@ -8888,6 +9035,7 @@ impl ExpandOperator {
             edge_index: 0,
             path_variable: None,
             type_ids: None,
+            subgraph: None,
         }
     }
 
@@ -9132,6 +9280,15 @@ impl ExpandOperator {
         let node_id = source_val.node_id()
             .ok_or_else(|| ExecutionError::TypeError(format!("{} is not a node", self.source_var)))?;
 
+        // A source outside the view has no relationships in it (#337).
+        let subgraph = self.subgraph.clone();
+        if subgraph.as_ref().is_some_and(|s| !s.contains_node(store, node_id)) {
+            self.current_edges.clear();
+            self.current_close_edges.clear();
+            self.edge_index = 0;
+            return Ok(());
+        }
+
         // Filter on the interned edge-type id *during* the adjacency walk, and
         // resolve the `EdgeType` string only for the edges that survive.
         //
@@ -9343,6 +9500,12 @@ impl ExpandOperator {
             .filter_map(|c| Some((c, eval_expression(&c.bound, record, store).ok()?)))
             .collect();
         let keeps = |target: NodeId, eid: crate::graph::EdgeId| -> bool {
+            // The induced-edge rule: the type and the far end in the view.
+            if let Some(scope) = &subgraph {
+                if !scope.contains_edge_to(store, eid, target) {
+                    return false;
+                }
+            }
             // A closing hop can only land on the node it closes onto.
             if let Some(p) = pinned_target {
                 if target != p {
@@ -9438,17 +9601,28 @@ impl ExpandOperator {
         let closing_edges = |target: NodeId, eid: crate::graph::EdgeId, out: &mut Vec<crate::graph::EdgeId>| {
             out.clear();
             let Some(c) = co_node else { return };
+            if subgraph.as_ref().is_some_and(|s| !s.contains_node(store, c)) {
+                return;
+            }
             if close_via_index {
                 for list in &co_lists {
                     for &(_, e2) in pinned_run(list, target) {
-                        if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
+                        if e2 != eid
+                            && !used_edges.contains(&e2)
+                            && !out.contains(&e2)
+                            && subgraph.as_ref().is_none_or(|s| s.contains_edge_to(store, e2, c))
+                        {
                             out.push(e2);
                         }
                     }
                 }
             } else {
                 let mut keep = |e2: crate::graph::EdgeId| {
-                    if e2 != eid && !used_edges.contains(&e2) && !out.contains(&e2) {
+                    if e2 != eid
+                        && !used_edges.contains(&e2)
+                        && !out.contains(&e2)
+                        && subgraph.as_ref().is_none_or(|s| s.contains_edge_to(store, e2, c))
+                    {
                         out.push(e2);
                     }
                 };
@@ -9592,6 +9766,13 @@ impl ExpandOperator {
 }
 
 impl PhysicalOperator for ExpandOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        scoped_edge_types(&mut self.edge_types, scope);
+        self.type_ids = None;
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        true
+    }
+
     fn estimate_rows(&self, store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         let input = children.first().copied().flatten()?;
         let nodes = store.node_count().max(1) as f64;
@@ -9945,6 +10126,8 @@ pub struct VarLengthExpandOperator {
     in_index: std::cell::RefCell<Option<(u64, Option<std::sync::Arc<crate::graph::TypeAdjacency>>)>>,
     /// Neighbour walks so far, against `TYPE_INDEX_AFTER_WALKS`.
     type_walks: std::cell::Cell<usize>,
+    /// The named subgraph this walk is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 impl VarLengthExpandOperator {
@@ -9990,6 +10173,7 @@ impl VarLengthExpandOperator {
             out_index: std::cell::RefCell::new(None),
             in_index: std::cell::RefCell::new(None),
             type_walks: std::cell::Cell::new(0),
+            subgraph: None,
         }
     }
 
@@ -10031,6 +10215,14 @@ impl VarLengthExpandOperator {
 
     /// Does this edge satisfy the segment's inline property constraints?
     fn edge_props_ok(&self, eid: crate::graph::EdgeId, store: &GraphStore) -> bool {
+        // Inside a named subgraph every hop is checked against the view
+        // (#337). The far end is checked by the walk's visit wrapper, which
+        // knows it; here the edge's own endpoints are read.
+        if let Some(scope) = &self.subgraph {
+            if !scope.contains_edge(store, eid) {
+                return false;
+            }
+        }
         if self.edge_properties.is_empty() {
             return true;
         }
@@ -10228,6 +10420,7 @@ impl VarLengthExpandOperator {
         out_index: Option<&crate::graph::TypeAdjacency>,
         in_index: Option<&crate::graph::TypeAdjacency>,
         edge_properties: &std::collections::HashMap<String, PropertyValue>,
+        subgraph: Option<&SubgraphScopeRef>,
         store: &GraphStore,
         visit: &mut impl FnMut(NodeId),
     ) {
@@ -10236,6 +10429,9 @@ impl VarLengthExpandOperator {
         // pattern excludes -- and the two would then disagree about the same
         // question depending on which end the planner anchored.
         let mut with_edge = |nb: NodeId, e: crate::graph::EdgeId| {
+            if subgraph.is_some_and(|s| !s.contains_edge(store, e)) {
+                return;
+            }
             if edge_properties.is_empty()
                 || edge_properties
                     .iter()
@@ -10492,7 +10688,7 @@ impl VarLengthExpandOperator {
             let mut reach: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
             let mut visited: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
             visited.insert(target);
-            if self.min_hops == 0 {
+            if self.min_hops == 0 && self.subgraph.as_ref().is_none_or(|s| s.contains_node(store, target)) {
                 reach.insert(target);
             }
             let mut frontier = vec![target];
@@ -10501,7 +10697,7 @@ impl VarLengthExpandOperator {
                 depth += 1;
                 let mut next = Vec::new();
                 for &cur in &frontier {
-                    Self::neighbors_in(cur, type_filter, &reversed, out_index.as_deref(), in_index.as_deref(), &self.edge_properties, store, &mut |nb| {
+                    Self::neighbors_in(cur, type_filter, &reversed, out_index.as_deref(), in_index.as_deref(), &self.edge_properties, self.subgraph.as_ref(), store, &mut |nb| {
                         if visited.insert(nb) {
                             next.push(nb);
                             if depth >= self.min_hops {
@@ -10801,6 +10997,7 @@ impl VarLengthExpandOperator {
         // rather than failing (#671).
         if matches!(source_val, Value::Null) || matches!(source_val.as_property(), Some(PropertyValue::Null)) {
             self.pending.clear();
+            self.pending_ends.clear();
             return Ok(());
         }
         let source_id = source_val.node_id().ok_or_else(|| {
@@ -10815,6 +11012,16 @@ impl VarLengthExpandOperator {
         // reach it again, so a cycle is only found by enumerating trails, which
         // repeat nodes and not relationships.
         let closes_on_source = self.bound_end == Some(source_id);
+
+        // `ANY` / `ANY SHORTEST` over an unbounded WALK (#1648). Every route below
+        // either enumerates walks, which never ends on a cycle, or reaches each node
+        // once, which loses the source as an end node. See `expand_shortest_walks`.
+        if self.restrictor == crate::query::ast::PathRestrictor::Walk
+            && self.selector.bounds_an_unbounded_search()
+            && self.max_hops == usize::MAX
+        {
+            return self.expand_shortest_walks(record, source_id, store);
+        }
 
         // Edges an earlier segment of this clause already walked. This segment
         // may not retake them (#710). Empty for the first segment of a clause
@@ -10973,6 +11180,80 @@ impl VarLengthExpandOperator {
         Ok(())
     }
 
+    /// One shortest walk per end node, for `ANY` and `ANY SHORTEST` over an
+    /// unbounded WALK (#1648).
+    ///
+    /// The standard allows the query because the answer is finite: one walk per
+    /// endpoint pair. The search has to be finite too, and neither existing route
+    /// is. Enumerating walks never ends on a graph with a cycle. The first-reach
+    /// BFS ends, but it marks the source visited at depth zero, so the `(v, v)`
+    /// pair a cycle produces is lost: on `a -> b -> c -> a`,
+    /// `ANY SHORTEST (a)-[*1..]->(y)` must answer `a` (three hops) as well as `b`
+    /// and `c`.
+    ///
+    /// So the search is breadth-first over **states** `(node, k)`, where
+    /// `k = min(depth, min_hops)` says whether the walk is long enough yet. Each
+    /// state is visited once, which is what bounds it: at most
+    /// `|N| * (min_hops + 1)` states, whatever the length bound. A walk reaches
+    /// `(n, min_hops)` exactly when it ends at `n` with at least `min_hops` edges,
+    /// and breadth-first reaches it first by the shortest such walk. That one walk
+    /// is a conforming answer to `ANY SHORTEST`, and so to `ANY`.
+    ///
+    /// The walk may repeat nodes and edges, as WALK allows: the shortest walk of
+    /// at least five edges from `a` to `c` on that triangle goes round once. Edges
+    /// an earlier segment walked are not banned, as in `expand_trails`, whose
+    /// WALK branch reuses edges too.
+    fn expand_shortest_walks(
+        &mut self,
+        record: &Record,
+        source_id: NodeId,
+        store: &GraphStore,
+    ) -> ExecutionResult<()> {
+        type State = (NodeId, usize);
+        if self.min_hops > self.max_hops {
+            return Ok(());
+        }
+        self.ensure_type_ids(store);
+        let type_ids: Option<Vec<u16>> = self.type_ids.clone();
+        let type_filter = type_ids.as_deref();
+        let min = self.min_hops;
+
+        let start: State = (source_id, 0);
+        let mut parent: std::collections::HashMap<State, (State, crate::graph::EdgeId)> =
+            std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<State> = std::collections::HashSet::new();
+        seen.insert(start);
+        // The zero-length walk. With `min_hops == 0` every state has `k == 0`, so
+        // `start` is the source's only state and it is never emitted twice.
+        if min == 0 && self.emit_ok(source_id, store) {
+            self.buffer_walk(record, source_id, vec![source_id], Vec::new(), store);
+        }
+
+        let mut frontier = vec![start];
+        let mut depth = 0usize;
+        while !frontier.is_empty() && depth < self.max_hops {
+            depth += 1;
+            let mut next: Vec<State> = Vec::new();
+            for &(cur, k) in &frontier {
+                let reached = (k + 1).min(min);
+                self.for_each_neighbor(cur, type_filter, store, |nb, eid| {
+                    if seen.insert((nb, reached)) {
+                        parent.insert((nb, reached), ((cur, k), eid));
+                        next.push((nb, reached));
+                    }
+                });
+            }
+            for &(nb, k) in &next {
+                if k == min && self.emit_ok(nb, store) {
+                    let (nodes, edges) = walk_to(&parent, start, (nb, k));
+                    self.buffer_walk(record, nb, nodes, edges, store);
+                }
+            }
+            frontier = next;
+        }
+        Ok(())
+    }
+
     /// Whether `node` qualifies as an emitted endpoint (target-label filter).
     fn emit_ok(&self, node: NodeId, store: &GraphStore) -> bool {
         // A target the row already binds: only that node ends a match (#1237).
@@ -11122,6 +11403,30 @@ impl VarLengthExpandOperator {
     }
 }
 
+/// The walk `start` → `end` recorded by `expand_shortest_walks`, as nodes and edges
+/// in the order walked. Keyed on states, so a node the walk passes twice is two
+/// different entries.
+fn walk_to(
+    parent: &std::collections::HashMap<(NodeId, usize), ((NodeId, usize), crate::graph::EdgeId)>,
+    start: (NodeId, usize),
+    end: (NodeId, usize),
+) -> (Vec<NodeId>, Vec<crate::graph::EdgeId>) {
+    let mut nodes = vec![end.0];
+    let mut edges = Vec::new();
+    let mut cur = end;
+    while cur != start {
+        let Some(&(prev, eid)) = parent.get(&cur) else {
+            break;
+        };
+        edges.push(eid);
+        nodes.push(prev.0);
+        cur = prev;
+    }
+    nodes.reverse();
+    edges.reverse();
+    (nodes, edges)
+}
+
 /// Reconstruct the BFS path source→target from a parent map.
 fn reconstruct_path(
     parent: &std::collections::HashMap<NodeId, (NodeId, crate::graph::EdgeId)>,
@@ -11146,6 +11451,13 @@ fn reconstruct_path(
 }
 
 impl PhysicalOperator for VarLengthExpandOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        scoped_edge_types(&mut self.edge_types, scope);
+        self.type_ids = None;
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        true
+    }
+
     // A write beneath this operator refused with "requires mutable store
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
@@ -11162,6 +11474,15 @@ impl PhysicalOperator for VarLengthExpandOperator {
     fn next(&mut self, store: &GraphStore) -> ExecutionResult<Option<Record>> {
         loop {
             if let Some(rec) = self.pending.pop_front() {
+                // In step with `pending`, always. `apply_selector` reads the ends of
+                // the rows the *current* input record produced as `skip(first_new)`,
+                // where `first_new` is `pending.len()`. An end left behind for a row
+                // already returned shifted that window onto the previous record's
+                // ends, so from the second input row on a selector partitioned on
+                // stale endpoints: `ANY SHORTEST (a)-[:E*1..3]->(b)` over a
+                // three-node cycle answered 6 rows where every one of the 3 sources
+                // reaches all 3 (#1648).
+                self.pending_ends.pop_front();
                 return Ok(Some(rec));
             }
             match self.input.next(store)? {
@@ -11174,6 +11495,7 @@ impl PhysicalOperator for VarLengthExpandOperator {
     fn reset(&mut self) {
         self.input.reset();
         self.pending.clear();
+        self.pending_ends.clear();
     }
 
     fn describe(&self) -> OperatorDescription {
@@ -11487,6 +11809,8 @@ impl ProjectOperator {
 }
 
 impl PhysicalOperator for ProjectOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -12119,6 +12443,26 @@ impl AggregatorState {
     }
 }
 
+/// Rows an aggregate pulls from its input at a time (#2274).
+///
+/// An aggregate keeps only its group table; what it holds of its *input* is
+/// the one batch it is folding. That batch was 65,536 rows, which made the
+/// batch, not the aggregate, the peak: `MATCH (a:P)-[:R]->(b) RETURN count(b)`
+/// returned one row and peaked at 13.9 MB on 300,000 edges, which is 65,536
+/// records at about 212 bytes each, and the 2- and 3-hop counts at 20.4 and
+/// 25.0 MB as the records widened (`docs/QUERY-MEMORY.md`, finding 3). The
+/// 3-hop count folds 2.7 million rows, so a peak of 25 MB was never the whole
+/// expansion; it was one batch of it.
+///
+/// 4,096 rows bounds that batch at about 0.9 MB for the 1-hop count and
+/// 1.6 MB for the 3-hop, whatever the row count, and is still large enough
+/// that the per-batch costs -- a
+/// `Vec`, a call through the operator tree, the parallel record build in a
+/// scan, which starts at 1,024 rows -- stay amortised. The deadline is checked
+/// every ten batches, so it is now checked every 40,960 rows rather than every
+/// 655,360.
+const AGGREGATE_BATCH_ROWS: usize = 4096;
+
 /// Aggregate operator: GROUP BY + Aggregations
 pub struct AggregateOperator {
     input: OperatorBox,
@@ -12229,6 +12573,8 @@ impl AggregateOperator {
 }
 
 impl PhysicalOperator for AggregateOperator {
+    row_operator_in_subgraph!();
+
     /// One row per group, built before the first is returned.
     fn memory_bytes(&self) -> Option<usize> {
         self.peak_bytes
@@ -12516,7 +12862,7 @@ impl AggregateOperator {
         let mut groups: rustc_hash::FxHashMap<IdentityKey, Vec<AggregatorState>> =
             rustc_hash::FxHashMap::default();
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12624,7 +12970,7 @@ impl AggregateOperator {
         // Probing first means the allocation happens once per group.
         let mut scratch: Vec<Value> = Vec::with_capacity(self.group_by.len());
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12687,7 +13033,7 @@ impl AggregateOperator {
 
         let all_simple_count = Self::all_simple_count(&self.aggregates);
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -12744,7 +13090,7 @@ impl AggregateOperator {
         let mut readers: Vec<RowReader> =
             self.aggregates.iter().map(|a| RowReader::for_expression(&a.expr)).collect();
 
-        let batch_size = 65536;
+        let batch_size = AGGREGATE_BATCH_ROWS;
         let mut batch_count = 0u64;
         while let Some(batch) = self.input.next_batch(store, batch_size)? {
             batch_count += 1;
@@ -13621,6 +13967,8 @@ impl EagerOperator {
 }
 
 impl PhysicalOperator for EagerOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -13722,6 +14070,8 @@ impl BindPathOperator {
 }
 
 impl PhysicalOperator for BindPathOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -13768,6 +14118,8 @@ impl LimitOperator {
 }
 
 impl PhysicalOperator for LimitOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         Some(children.first().copied().flatten()?.min(self.limit as f64))
     }
@@ -14066,12 +14418,11 @@ impl SortOperator {
     ///
     /// `select_nth_unstable_by` partitions in O(n) rather than sorting, so
     /// trimming a buffer is cheaper than sorting it and is done repeatedly as
-    /// the input streams in. Rows tied with the k-th are dropped along with
-    /// the rest of the tail; Cypher does not define a tie-break for
-    /// `ORDER BY … LIMIT`, so any k of a tied set is a valid answer, but two
-    /// runs may therefore disagree about *which* — the same latitude the
-    /// unstable sort below already takes.
-    fn trim_to(keyed: &mut Vec<(SortKey<'_>, Record)>, k: usize, items: &[(Expression, bool)]) {
+    /// the input streams in. A full tie is broken by the row's input position,
+    /// as the unbounded sort breaks it, so the rows kept are exactly the first
+    /// `k` the unbounded sort would return -- whatever the batch sizes, and
+    /// however often the buffer is trimmed (#2275).
+    fn trim_to(keyed: &mut Vec<(SortKey<'_>, usize, Record)>, k: usize, items: &[(Expression, bool)]) {
         if k == 0 {
             keyed.clear();
             return;
@@ -14079,8 +14430,17 @@ impl SortOperator {
         if keyed.len() <= k {
             return;
         }
-        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items));
+        keyed.select_nth_unstable_by(k - 1, |a, b| Self::cmp_ranked(a, b, items));
         keyed.truncate(k);
+    }
+
+    /// The bounded sort's total order: the key, then the input position.
+    fn cmp_ranked(
+        a: &(SortKey<'_>, usize, Record),
+        b: &(SortKey<'_>, usize, Record),
+        items: &[(Expression, bool)],
+    ) -> std::cmp::Ordering {
+        Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), items).then(a.1.cmp(&b.1))
     }
 
     /// The row order for a key whose every part, in every row, is a non-null
@@ -14335,6 +14695,8 @@ impl SortOperator {
 }
 
 impl PhysicalOperator for SortOperator {
+    row_operator_in_subgraph!();
+
     /// Every input row, held to be ordered.
     fn memory_bytes(&self) -> Option<usize> {
         self.peak_bytes
@@ -14588,29 +14950,39 @@ impl SortOperator {
             return Ok(());
         }
 
-        let mut keyed: Vec<(SortKey<'_>, Record)> = Vec::new();
-        while let Some(batch) = self.input.next_batch(store, batch_size)? {
-            keyed.reserve(batch.records.len());
+        // Rows are fed into the top-k as they arrive, and the input is asked
+        // for batches no larger than the working size. Pulling 65,536 rows at
+        // a time held that many *projected* rows -- in the input's batch and
+        // again in the buffer -- before the first trim: a top-10 over 100,000
+        // rows peaked at 60% of sorting all of them (#2275). Now the buffer
+        // holds at most `trim_at` rows and a batch at most as many again.
+        let (Some(k), Some(trim_at)) = (bound, trim_at) else {
+            unreachable!("the unbounded sort returned above")
+        };
+        let pull = trim_at.min(batch_size);
+        let mut keyed: Vec<(SortKey<'_>, usize, Record)> = Vec::new();
+        let mut seq = 0usize;
+        while let Some(batch) = self.input.next_batch(store, pull)? {
             let mut known = known_values(&mut self.input, batch.records.len());
             for record in batch.records {
-                let k = retained_key.zip(known.next().flatten());
-                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store, k)?;
-                keyed.push((key, record));
-            }
-            if let (Some(k), Some(threshold)) = (bound, trim_at) {
-                if keyed.len() >= threshold {
+                let r = retained_key.zip(known.next().flatten());
+                let key = Self::key_of_cached(&mut readers, &self.sort_items, &record, store, r)?;
+                keyed.push((key, seq, record));
+                seq += 1;
+                // Per row, not per batch, so an input that ignores the batch
+                // size still cannot grow the buffer past the working size.
+                if keyed.len() >= trim_at {
                     Self::trim_to(&mut keyed, k, &self.sort_items);
                 }
             }
         }
-        if let Some(k) = bound {
-            Self::trim_to(&mut keyed, k, &self.sort_items);
-        }
+        Self::trim_to(&mut keyed, k, &self.sort_items);
 
         let sort_items = &self.sort_items;
-        keyed.sort_by(|a, b| Self::cmp_keys(a.0.as_slice(), b.0.as_slice(), sort_items));
+        // A total order (key, then input position), so unstable is exact.
+        keyed.sort_unstable_by(|a, b| Self::cmp_ranked(a, b, sort_items));
 
-        self.records = keyed.into_iter().map(|(_, record)| record).collect();
+        self.records = keyed.into_iter().map(|(_, _, record)| record).collect();
         self.sorted_upto = self.records.len();
         self.executed = true;
         Ok(())
@@ -14796,6 +15168,8 @@ pub struct IndexScanOperator {
     /// missed `Float(150.0)`: `PropertyValue::cmp` orders `Integer(n)` just
     /// below `Float(n)`, and an exact bound on one variant cuts the other off.
     loose: bool,
+    /// The named subgraph this scan is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 /// The value at the low end of `v`'s numeric tie (`Integer(n)` for `n` or
@@ -14864,6 +15238,7 @@ impl IndexScanOperator {
             satisfied,
             other_end: None,
             loose: false,
+            subgraph: None,
         }
     }
 
@@ -14919,6 +15294,11 @@ impl IndexScanOperator {
 }
 
 impl PhysicalOperator for IndexScanOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        true
+    }
+
     fn estimate_rows(&self, store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
         let stats = store.statistics();
         let selectivity = match self.op {
@@ -14961,7 +15341,7 @@ impl PhysicalOperator for IndexScanOperator {
             let node_id = self.node_ids[self.current];
             self.current += 1;
 
-            if store.has_node(node_id) {
+            if store.has_node(node_id) && self.subgraph.as_ref().is_none_or(|s| s.contains_node(store, node_id)) {
                 let mut record = Record::new();
                 record.bind(self.variable.clone(), Value::NodeRef(node_id));
                 return Ok(Some(record));
@@ -14983,7 +15363,7 @@ impl PhysicalOperator for IndexScanOperator {
             let node_id = self.node_ids[self.current];
             self.current += 1;
 
-            if store.has_node(node_id) {
+            if store.has_node(node_id) && self.subgraph.as_ref().is_none_or(|s| s.contains_node(store, node_id)) {
                 let mut record = Record::new();
                 record.bind(self.variable.clone(), Value::NodeRef(node_id));
                 records.push(record);
@@ -15393,6 +15773,8 @@ impl CartesianProductOperator {
 }
 
 impl PhysicalOperator for CartesianProductOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         match children {
             [Some(l), Some(r)] => Some(l * r),
@@ -15650,6 +16032,8 @@ impl JoinOperator {
 }
 
 impl PhysicalOperator for JoinOperator {
+    row_operator_in_subgraph!();
+
     /// The hashed left side and the buffered right side.
     fn memory_bytes(&self) -> Option<usize> {
         self.peak_bytes
@@ -15909,6 +16293,8 @@ impl LeftOuterJoinOperator {
 }
 
 impl PhysicalOperator for LeftOuterJoinOperator {
+    row_operator_in_subgraph!();
+
     fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
         vec![&mut self.left, &mut self.right]
     }
@@ -16756,6 +17142,8 @@ impl DistinctOperator {
 }
 
 impl PhysicalOperator for DistinctOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -18387,6 +18775,8 @@ impl SingleRowOperator {
 }
 
 impl PhysicalOperator for SingleRowOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
         Some(1.0)
     }
@@ -18424,6 +18814,8 @@ impl MaterializedOperator {
 }
 
 impl PhysicalOperator for MaterializedOperator {
+    row_operator_in_subgraph!();
+
     fn is_materialized(&self) -> bool {
         true
     }
@@ -18457,6 +18849,16 @@ pub(crate) fn records_bytes<'a>(records: impl Iterator<Item = &'a Record>) -> us
 }
 
 /// Algorithm operator: CALL algo.pageRank(...)
+/// The five subgraph samplers behind `algo.sample.*` (ML-03, #1720).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SubgraphMethod {
+    ForestFire,
+    Snowball,
+    EgoNetwork,
+    RandomWalk,
+    Stratified,
+}
+
 pub struct AlgorithmOperator {
     /// Procedure name
     name: String,
@@ -18694,6 +19096,70 @@ impl AlgorithmOperator {
     /// `CALL algo.pageRank({graph: 'social'})`.
     pub const GRAPH_KEY: &'static str = "graph";
 
+    /// The config key that keeps an algorithm's state with the graph between
+    /// calls and updates it from what was added (ALGO-14, #1697):
+    /// `CALL algo.pageRank({incremental: true})`. Read by `algo.pageRank`,
+    /// `algo.wcc` and `algo.degree`; see `crate::algo::incremental`.
+    pub const INCREMENTAL_KEY: &'static str = "incremental";
+
+    /// Whether this call asked for `incremental: true`.
+    ///
+    /// The value must be a boolean: `incremental: 'yes'` is refused rather
+    /// than read as false and run from scratch, which would look like it
+    /// worked. A projection is refused alongside it: a projection is fixed
+    /// when it is made, and the incremental state follows the live graph, so
+    /// the two would answer about different graphs.
+    fn incremental_requested(&self) -> ExecutionResult<bool> {
+        let mut on = false;
+        for arg in &self.args {
+            if let Expression::Literal(PropertyValue::Map(m)) = arg {
+                match m.get(Self::INCREMENTAL_KEY) {
+                    None => {}
+                    Some(PropertyValue::Boolean(b)) => on = *b,
+                    Some(other) => {
+                        return Err(ExecutionError::bad_argument(format!(
+                            "{}: `{}` must be true or false, got {other:?}",
+                            self.name,
+                            Self::INCREMENTAL_KEY
+                        )))
+                    }
+                }
+            }
+        }
+        if on && Self::config_has_key(&self.args, Self::GRAPH_KEY) {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: `{}` follows the live graph and a graph projection is fixed when it \
+                 is made, so `{}` and `{}` cannot be given together",
+                self.name,
+                Self::INCREMENTAL_KEY,
+                Self::INCREMENTAL_KEY,
+                Self::GRAPH_KEY
+            )));
+        }
+        Ok(on)
+    }
+
+    /// The query error for a failed incremental call, worded as the plain
+    /// call's errors are: a deadline stop is still `Query timed out`.
+    fn incremental_failed(&self, e: crate::algo::incremental::IncrementalError) -> ExecutionError {
+        use crate::algo::incremental::IncrementalError as E;
+        match e {
+            E::ViewStopped(s) => ExecutionError::RuntimeError(format!(
+                "Query timed out: {} stopped building its graph view after {} of {} nodes",
+                self.name, s.done, s.total
+            )),
+            E::RunStopped(s) => ExecutionError::RuntimeError(format!(
+                "Query timed out: {} stopped after {} of {} sweeps",
+                self.name, s.done, s.total
+            )),
+            E::Damping(d) => ExecutionError::bad_argument(format!(
+                "{}: with `{}: true`, damping must be above 0 and below 1, got {d}",
+                self.name,
+                Self::INCREMENTAL_KEY
+            )),
+        }
+    }
+
     /// Algorithms that cannot run on a projection, and why. A projection keeps
     /// topology and one weight; these read more of the graph than that, or no
     /// graph view at all. Matched on the canonical name.
@@ -18708,6 +19174,9 @@ impl AlgorithmOperator {
         ("traintestsplit", "it can read node properties (time, source), which a projection does not keep"),
         ("splitleakage", "it reads the stored split from node properties, which a projection does not keep"),
         ("leakagecheck", "it reads the stored split from node properties, which a projection does not keep"),
+        ("sample.stratified", "it groups nodes by their labels, which a projection does not keep"),
+        ("stratifiedsample", "it groups nodes by their labels, which a projection does not keep"),
+        ("stratifiedsampling", "it groups nodes by their labels, which a projection does not keep"),
         ("or.constrainedshortestpath", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
         ("or.shortestpathwithconstraints", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
     ];
@@ -19091,7 +19560,17 @@ impl AlgorithmOperator {
     }
 
     fn execute_pagerank(&mut self, store: &GraphStore) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, "pageRank", &["damping", "iterations"])?;
+        Self::reject_unknown_config_keys(&self.args, "pageRank", &["damping", "incremental", "iterations"])?;
+        let incremental = self.incremental_requested()?;
+        if incremental && Self::config_has_key(&self.args, "iterations") {
+            return Err(ExecutionError::bad_argument(format!(
+                "{}: `iterations` has no meaning with `{}: true`, which updates its scores \
+                 until every residual is below {} rather than for a number of iterations",
+                self.name,
+                Self::INCREMENTAL_KEY,
+                crate::algo::RESIDUAL_TOLERANCE
+            )));
+        }
         // Arguments: (label?, edge_type?, config_map?)
         let mut label = None;
         let mut edge_type = None;
@@ -19120,11 +19599,32 @@ impl AlgorithmOperator {
             }
         }
 
+        if incremental {
+            let (scores, _) = crate::algo::incremental::page_rank(
+                store,
+                label.as_deref(),
+                edge_type.as_deref(),
+                config.damping_factor,
+                &DeadlineProgress,
+                &DeadlineProgress,
+            )
+            .map_err(|e| self.incremental_failed(e))?;
+            return self.push_pagerank_rows(store, scores);
+        }
+
         // Build view and run
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         let scores = crate::algo::page_rank_with(&view, config, &DeadlineProgress)
             .map_err(|stopped| algorithm_timed_out("algo.pageRank", stopped))?;
+        self.push_pagerank_rows(store, scores)
+    }
 
+    /// One `(node, score)` row per scored node, highest score first.
+    fn push_pagerank_rows(
+        &mut self,
+        store: &GraphStore,
+        scores: impl IntoIterator<Item = (u64, f64)>,
+    ) -> ExecutionResult<()> {
         // Convert to records. One per node, with a copy of the node, so on a
         // large graph this is not free either: checked like the iterations.
         for (i, (algo_id, score)) in scores.into_iter().enumerate() {
@@ -19210,7 +19710,7 @@ impl AlgorithmOperator {
         // and reported success -- the silent drop `reject_unknown_config_keys`
         // exists to refuse. The filters are read from the map as well as
         // positionally, as the centrality procedures read them.
-        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "label"])?;
+        Self::reject_unknown_config_keys(&self.args, "wcc", &["edgeType", "incremental", "label"])?;
         // Arguments: (label?, edge_type?) or ({label, edgeType})
         let mut label = None;
         let mut edge_type = None;
@@ -19236,13 +19736,26 @@ impl AlgorithmOperator {
             }
         }
 
+        if self.incremental_requested()? {
+            let (components, _) =
+                crate::algo::incremental::wcc(store, label.as_deref(), edge_type.as_deref(), &DeadlineProgress)
+                    .map_err(|e| self.incremental_failed(e))?;
+            return self.push_component_rows(store, components);
+        }
+
         // Build view and run WCC
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         let result = crate::algo::weakly_connected_components(&view);
+        self.push_component_rows(store, result.node_component)
+    }
 
-        // Convert to records
-        // For WCC, we return (node, componentId)
-        for (node_id, component_id) in result.node_component {
+    /// One `(node, componentId)` row per node, by component then node id.
+    fn push_component_rows(
+        &mut self,
+        store: &GraphStore,
+        components: impl IntoIterator<Item = (u64, usize)>,
+    ) -> ExecutionResult<()> {
+        for (node_id, component_id) in components {
             let nid = NodeId::new(node_id);
             let mut record = Record::new();
             if let Some(node) = store.get_node(nid) {
@@ -19534,7 +20047,15 @@ impl AlgorithmOperator {
         store: &GraphStore,
         which: Centrality,
     ) -> ExecutionResult<()> {
-        Self::reject_unknown_config_keys(&self.args, &self.name, &["edgeType", "label", "undirected"])?;
+        // Only degree has an incremental form: the others' scores depend on
+        // paths through the whole graph, which one new relationship can change
+        // anywhere.
+        let keys: &[&str] = match which {
+            Centrality::Degree => &["edgeType", "incremental", "label", "undirected"],
+            _ => &["edgeType", "label", "undirected"],
+        };
+        Self::reject_unknown_config_keys(&self.args, &self.name, keys)?;
+        let incremental = self.incremental_requested()?;
         let (mut label, mut edge_type, mut undirected) = (None, None, None);
         for arg in &self.args {
             if let Expression::Literal(PropertyValue::Map(m)) = arg {
@@ -19555,6 +20076,17 @@ impl AlgorithmOperator {
             if let Some(Expression::Literal(PropertyValue::String(s))) = self.args.first() {
                 label = Some(s.clone());
             }
+        }
+        if incremental {
+            // `undirected` is accepted and, as in the plain call, changes
+            // nothing: degree is in plus out either way.
+            let (mut scores, _) =
+                crate::algo::incremental::degree(store, label.as_deref(), edge_type.as_deref(), &DeadlineProgress)
+                    .map_err(|e| self.incremental_failed(e))?;
+            // `ranked`'s order: score descending, then node id.
+            scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+            self.push_centrality_rows(store, scores);
+            return Ok(());
         }
         let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
         // Undirected by default: centrality on a social or dependency graph is
@@ -19586,7 +20118,13 @@ impl AlgorithmOperator {
                 })?
             }
         };
-        for (node_id, score) in crate::algo::ranked(&view, &scores) {
+        self.push_centrality_rows(store, crate::algo::ranked(&view, &scores));
+        Ok(())
+    }
+
+    /// One `(node, score)` row per entry, in the order given.
+    fn push_centrality_rows(&mut self, store: &GraphStore, ranked: Vec<(u64, f64)>) {
+        for (node_id, score) in ranked {
             let mut record = Record::new();
             let nid = NodeId::new(node_id);
             match store.get_node(nid) {
@@ -19596,7 +20134,6 @@ impl AlgorithmOperator {
             record.bind("score".to_string(), Value::Property(PropertyValue::Float(score)));
             self.results.push(record);
         }
-        Ok(())
     }
 
     /// `algo.jaccard({limit: 10})` and friends.
@@ -20596,6 +21133,356 @@ impl AlgorithmOperator {
             let mut rec = Record::new();
             self.bind_node(store, &mut rec, "node", id);
             rec.bind("step".to_string(), Value::Property(PropertyValue::Integer(i as i64)));
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.sample.neighbors(seeds, {fanout, direction, weightProperty,
+    /// batchSize, seed})` yielding `batch, hop, node, neighbour`: GNN-style
+    /// neighbour sampling, one minibatch at a time (ML-02, #1717). See
+    /// `samyama_graph_algorithms::neighbour_sampling` for the rules every
+    /// sample keeps.
+    ///
+    /// `seeds` is a node id or a list of them. `fanout` is required: one
+    /// entry per hop, each at least 1, or -1 for every neighbour. Sampling is
+    /// uniform unless `weightProperty` names a weight. Each option is refused,
+    /// not clamped, when it is out of range: a training set drawn from a
+    /// silently substituted fanout is not the one the caller asked for.
+    fn execute_neighbour_sampling(&mut self, store: &GraphStore) -> ExecutionResult<()> {
+        const WHAT: &str = "algo.sample.neighbors()";
+        const DEFAULT_SEED: u64 = 42;
+        Self::reject_unknown_config_keys(
+            &self.args,
+            "sample.neighbors",
+            &["batchSize", "direction", "edgeType", "fanout", "label", "seed", "weightProperty"],
+        )?;
+        let bad = |msg: String| ExecutionError::bad_argument(format!("{WHAT}: {msg}"));
+
+        let seed_ids: Vec<i64> = match self.args.first() {
+            Some(Expression::Literal(PropertyValue::Integer(n))) => vec![*n],
+            Some(Expression::Literal(PropertyValue::Array(items))) => items
+                .iter()
+                .map(|v| match v {
+                    PropertyValue::Integer(n) => Ok(*n),
+                    other => Err(bad(format!("every seed must be a node id, got {other:?}"))),
+                })
+                .collect::<ExecutionResult<_>>()?,
+            _ => {
+                return Err(bad(
+                    "the first argument must be a node id or a list of node ids, \
+                     e.g. algo.sample.neighbors([1, 2], {fanout: [10, 5]})"
+                        .to_string(),
+                ))
+            }
+        };
+        if seed_ids.is_empty() {
+            return Err(bad("the list of seed nodes is empty".to_string()));
+        }
+
+        let (mut fanout, mut direction, mut weight, mut batch_size, mut seed) =
+            (None, crate::algo::SampleDirection::Out, None, None, DEFAULT_SEED);
+        let (mut label, mut edge_type) = (None, None);
+        for arg in &self.args {
+            let Expression::Literal(PropertyValue::Map(m)) = arg else { continue };
+            for (key, value) in m {
+                match (key.as_str(), value) {
+                    ("fanout", PropertyValue::Array(hops)) => {
+                        let mut parsed = Vec::with_capacity(hops.len());
+                        for (i, h) in hops.iter().enumerate() {
+                            parsed.push(match h {
+                                PropertyValue::Integer(-1) => crate::algo::Fanout::All,
+                                PropertyValue::Integer(n) if *n >= 1 => crate::algo::Fanout::AtMost(*n as usize),
+                                other => {
+                                    return Err(bad(format!(
+                                        "`fanout` entry {i} is {other:?}; each hop's fanout is a \
+                                         whole number of at least 1, or -1 for every neighbour"
+                                    )))
+                                }
+                            });
+                        }
+                        fanout = Some(parsed);
+                    }
+                    ("fanout", other) => {
+                        return Err(bad(format!(
+                            "`fanout` must be a list with one entry per hop, e.g. [10, 5]; got {other:?}"
+                        )))
+                    }
+                    ("direction", PropertyValue::String(d)) => {
+                        direction = match d.to_ascii_lowercase().as_str() {
+                            "out" | "outgoing" => crate::algo::SampleDirection::Out,
+                            "in" | "incoming" => crate::algo::SampleDirection::In,
+                            "both" | "any" | "undirected" => crate::algo::SampleDirection::Both,
+                            _ => return Err(bad(format!(
+                                "unknown `direction` {d:?}; use 'out', 'in' or 'both'"
+                            ))),
+                        }
+                    }
+                    ("weightProperty", PropertyValue::String(w)) => weight = Some(w.clone()),
+                    ("batchSize", PropertyValue::Integer(n)) if *n >= 1 => batch_size = Some(*n as usize),
+                    ("batchSize", other) => {
+                        return Err(bad(format!("`batchSize` must be at least 1, got {other:?}")))
+                    }
+                    ("seed", PropertyValue::Integer(n)) => seed = *n as u64,
+                    ("label", PropertyValue::String(v)) => label = Some(v.clone()),
+                    ("edgeType", PropertyValue::String(v)) => edge_type = Some(v.clone()),
+                    (k @ ("direction" | "weightProperty" | "seed" | "label" | "edgeType"), other) => {
+                        return Err(bad(format!("`{k}` has the wrong type: {other:?}")))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some(fanouts) = fanout else {
+            return Err(bad(
+                "`fanout` is required: one entry per hop, e.g. {fanout: [10, 5]}".to_string(),
+            ));
+        };
+        if fanouts.is_empty() {
+            return Err(bad("`fanout` is empty; give at least one hop".to_string()));
+        }
+
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), weight.as_deref())?;
+        let mut seeds = Vec::with_capacity(seed_ids.len());
+        for id in seed_ids {
+            let idx = u64::try_from(id).ok().and_then(|raw| view.node_to_index.get(&raw).copied());
+            seeds.push(idx.ok_or_else(|| {
+                ExecutionError::RuntimeError(format!(
+                    "{WHAT}: node {id} is not in the projected graph -- check the \
+                     `label` and `edgeType` filters"
+                ))
+            })?);
+        }
+        let spec = crate::algo::SampleSpec {
+            fanouts,
+            direction,
+            weighted: weight.is_some(),
+            batch_size: batch_size.unwrap_or(seeds.len()),
+            seed,
+        };
+        let rows = crate::algo::sample_neighbours(&view, &seeds, &spec).map_err(|e| match e {
+            crate::algo::SampleError::BadWeight { from, to, weight: w } => bad(format!(
+                "the relationship from node {from} to node {to} has `{}` = {w}; a sampling \
+                 weight must be a finite number of at least 0",
+                weight.as_deref().unwrap_or("weight")
+            )),
+            other => ExecutionError::RuntimeError(format!("{WHAT}: {other:?}")),
+        })?;
+        for r in rows {
+            let mut rec = Record::new();
+            rec.bind("batch".to_string(), Value::Property(PropertyValue::Integer(r.batch as i64)));
+            rec.bind("hop".to_string(), Value::Property(PropertyValue::Integer(r.hop as i64)));
+            self.bind_node(store, &mut rec, "node", r.node);
+            self.bind_node(store, &mut rec, "neighbour", r.neighbour);
+            self.results.push(rec);
+        }
+        Ok(())
+    }
+
+    /// `algo.sample.forestFire`, `.snowball`, `.egoNetwork`, `.randomWalk` and
+    /// `.stratified`: a smaller piece of the graph to train or test on (ML-03,
+    /// #1720). See `samyama_graph_algorithms::subgraph_sampling` for what each
+    /// method does and the rules every sample keeps.
+    ///
+    /// The first argument is the seed node(s): a node id or a list of them.
+    /// Forest fire may omit it and start anywhere; stratified sampling takes
+    /// none. Each option is refused, not clamped, when it is out of range: a
+    /// sample drawn from a silently substituted size is not the one asked for.
+    fn execute_subgraph_sampling(&mut self, store: &GraphStore, method: SubgraphMethod) -> ExecutionResult<()> {
+        use SubgraphMethod::*;
+        const DEFAULT_SEED: u64 = 42;
+        let (name, keys): (&str, &[&str]) = match method {
+            ForestFire => ("sample.forestFire", &["direction", "edgeType", "forwardProbability", "label", "seed", "size"]),
+            Snowball => ("sample.snowball", &["direction", "edgeType", "hops", "label", "maxNodes", "perNode", "seed"]),
+            EgoNetwork => ("sample.egoNetwork", &["direction", "edgeType", "hops", "label"]),
+            RandomWalk => (
+                "sample.randomWalk",
+                &["direction", "edgeType", "label", "maxSteps", "restartProbability", "seed", "size"],
+            ),
+            Stratified => ("sample.stratified", &["fraction", "perStratum", "seed"]),
+        };
+        Self::reject_unknown_config_keys(&self.args, name, keys)?;
+        let what = format!("algo.{name}()");
+        let bad = |msg: String| ExecutionError::bad_argument(format!("{what}: {msg}"));
+
+        let empty = HashMap::new();
+        let config = self
+            .args
+            .iter()
+            .find_map(|a| match a {
+                Expression::Literal(PropertyValue::Map(m)) => Some(m),
+                _ => None,
+            })
+            .unwrap_or(&empty);
+        let int = |key: &str, min: i64| -> ExecutionResult<Option<i64>> {
+            match config.get(key) {
+                None => Ok(None),
+                Some(PropertyValue::Integer(n)) if *n >= min => Ok(Some(*n)),
+                Some(other) => Err(bad(format!("`{key}` must be a whole number of at least {min}, got {other:?}"))),
+            }
+        };
+        let probability = |key: &str, default: f64| -> ExecutionResult<f64> {
+            let p = match config.get(key) {
+                None => return Ok(default),
+                Some(PropertyValue::Float(f)) => *f,
+                Some(PropertyValue::Integer(n)) => *n as f64,
+                Some(other) => return Err(bad(format!("`{key}` must be a number between 0 and 1, got {other:?}"))),
+            };
+            if (0.0..=1.0).contains(&p) {
+                Ok(p)
+            } else {
+                Err(bad(format!("`{key}` must be between 0 and 1, got {p}")))
+            }
+        };
+        let text = |key: &str| -> ExecutionResult<Option<String>> {
+            match config.get(key) {
+                None => Ok(None),
+                Some(PropertyValue::String(v)) => Ok(Some(v.clone())),
+                Some(other) => Err(bad(format!("`{key}` must be a string, got {other:?}"))),
+            }
+        };
+        let seed = match config.get("seed") {
+            None => DEFAULT_SEED,
+            Some(PropertyValue::Integer(n)) => *n as u64,
+            Some(other) => return Err(bad(format!("`seed` must be a whole number, got {other:?}"))),
+        };
+
+        // The seed nodes: a node id or a list of them, as the first argument.
+        let seed_ids: Option<Vec<i64>> = match self.args.first() {
+            Some(Expression::Literal(PropertyValue::Integer(n))) => Some(vec![*n]),
+            Some(Expression::Literal(PropertyValue::Array(items))) => Some(
+                items
+                    .iter()
+                    .map(|v| match v {
+                        PropertyValue::Integer(n) => Ok(*n),
+                        other => Err(bad(format!("every seed must be a node id, got {other:?}"))),
+                    })
+                    .collect::<ExecutionResult<_>>()?,
+            ),
+            _ => None,
+        };
+
+        if method == Stratified {
+            if seed_ids.is_some() {
+                return Err(bad("stratified sampling draws from every node and takes no seed nodes".to_string()));
+            }
+            let allocation = match (config.get("fraction"), int("perStratum", 1)?) {
+                (Some(_), Some(_)) => return Err(bad("give `fraction` or `perStratum`, not both".to_string())),
+                (None, Some(k)) => crate::algo::StratumAllocation::PerStratum(k as usize),
+                (Some(PropertyValue::Float(f)), None) if *f > 0.0 && *f <= 1.0 => {
+                    crate::algo::StratumAllocation::Fraction(*f)
+                }
+                (Some(PropertyValue::Integer(1)), None) => crate::algo::StratumAllocation::Fraction(1.0),
+                (Some(other), None) => {
+                    return Err(bad(format!("`fraction` must be above 0 and at most 1, got {other:?}")))
+                }
+                (None, None) => {
+                    return Err(bad(
+                        "say how much of each label group to take: `fraction` (e.g. 0.1) or `perStratum` (e.g. 100)"
+                            .to_string(),
+                    ))
+                }
+            };
+            // A node's stratum is its set of labels, sorted and joined, so
+            // every node is in exactly one; an unlabelled node is in "".
+            let population: Vec<(u64, String)> = store
+                .all_nodes()
+                .into_iter()
+                .map(|n| {
+                    let mut labels: Vec<&str> = n.labels.iter().map(|l| l.as_str()).collect();
+                    labels.sort_unstable();
+                    (n.id.as_u64(), labels.join(":"))
+                })
+                .collect();
+            for (id, stratum) in crate::algo::stratified(&population, allocation, seed) {
+                let mut rec = Record::new();
+                self.bind_node(store, &mut rec, "node", id);
+                rec.bind("stratum".to_string(), Value::Property(PropertyValue::String(stratum)));
+                self.results.push(rec);
+            }
+            return Ok(());
+        }
+
+        let seed_ids = match (seed_ids, method) {
+            (Some(ids), _) if ids.is_empty() => return Err(bad("the list of seed nodes is empty".to_string())),
+            (Some(ids), _) => ids,
+            (None, ForestFire) => Vec::new(),
+            (None, _) => {
+                return Err(bad(format!(
+                    "the first argument must be a seed node id or a list of them, e.g. algo.{name}([1, 2], {{...}})"
+                )))
+            }
+        };
+        let direction = match text("direction")?.map(|d| d.to_ascii_lowercase()).as_deref() {
+            None | Some("out") | Some("outgoing") => crate::algo::SampleDirection::Out,
+            Some("in") | Some("incoming") => crate::algo::SampleDirection::In,
+            Some("both") | Some("any") | Some("undirected") => crate::algo::SampleDirection::Both,
+            Some(d) => return Err(bad(format!("unknown `direction` {d:?}; use 'out', 'in' or 'both'"))),
+        };
+        let (label, edge_type) = (text("label")?, text("edgeType")?);
+        let view = self.view(store, label.as_deref(), edge_type.as_deref(), None)?;
+        let mut seeds = Vec::with_capacity(seed_ids.len());
+        for id in seed_ids {
+            let idx = u64::try_from(id).ok().and_then(|raw| view.node_to_index.get(&raw).copied());
+            seeds.push(idx.ok_or_else(|| {
+                ExecutionError::RuntimeError(format!(
+                    "{what}: node {id} is not in the projected graph -- check the `label` and `edgeType` filters"
+                ))
+            })?);
+        }
+        // The sample size, for the two methods that take one.
+        let size = |view_nodes: usize| -> ExecutionResult<usize> {
+            let Some(n) = int("size", 1)? else {
+                return Err(bad("`size` is required: how many nodes the sample should hold".to_string()));
+            };
+            if n as usize > view_nodes {
+                return Err(bad(format!(
+                    "`size` is {n}, and the projected graph has only {view_nodes} nodes"
+                )));
+            }
+            Ok(n as usize)
+        };
+
+        let (column, rows): (&str, Vec<(u64, i64)>) = match method {
+            ForestFire => {
+                let n = size(view.node_count)?;
+                let p = probability("forwardProbability", 0.7)?;
+                let order = crate::algo::forest_fire(&view, &seeds, n, p, direction, seed);
+                ("position", order.into_iter().enumerate().map(|(i, id)| (id, i as i64)).collect())
+            }
+            RandomWalk => {
+                let n = size(view.node_count)?;
+                let p = probability("restartProbability", 0.15)?;
+                let max_steps = int("maxSteps", 1)?.map_or(n.saturating_mul(100), |m| m as usize);
+                let order = crate::algo::random_walk_sample(&view, &seeds, n, p, max_steps, direction, seed);
+                ("position", order.into_iter().enumerate().map(|(i, id)| (id, i as i64)).collect())
+            }
+            Snowball => {
+                let hops = int("hops", 1)?.unwrap_or(2) as usize;
+                let per_node = match config.get("perNode") {
+                    None | Some(PropertyValue::Integer(-1)) => crate::algo::Fanout::All,
+                    Some(PropertyValue::Integer(k)) if *k >= 1 => crate::algo::Fanout::AtMost(*k as usize),
+                    Some(other) => {
+                        return Err(bad(format!(
+                            "`perNode` must be at least 1, or -1 for every neighbour; got {other:?}"
+                        )))
+                    }
+                };
+                let max_nodes = int("maxNodes", 1)?.map(|m| m as usize);
+                let got = crate::algo::snowball(&view, &seeds, hops, per_node, max_nodes, direction, seed);
+                ("hop", got.into_iter().map(|(id, h)| (id, h as i64)).collect())
+            }
+            EgoNetwork => {
+                let hops = int("hops", 0)?.unwrap_or(1) as usize;
+                let got = crate::algo::ego_network(&view, &seeds, hops, direction);
+                ("distance", got.into_iter().map(|(id, d)| (id, d as i64)).collect())
+            }
+            Stratified => unreachable!("answered above"),
+        };
+        for (id, n) in rows {
+            let mut rec = Record::new();
+            self.bind_node(store, &mut rec, "node", id);
+            rec.bind(column.to_string(), Value::Property(PropertyValue::Integer(n)));
             self.results.push(rec);
         }
         Ok(())
@@ -21703,9 +22590,14 @@ impl AlgorithmOperator {
     /// The cheapest path from `source` to `target` whose `resourceProperty`
     /// adds up to at most `maxResource`. Cost is `costProperty`, or one per
     /// relationship (hops) without it. Exact: see
-    /// `samyama_graph_algorithms::constrained_path`. One row, `path` (node
-    /// ids), `cost` and `resource`; no row when no path is within the limit,
-    /// as `weightedPath` gives none when there is no path.
+    /// `samyama_graph_algorithms::constrained_path`.
+    ///
+    /// Always one row: `path` (node ids), `cost` and `resource`, and the
+    /// result envelope every solve carries (OPT-09, #2265) -- `objective`
+    /// (the cost), `feasible`, `gap` (0: the search is exact),
+    /// `iterations` (partial paths expanded) and `total_time_ms`. When no
+    /// path is within the limit the row says `feasible: false`, with the
+    /// path, its totals, `objective` and `gap` null.
     fn execute_constrained_shortest_path(&mut self, store: &GraphStore) -> ExecutionResult<()> {
         let call = "algo.or.constrainedShortestPath";
         Self::reject_unknown_config_keys(
@@ -21772,7 +22664,8 @@ impl AlgorithmOperator {
         }
         let resource_per_edge = resources.weights.as_deref().unwrap_or(&[]);
 
-        let found = crate::algo::constrained_shortest_path(
+        let started = std::time::Instant::now();
+        let searched = crate::algo::constrained_shortest_path_search(
             &costs,
             resource_per_edge,
             source,
@@ -21794,18 +22687,49 @@ impl AlgorithmOperator {
             other => ExecutionError::bad_argument(format!("{call}: {other}")),
         })?;
 
-        if let Some(found) = found {
-            let mut record = Record::new();
-            record.bind(
-                "path".to_string(),
-                Value::Property(PropertyValue::Array(
-                    found.path.iter().map(|&n| PropertyValue::Integer(n as i64)).collect(),
-                )),
-            );
-            record.bind("cost".to_string(), Value::Property(PropertyValue::Float(found.cost)));
-            record.bind("resource".to_string(), Value::Property(PropertyValue::Float(found.resource)));
-            self.results.push(record);
+        let total_time_ms = duration_ms(started.elapsed());
+
+        // Always one row, with the result envelope (OPT-09, #2265): a search
+        // that finds nothing within the limit says so with `feasible: false`
+        // rather than an empty result, which cannot say why it is empty.
+        let mut record = Record::new();
+        let float = |v: f64| Value::Property(PropertyValue::Float(v));
+        let null = || Value::Property(PropertyValue::Null);
+        match &searched.found {
+            Some(found) => {
+                record.bind(
+                    "path".to_string(),
+                    Value::Property(PropertyValue::Array(
+                        found.path.iter().map(|&n| PropertyValue::Integer(n as i64)).collect(),
+                    )),
+                );
+                record.bind("cost".to_string(), float(found.cost));
+                record.bind("resource".to_string(), float(found.resource));
+                // Exact: the path is the cheapest within the limit, proven by
+                // the search, so its gap to the optimum is 0.
+                Self::bind_result_envelope(
+                    &mut record,
+                    float(found.cost),
+                    Value::Property(PropertyValue::Boolean(true)),
+                    float(0.0),
+                    total_time_ms,
+                );
+            }
+            None => {
+                for column in ["path", "cost", "resource"] {
+                    record.bind(column.to_string(), null());
+                }
+                Self::bind_result_envelope(
+                    &mut record,
+                    null(),
+                    Value::Property(PropertyValue::Boolean(false)),
+                    null(),
+                    total_time_ms,
+                );
+            }
         }
+        record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(searched.expanded as i64)));
+        self.results.push(record);
         Ok(())
     }
 
@@ -21963,6 +22887,49 @@ impl AlgorithmOperator {
         record.bind("total_time_ms".to_string(), Value::Property(PropertyValue::Float(total_time_ms)));
     }
 
+    /// `or.solve`'s time and evaluation limits (OPT-11, #1798): `timeBudgetMs`
+    /// and `maxEvaluations`, each a whole number of at least 1 when present.
+    /// 0 is refused rather than read as "no limit" or "stop at once", as
+    /// `/optimize/solve` refuses it: either reading would be a guess.
+    fn or_solve_run_budget(
+        config_map: &HashMap<String, PropertyValue>,
+    ) -> ExecutionResult<Budget> {
+        let limit = |a: &str, b: &str| -> ExecutionResult<Option<u64>> {
+            match config_map.get(a).map(|v| (a, v)).or_else(|| config_map.get(b).map(|v| (b, v))) {
+                None => Ok(None),
+                Some((_, PropertyValue::Integer(n))) if *n >= 1 => Ok(Some(*n as u64)),
+                Some((key, other)) => Err(ExecutionError::bad_argument(format!(
+                    "or.solve: `{key}` must be a whole number of at least 1, got {other:?}; \
+                     leave it out for no limit"
+                ))),
+            }
+        };
+        Ok(Budget {
+            time: limit("timeBudgetMs", "time_budget_ms")?.map(std::time::Duration::from_millis),
+            evaluations: limit("maxEvaluations", "max_evaluations")?,
+        })
+    }
+
+    /// What a solve used of its budget: `evaluations` made and `stopped_by`,
+    /// `iterations` when it ran every iteration, else the limit that ended it
+    /// (`time_budget` or `evaluation_budget`) -- the names `/optimize/solve`
+    /// reports.
+    fn bind_run_budget_use<P>(record: &mut Record, problem: &Budgeted<P>) {
+        record.bind(
+            "evaluations".to_string(),
+            Value::Property(PropertyValue::Integer(problem.evaluations() as i64)),
+        );
+        let stopped_by = match problem.stop_reason() {
+            StopReason::Iterations => "iterations",
+            StopReason::TimeBudget => "time_budget",
+            StopReason::EvaluationBudget => "evaluation_budget",
+        };
+        record.bind(
+            "stopped_by".to_string(),
+            Value::Property(PropertyValue::String(stopped_by.to_string())),
+        );
+    }
+
     fn execute_or_solve(&mut self, store: &mut GraphStore, tenant_id: &str) -> ExecutionResult<()> {
         if self.args.is_empty() {
              return Err(ExecutionError::bad_argument("algo.or.solve requires a config map".to_string()));
@@ -21981,10 +22948,10 @@ impl AlgorithmOperator {
         Self::reject_unknown_config_keys(&self.args, "or.solve", &[
             "algorithm", "bestKnown", "best_known", "budget", "constraintHandling",
             "constraint_handling", "costProperties", "costProperty",
-            "cost_properties", "cost_property", "label", "lowerBound", "max", "maxIterations",
-            "max_iterations",
+            "cost_properties", "cost_property", "label", "lowerBound", "max", "maxEvaluations",
+            "maxIterations", "max_evaluations", "max_iterations",
             "minTotal", "min", "min_total", "populationSize", "population_size",
-            "property", "seed", "upperBound",
+            "property", "seed", "timeBudgetMs", "time_budget_ms", "upperBound",
         ])?;
         let algorithm = config_map.get("algorithm").and_then(|v| v.as_string()).unwrap_or("Jaya");
         if !Self::is_known_solver(algorithm) {
@@ -22094,6 +23061,11 @@ impl AlgorithmOperator {
                 )))
             }
         };
+        // A time or evaluation limit on the solve (OPT-11, #1798), the two
+        // `/optimize/solve` takes. `budget` above is the cost constraint, so
+        // these have their own names. Either stops the solver between
+        // iterations with the best answer so far; `stopped_by` says which.
+        let run_budget = Self::or_solve_run_budget(config_map)?;
         macro_rules! solve_with_seed {
             ($solver:expr, $problem:expr) => {
                 match seed {
@@ -22156,6 +23128,8 @@ impl AlgorithmOperator {
         // the point actually evaluated: the repaired one under `repair`.
         let problem = Constrained::new(problem, constraint_handling)
             .map_err(|e| ExecutionError::bad_argument(format!("or.solve: {e}")))?;
+        // Counts evaluations and stops the solver once `run_budget` is spent.
+        let problem = Budgeted::new(problem, run_budget);
 
         let solver_config = SolverConfig {
             population_size: pop_size,
@@ -22185,7 +23159,7 @@ impl AlgorithmOperator {
 
             // Write back first individual from Pareto Front: the point it was
             // scored at, which `repair` may have moved.
-            let resolved = res.pareto_front.first().map(|best| problem.resolve_multi(&best.variables));
+            let resolved = res.pareto_front.first().map(|best| problem.inner().resolve_multi(&best.variables));
             if let Some(best) = &resolved {
                 for (i, &val) in best.iter().enumerate() {
                     let node_id = node_ids[i];
@@ -22220,19 +23194,24 @@ impl AlgorithmOperator {
             let (objective, feasible) = match &resolved {
                 Some(best) => (
                     Value::Property(PropertyValue::Array(
-                        MultiObjectiveProblem::objectives(problem.inner(), best)
+                        MultiObjectiveProblem::objectives(problem.inner().inner(), best)
                             .into_iter()
                             .map(PropertyValue::Float)
                             .collect(),
                     )),
                     Value::Property(PropertyValue::Boolean(is_feasible(Problem::penalty(
-                        problem.inner(),
+                        problem.inner().inner(),
                         best,
                     )))),
                 ),
                 None => (Value::Null, Value::Null),
             };
             Self::bind_result_envelope(&mut record, objective, feasible, Value::Null, total_time_ms);
+            // Iterations run and the cap, as the single-objective row has them
+            // (OPT-09, #2265): `history` holds one entry per iteration here too.
+            record.bind("iterations".to_string(), Value::Property(PropertyValue::Integer(res.history.len() as i64)));
+            record.bind("max_iterations".to_string(), Value::Property(PropertyValue::Integer(max_iter as i64)));
+            Self::bind_run_budget_use(&mut record, &problem);
             self.results.push(record);
 
         } else {
@@ -22290,7 +23269,7 @@ impl AlgorithmOperator {
 
             // 4. Write back results: the point the answer was scored at, which
             // `repair` may have moved (OPT-10).
-            let best_variables = problem.resolve(&result.best_variables);
+            let best_variables = problem.inner().resolve(&result.best_variables);
             for (i, &val) in best_variables.iter().enumerate() {
                 let node_id = node_ids[i];
                 store
@@ -22333,8 +23312,8 @@ impl AlgorithmOperator {
             // The result envelope (OPT-09, #1776). `fitness` is objective plus
             // penalty, so on its own it cannot say whether the answer obeys the
             // budget and minimum: these columns separate the two.
-            let objective = Problem::objective(problem.inner(), &best_variables);
-            let feasible = is_feasible(Problem::penalty(problem.inner(), &best_variables));
+            let objective = Problem::objective(problem.inner().inner(), &best_variables);
+            let feasible = is_feasible(Problem::penalty(problem.inner().inner(), &best_variables));
             let gap = match best_known {
                 Some(best) => Value::Property(PropertyValue::Float(gap_to_best_known(objective, best))),
                 None => Value::Null,
@@ -22346,6 +23325,7 @@ impl AlgorithmOperator {
                 gap,
                 total_time_ms,
             );
+            Self::bind_run_budget_use(&mut record, &problem);
 
             self.results.push(record);
         }
@@ -22693,6 +23673,23 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "sample.neighbors" | "sample.neighbours" | "sampleneighbors" | "sampleneighbours"
+                | "neighboursampling" | "neighborsampling" => self.execute_neighbour_sampling(store)?,
+                "sample.forestfire" | "forestfire" | "forestfiresample" | "forestfiresampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::ForestFire)?
+                }
+                "sample.snowball" | "snowball" | "snowballsample" | "snowballsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Snowball)?
+                }
+                "sample.egonetwork" | "egonetwork" | "ego" | "egograph" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::EgoNetwork)?
+                }
+                "sample.randomwalk" | "randomwalksample" | "randomwalksampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::RandomWalk)?
+                }
+                "sample.stratified" | "stratifiedsample" | "stratifiedsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Stratified)?
+                }
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
@@ -22805,6 +23802,23 @@ impl PhysicalOperator for AlgorithmOperator {
                 "astar" => self.execute_path_enum(store, PathKind::AStar)?,
                 "yens" => self.execute_path_enum(store, PathKind::Yens)?,
                 "randomwalk" => self.execute_random_walk(store)?,
+                "sample.neighbors" | "sample.neighbours" | "sampleneighbors" | "sampleneighbours"
+                | "neighboursampling" | "neighborsampling" => self.execute_neighbour_sampling(store)?,
+                "sample.forestfire" | "forestfire" | "forestfiresample" | "forestfiresampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::ForestFire)?
+                }
+                "sample.snowball" | "snowball" | "snowballsample" | "snowballsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Snowball)?
+                }
+                "sample.egonetwork" | "egonetwork" | "ego" | "egograph" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::EgoNetwork)?
+                }
+                "sample.randomwalk" | "randomwalksample" | "randomwalksampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::RandomWalk)?
+                }
+                "sample.stratified" | "stratifiedsample" | "stratifiedsampling" => {
+                    self.execute_subgraph_sampling(store, SubgraphMethod::Stratified)?
+                }
                 "negativesampling" | "negativesamples" => self.execute_negative_sampling(store)?,
                 "articlerank" => self.execute_article_rank(store)?,
                 "katz" | "katzcentrality" => self.execute_katz(store)?,
@@ -22899,6 +23913,8 @@ impl SkipOperator {
 }
 
 impl PhysicalOperator for SkipOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         Some((children.first().copied().flatten()? - self.skip as f64).max(0.0))
     }
@@ -23661,6 +24677,8 @@ impl UnwindOperator {
 }
 
 impl PhysicalOperator for UnwindOperator {
+    row_operator_in_subgraph!();
+
     // A write beneath this operator refused with "requires mutable store
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
@@ -25682,7 +26700,7 @@ impl WithBarrierOperator {
             // Aggregation path: group by non-aggregate items
             let mut groups: HashMap<Vec<Value>, Vec<AggregatorState>> = HashMap::new();
 
-            let batch_size = 65536;
+            let batch_size = AGGREGATE_BATCH_ROWS;
             while let Some(batch) = self.input.next_batch(store, batch_size)? {
                 for record in batch.records {
                     let mut key = Vec::new();
@@ -25879,6 +26897,8 @@ impl WithBarrierOperator {
 }
 
 impl PhysicalOperator for WithBarrierOperator {
+    row_operator_in_subgraph!();
+
     fn estimate_rows(&self, _store: &GraphStore, children: &[Option<f64>]) -> Option<f64> {
         pass_through_estimate(children)
     }
@@ -25981,6 +27001,8 @@ pub struct ExpandIntoOperator {
     edge_binding: Option<String>,
     /// The current input record and the edges still to emit it with.
     pending: Option<(Record, std::vec::IntoIter<crate::graph::EdgeId>)>,
+    /// The named subgraph this check is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 impl ExpandIntoOperator {
@@ -25998,11 +27020,17 @@ impl ExpandIntoOperator {
             edge_type,
             edge_binding,
             pending: None,
+            subgraph: None,
         }
     }
 }
 
 impl PhysicalOperator for ExpandIntoOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        true
+    }
+
     // A write beneath this operator refused with "requires mutable store
     // access", because the default `next_mut` delegates to `next` and `next`
     // reads its input read-only. Shared body rather than a second, mutable copy
@@ -26057,7 +27085,10 @@ impl PhysicalOperator for ExpandIntoOperator {
                 .ok_or_else(|| ExecutionError::VariableNotFound(self.target_binding.clone()))?;
 
             let et = self.edge_type.as_ref().map(|t| EdgeType::new(t.as_str()));
-            let edges = store.edges_between(source_id, target_id, et.as_ref());
+            let mut edges = store.edges_between(source_id, target_id, et.as_ref());
+            if let Some(scope) = &self.subgraph {
+                edges.retain(|e| scope.contains_edge(store, *e));
+            }
             // None -- the record is filtered out, and the next one tried.
             if !edges.is_empty() {
                 self.pending = Some((record, edges.into_iter()));
@@ -26113,6 +27144,8 @@ pub struct NodeByIdOperator {
     /// id(n) = 5` would otherwise match a node of any label that happens to
     /// hold that id (#538).
     labels: Vec<Label>,
+    /// The named subgraph this lookup is confined to (#337).
+    subgraph: Option<SubgraphScopeRef>,
 }
 
 impl NodeByIdOperator {
@@ -26122,6 +27155,7 @@ impl NodeByIdOperator {
             position: 0,
             variable,
             labels: Vec::new(),
+            subgraph: None,
         }
     }
 
@@ -26133,6 +27167,11 @@ impl NodeByIdOperator {
 }
 
 impl PhysicalOperator for NodeByIdOperator {
+    fn restrict_to_subgraph(&mut self, scope: &SubgraphScopeRef) -> bool {
+        self.subgraph = Some(std::sync::Arc::clone(scope));
+        true
+    }
+
     fn estimate_rows(&self, _store: &GraphStore, _children: &[Option<f64>]) -> Option<f64> {
         Some(self.node_ids.len() as f64)
     }
@@ -26144,7 +27183,10 @@ impl PhysicalOperator for NodeByIdOperator {
 
             // Verify the node still exists and carries the pattern's labels.
             let matches = match store.get_node(node_id) {
-                Some(node) => self.labels.iter().all(|l| node.has_label(l)),
+                Some(node) => {
+                    self.labels.iter().all(|l| node.has_label(l))
+                        && self.subgraph.as_ref().is_none_or(|s| s.contains_node(store, node_id))
+                }
                 None => false,
             };
             if matches {

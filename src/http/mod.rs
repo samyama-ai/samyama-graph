@@ -8,6 +8,8 @@ pub mod transactions;
 pub mod uc_problems;
 pub mod vector;
 pub mod structure;
+pub mod subgraphs;
+pub mod sparql;
 
 pub use server::HttpServer;
 

@@ -215,6 +215,13 @@ The keys in full:
 | `populationSize`, `maxIterations` | Solver settings. | `50`, `100` |
 | `seed` | A non-negative integer; the same call on the same graph then gives the same answer. | none (a fresh draw each call) |
 | `bestKnown` | A reference objective to report `gap` against (single-objective only). | none |
+| `timeBudgetMs` / `time_budget_ms` | Stop once this many milliseconds have passed since the first evaluation, with the best answer so far. A whole number of at least 1. | no limit |
+| `maxEvaluations` / `max_evaluations` | Stop once the objective has been evaluated this many times. A whole number of at least 1. | no limit |
+
+`budget` limits the answer's cost; `timeBudgetMs` and `maxEvaluations` limit the
+run (OPT-11). Both run limits are checked between iterations, so a run can
+overshoot by up to one iteration's evaluations. The problem has one variable per
+node, so it is as large as the label: 10,000 nodes is a 10,000-variable solve.
 
 How the constraints act on the search is chosen with `constraintHandling`
 (next section). Under the default for a single-objective solve, `penalty`, they
@@ -298,6 +305,7 @@ Every row reports how good the answer is, not only the answer (OPT-09):
 | `gap` | `objective - bestKnown`, in the objective's units; negative means the answer beat it. `null` unless you pass `bestKnown`, because no solver here can prove a bound. |
 | `iterations` / `max_iterations` | Iterations run, and the cap you set. |
 | `total_time_ms` | Wall-clock time of the solve alone, in milliseconds. |
+| `evaluations` / `stopped_by` | Objective evaluations made, and why the run ended: `iterations` (it ran them all), `time_budget` or `evaluation_budget`. |
 | `algorithm`, `history` | The solver, and its best fitness per iteration. Multi-objective solves return `front_size` in place of `history`. |
 
 `bestKnown` (or `best_known`) must be a finite number, and applies to
