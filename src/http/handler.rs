@@ -356,7 +356,7 @@ pub async fn export_handler(
             Ok(b) => (b, "application/vnd.apache.parquet", "result.parquet"),
             Err(e) => {
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    export_error_status(&e),
                     Json(json!({ "error": e.to_string() })),
                 )
                     .into_response()
@@ -367,7 +367,7 @@ pub async fn export_handler(
             Ok(b) => (b, "application/vnd.apache.arrow.stream", "result.arrows"),
             Err(e) => {
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    export_error_status(&e),
                     Json(json!({ "error": e.to_string() })),
                 )
                     .into_response()
@@ -517,11 +517,27 @@ pub async fn import_parquet_handler(
             Json(json!({ "error": e.to_string(), "stats": null })),
         )
             .into_response(),
+        // A build without the `arrow` feature (the Edge build, #1623).
+        Err(e @ crate::export::ExportError::NotInThisBuild(_)) => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({ "error": e.to_string(), "stats": null })),
+        )
+            .into_response(),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
+    }
+}
+
+/// The status for an export that could not be produced: 501 when this build
+/// has no code for the format (built without the `arrow` feature, #1623), 500
+/// for a failure in the encoder itself.
+fn export_error_status(e: &crate::export::ExportError) -> StatusCode {
+    match e {
+        crate::export::ExportError::NotInThisBuild(_) => StatusCode::NOT_IMPLEMENTED,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
 

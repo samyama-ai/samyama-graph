@@ -29,7 +29,9 @@ sha2 = "0.10"
 
 # Core graph database (for EmbeddedClient)
 # No default features: a library must not bring the server's allocator (ADR-038).
-samyama = { path = "../..", version = "1.16.0", default-features = false }
+# `arrow`: `EmbeddedClient::export` encodes Arrow IPC and Parquet with the
+# engine's own encoders, which the engine compiles only with that feature (#1623).
+samyama = { path = "../..", version = "1.16.0", default-features = false, features = ["arrow"] }
 
 # Graph algorithms (for AlgorithmClient)
 samyama-graph-algorithms = { path = "../samyama-graph-algorithms", version = "1.16.0" }

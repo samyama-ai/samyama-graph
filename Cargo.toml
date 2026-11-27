@@ -105,8 +105,8 @@ argon2 = "0.5"
 # export needs: `ipc` for the streaming format the HTTP endpoint writes, and
 # `prettyprint` left off deliberately (it pulls comfy-table for a debug
 # rendering nothing here uses).
-arrow = { version = "60", default-features = false, features = ["ipc"] }
-parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd"] }
+arrow = { version = "60", default-features = false, features = ["ipc"], optional = true }
+parquet = { version = "60", default-features = false, features = ["arrow", "snap", "zstd"], optional = true }
 # RFC 4180 parsing for `/api/import/csv`, which used to split on the delimiter (#1105).
 csv = "1.4"
 # The same parser, fed chunk by chunk, so a CSV upload is parsed as it arrives (#336).
@@ -187,11 +187,20 @@ probe = "0.5.2"
 # mimalloc is the server's and the benchmarks' global allocator (ADR-038). A
 # library never installs one: samyama-sdk depends on this crate without default
 # features, so embedded users keep their host's allocator.
-default = ["mimalloc", "otel"]
+default = ["mimalloc", "otel", "arrow"]
 mimalloc = ["dep:mimalloc"]
 # OpenTelemetry trace export (#2077). In the server's default build; a library
 # user (samyama-sdk builds without default features) does not compile it.
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
+# Arrow and Parquet (HW-05, #1623): result export as Arrow IPC and Parquet,
+# `POST /api/import/parquet` and `LOAD PARQUET`. In the default build. Left out,
+# those refuse by name and the binary drops the arrow and parquet crates, the
+# largest part of it an Edge build does not need.
+arrow = ["dep:arrow", "dep:parquet"]
+# The Edge tier's build (docs/BINARY-SIZE.md): the default build without
+# `arrow` and `otel`. Build it as
+# `cargo build --release --no-default-features --features edge`.
+edge = ["mimalloc"]
 # Enable in-engine GPU acceleration. Off by default so users who do not want the
 # large wgpu/cudarc dep tree never compile it. See docs/ADR/ADR-025.
 gpu = ["dep:samyama-gpu", "samyama-graph-algorithms/gpu"]

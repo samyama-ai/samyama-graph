@@ -25055,6 +25055,7 @@ impl PhysicalOperator for LoadCsvOperator {
 /// This adds the clause, not a speedup: ingest is bound by the single-core
 /// `&mut GraphStore` write path (#503), not by parsing, so a Parquet source loads
 /// at the same rate a CSV one does.
+#[cfg(feature = "arrow")]
 pub struct LoadParquetOperator {
     input: OperatorBox,
     clause: crate::query::ast::LoadParquetClause,
@@ -25068,6 +25069,7 @@ pub struct LoadParquetOperator {
     exhausted: bool,
 }
 
+#[cfg(feature = "arrow")]
 impl LoadParquetOperator {
     pub fn new(input: OperatorBox, clause: crate::query::ast::LoadParquetClause) -> Self {
         Self {
@@ -25137,6 +25139,7 @@ impl LoadParquetOperator {
     }
 }
 
+#[cfg(feature = "arrow")]
 impl PhysicalOperator for LoadParquetOperator {
     fn next_mut(
         &mut self,
@@ -25225,6 +25228,54 @@ impl PhysicalOperator for LoadParquetOperator {
                 format_expression(&self.clause.source),
                 self.clause.variable
             ),
+            children: vec![self.input.describe()],
+        }
+    }
+}
+
+/// `LOAD PARQUET` in a build without the `arrow` feature (HW-05, #1623): the
+/// clause still parses and plans, and running it is refused by name, so a query
+/// written for the full build fails loudly on an Edge build instead of binding
+/// nothing.
+#[cfg(not(feature = "arrow"))]
+pub struct LoadParquetOperator {
+    input: OperatorBox,
+    clause: crate::query::ast::LoadParquetClause,
+}
+
+#[cfg(not(feature = "arrow"))]
+impl LoadParquetOperator {
+    pub fn new(input: OperatorBox, clause: crate::query::ast::LoadParquetClause) -> Self {
+        Self { input, clause }
+    }
+}
+
+#[cfg(not(feature = "arrow"))]
+impl PhysicalOperator for LoadParquetOperator {
+    fn next_mut(&mut self, store: &mut GraphStore, _tenant_id: &str) -> ExecutionResult<Option<Record>> {
+        self.next(store)
+    }
+
+    fn children_mut(&mut self) -> Vec<&mut OperatorBox> {
+        vec![&mut self.input]
+    }
+
+    fn next(&mut self, _store: &GraphStore) -> ExecutionResult<Option<Record>> {
+        Err(ExecutionError::RuntimeError(
+            "LOAD PARQUET: this build has no Parquet support (built without the `arrow` \
+             feature, as the Edge build is); use LOAD CSV, or a build with default features"
+                .to_string(),
+        ))
+    }
+
+    fn reset(&mut self) {
+        self.input.reset();
+    }
+
+    fn describe(&self) -> OperatorDescription {
+        OperatorDescription {
+            name: "LoadParquet".to_string(),
+            details: format!("{} AS {}", format_expression(&self.clause.source), self.clause.variable),
             children: vec![self.input.describe()],
         }
     }

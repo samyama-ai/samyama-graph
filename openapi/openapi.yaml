@@ -594,6 +594,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '501':
+          description: >
+            A build without the `arrow` feature, as the Edge build is (HW-05):
+            there is no Parquet reader. Nothing is created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /api/query/export:
     post:
@@ -670,6 +678,14 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: snapshot_hash was given and the graph's content hash differs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '501':
+          description: >
+            `parquet` or `arrow` asked of a build without the `arrow` feature,
+            as the Edge build is (HW-05). CSV still exports.
           content:
             application/json:
               schema:
