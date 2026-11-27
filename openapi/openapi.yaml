@@ -418,7 +418,7 @@ paths:
                                 enum: [positional, config]
                               type:
                                 type: string
-                                enum: [integer, float, boolean, string, node_id, list]
+                                enum: [integer, float, boolean, string, node_id, list, map]
                               required:
                                 type: boolean
                               default:

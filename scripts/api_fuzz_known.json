@@ -71,6 +71,9 @@
   "POST /api/verify": [
     "ST202"
   ],
+  "POST /optimize/lp": [
+    "ST202"
+  ],
   "POST /optimize/solve": [
     "ST202"
   ],
