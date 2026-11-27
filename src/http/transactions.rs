@@ -204,7 +204,7 @@ pub async fn commit_handler(
                 // client asking again is one whose first reply was lost.
                 let refused = sessions.refused(&id);
                 drop(sessions);
-                let guard = state.store.read().await;
+                let guard = crate::store_lock::read(&state.store).await;
                 return committed_reply(&guard, &id).unwrap_or(refused);
             }
             Some(txn) => (Instant::now() > txn.deadline).then_some(txn.limit),
@@ -307,7 +307,7 @@ pub async fn rollback_handler(State(state): State<AppState>, Path(id): Path<Stri
                 // such transaction" would hide that it committed (#2176).
                 let refused = sessions.refused(&id);
                 drop(sessions);
-                let guard = state.store.read().await;
+                let guard = crate::store_lock::read(&state.store).await;
                 if committed_reply(&guard, &id).is_some() {
                     return error(
                         StatusCode::CONFLICT,

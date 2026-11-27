@@ -605,7 +605,7 @@ impl CommandHandler {
             // read lock: without queueing behind writers, and without being
             // refused when writes are (#2176).
             if let Some((key, fp)) = &idem {
-                let seen = store.read().await.idempotency().lookup(
+                let seen = crate::store_lock::read(&store).await.idempotency().lookup(
                     &graph_name,
                     key,
                     fp,

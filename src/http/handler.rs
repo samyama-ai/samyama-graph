@@ -1517,7 +1517,7 @@ async fn keyed_write(
         &payload.params,
     );
     let ttl = idem::ttl();
-    let seen = state.store.read().await.idempotency().lookup(
+    let seen = crate::store_lock::read(&state.store).await.idempotency().lookup(
         &payload.graph,
         key,
         &fingerprint,
@@ -1608,7 +1608,7 @@ pub async fn request_status_handler(
         }
     }
     let ttl = idem::ttl();
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
     match store.idempotency().get(&graph, &key, idem::now_ms(), ttl) {
         Some(r) => Json(json!({
             "key": key,
