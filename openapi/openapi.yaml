@@ -399,7 +399,7 @@ paths:
                           type: string
                           enum: [centrality, community, path, link_prediction, similarity,
                                  structure, graph_metric, temporal, embedding, sampling,
-                                 optimization, dataset]
+                                 optimization, dataset, retrieval]
                         description:
                           type: string
                           description: What the algorithm computes, in one sentence.

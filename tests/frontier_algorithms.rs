@@ -54,6 +54,12 @@ fn graph() -> (GraphStore, Vec<i64>) {
     for (a, b) in [(0, 1), (1, 2), (2, 3), (3, 0), (3, 4), (4, 3)] {
         s.create_edge(ids[a], ids[b], "L").unwrap();
     }
+    // A vector per node, for `algo.graphRag`'s seeds.
+    s.create_vector_index("P", "emb", 2, samyama::vector::DistanceMetric::Cosine).unwrap();
+    for (i, id) in ids.iter().enumerate() {
+        s.set_node_property("default", *id, "emb", samyama::graph::PropertyValue::Vector(vec![1.0, i as f32]))
+            .unwrap();
+    }
     let raw = ids.iter().map(|id| id.as_u64() as i64).collect();
     (s, raw)
 }
@@ -66,6 +72,9 @@ fn every_listed_algorithm_runs_from_cypher() {
         match name {
             "algo.shortestPath" | "algo.allShortestPaths" => format!("CALL {name}({a}, {b})"),
             "algo.negativeSampling" => format!("CALL {name}({{strategy: 'khop', k: 2, count: 3}})"),
+            "algo.graphRag" | "algo.retrieve" => {
+                format!("CALL {name}({{query: [1.0, 0.0], label: 'P', property: 'emb'}})")
+            }
             _ => format!("CALL {name}()"),
         }
     };

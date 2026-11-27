@@ -33,6 +33,9 @@ pub enum AlgorithmCategory {
     Optimization,
     /// Prepares a training dataset: leakage-safe splits and their check (ML-05).
     Dataset,
+    /// Retrieval for an AI caller: vector search, then the graph around the
+    /// matches (AI-07).
+    Retrieval,
 }
 
 /// One callable algorithm.
@@ -211,6 +214,8 @@ pub const ALGORITHM_CATALOG: &[AlgorithmEntry] = &[
         // The path and its totals, then the result envelope (OPT-09, #2265).
         &["path", "cost", "resource", "objective", "feasible", "gap", "iterations", "total_time_ms"],
     ),
+    // GraphRAG retrieval (AI-07): seeds by vector search, then the graph.
+    read("algo.graphRag", &["algo.retrieve"], Retrieval, &["node", "score", "hops", "seed", "community", "path"]),
 ];
 
 /// How an argument is passed: by position, or as a key of the config map.
@@ -530,6 +535,23 @@ pub const PARAMETERS: &[(&str, &[Param])] = &[
         LABEL,
         EDGE_TYPE,
     ]),
+    ("algo.graphRag", &[
+        Param { name: "query", kind: ParamKind::Config, ty: T::List, required: true, default: None, also: None, bound: None },
+        Param { name: "label", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
+        Param { name: "property", kind: ParamKind::Config, ty: T::String, required: true, default: None, also: None, bound: None },
+        key("strategy", T::String, D::String("local")),
+        key("k", T::Integer, D::Integer(5)),
+        key("hops", T::Integer, D::Integer(2)),
+        key("decay", T::Float, D::Float(0.5)),
+        key("communities", T::Integer, D::Integer(3)),
+        key("limit", T::Integer, D::Integer(50)),
+        EDGE_TYPE,
+        opt("timeProperty", T::String),
+        opt("since", T::Float),
+        opt("until", T::Float),
+        opt("hierarchy", T::String),
+        opt("under", T::NodeId),
+    ]),
     // Neighbour sampling (ML-02, #1717). `seeds` is one node id or a list.
     // `batchSize` has no fixed default: left out, every seed is one batch.
     ("algo.sample.neighbors", &[
@@ -669,6 +691,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("algo.or.constrainedShortestPath", "The cheapest source-to-target path whose resource property sums to at most maxResource; cost is the hop count without a cost property."),
     ("algo.split", "Assigns each node to train, validation or test so that related nodes (a component, a community, a source, or a time window) land in the same split."),
     ("algo.splitLeakage", "The pairs of related nodes that a split put in different splits, each with the reason they count as a leak."),
+    ("algo.graphRag", "GraphRAG retrieval in one call: a vector search for the k nodes nearest the question, then the graph around them (local hops, their Louvain communities, or both)."),
     ("algo.sample.neighbors", "Samples up to fanout neighbours per node at each hop out from the seed nodes, in minibatches, as a GNN trainer draws them; seeded, so the same seed returns the same rows."),
     ("algo.sample.forestFire", "A sample of size nodes burnt outward from the seed nodes as a forest fire, each burning node igniting a geometric number of its unburnt neighbours; seeded."),
     ("algo.sample.snowball", "The seed nodes and their neighbourhood, wave by wave for hops waves, taking up to perNode new neighbours of each node."),

@@ -10,6 +10,7 @@ mod gpu_parity_tests;
 pub mod pagerank;
 pub mod incremental;
 pub mod frontier;
+pub mod graphrag;
 pub mod progress;
 pub mod community;
 pub mod pathfinding;
