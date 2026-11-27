@@ -36,7 +36,7 @@ Three of the techniques below are already implemented in some form. This ADR is 
 | Capability | Where | State |
 |---|---|---|
 | Predicate pushdown (inline, AND-chain decomposition during `plan_match`) | `src/query/executor/planner.rs` (QP-01, `can_pushdown_match`) | Shipped, on by default |
-| Predicate pushdown below `Expand` (logical rewrite) | `src/query/executor/logical_optimizer.rs` (`test_predicate_pushdown_below_expand`) | Shipped, but reached only via `plan_enumerator`, which is **gated behind `SAMYAMA_GRAPH_NATIVE=true` and off by default** (`src/query/mod.rs:199`) |
+| Predicate pushdown below `Expand` (logical rewrite) | `src/query/executor/logical_optimizer.rs` (`test_predicate_pushdown_below_expand`) | Shipped, but reached only via `plan_enumerator`, which is on by default since #1729 (`graph_native_enabled()` in `src/query/mod.rs`; `SAMYAMA_GRAPH_NATIVE=false` turns it off) |
 | Cardinality / selectivity estimation per plan node | `src/query/executor/cost_model.rs` + `GraphCatalog` (`estimate_label_scan`, `estimate_expand_out`, `estimate_expand_in`) | Shipped, same gating |
 | Early `LIMIT` propagation into scans | `src/query/executor/planner.rs` (QP-04, `try_push_limit`, `NodeScanOperator::with_early_limit`) | Shipped, on by default |
 | Plan visibility | `EXPLAIN` / `PROFILE` (ADR-014) | Shipped |
@@ -55,7 +55,7 @@ Replace `Sort → Limit` with a bounded Top-N (heap of size `skip + limit`) when
 
 ### 2. Promote the cost-based path toward default-on
 
-Decide what `SAMYAMA_GRAPH_NATIVE` needs before it can flip to on-by-default: benchmark coverage, regression thresholds, and a documented fallback. Until it flips, the pushdown-below-expand and cost-model work described above benefits nobody in a default deployment. If flipping it is not the intent, say so explicitly — a permanently-off optimizer path is a maintenance cost with no user.
+**Done (#1729, 2026-11-19): the cost-based path is on by default.** `SAMYAMA_GRAPH_NATIVE=false` (or `0`) is the documented fallback to the rule-based planner, read per query. The owner approved the flip; the planner and Cypher-semantics suites (90 test binaries) pass with it on, and the one test that read rejected candidate plans as if they ran now reads the chosen plan only. Benchmark coverage and regression thresholds stay with CH-REGRESS. Originally: Decide what `SAMYAMA_GRAPH_NATIVE` needs before it can flip to on-by-default: benchmark coverage, regression thresholds, and a documented fallback. Until it flips, the pushdown-below-expand and cost-model work described above benefits nobody in a default deployment. If flipping it is not the intent, say so explicitly — a permanently-off optimizer path is a maintenance cost with no user.
 
 ### 3. Extend pushdown coverage
 
@@ -72,7 +72,7 @@ The cost model uses fixed default selectivities in several branches (`0.5` for a
 * [ ] Inventory which filter kinds are pushable on each path (default vs graph-native)
 * [ ] Close the post-`WITH` `WHERE` pushdown gap
 * [ ] Replace default selectivities with degree statistics where they drive multi-hop plans
-* [ ] Define the exit criteria for `SAMYAMA_GRAPH_NATIVE` defaulting to on
+* [x] Define the exit criteria for `SAMYAMA_GRAPH_NATIVE` defaulting to on (on by default since #1729; `=false` falls back)
 * [ ] Surface pushed predicates and Top-N in `EXPLAIN` / `PROFILE`
 * [ ] Add correctness and performance tests
 
@@ -81,7 +81,7 @@ The cost model uses fixed default selectivities in several branches (`0.5` for a
 Samyama configures the query path through environment variables and `ServerConfig` (`src/main.rs`), not a YAML file. Any new switch should follow that convention:
 
 ```sh
-SAMYAMA_GRAPH_NATIVE=true      # existing: enables the cost-based planner path
+SAMYAMA_GRAPH_NATIVE=false     # the cost-based planner is the default (#1729); this falls back to the rule-based one
 SAMYAMA_QUERY_TIMEOUT=30       # existing
 ```
 

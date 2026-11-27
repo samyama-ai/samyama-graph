@@ -12,15 +12,70 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-#[tokio::main]
-async fn main() {
+/// `samyama healthcheck [--url U] [--timeout S] [--token T]`: exit 0 when the
+/// server at `U` is healthy, 1 when it is not, 64 on arguments it cannot use
+/// (#2202). One line on stdout says why. See `samyama::healthcheck`.
+async fn cmd_healthcheck(argv: &[String]) -> i32 {
+    use samyama::healthcheck::{check, parse_args, EXIT_USAGE};
+    let args = match parse_args(&argv[2..], |k| std::env::var(k).ok()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("samyama healthcheck: {e}
+usage: samyama healthcheck [--url <url>] [--timeout <seconds>] [--token <token>]");
+            return EXIT_USAGE;
+        }
+    };
+    let (code, why) = check(&args).await;
+    println!("{why}");
+    code
+}
+
+fn main() {
     let argv: Vec<String> = std::env::args().collect();
+    // `--sandbox` (#2218) confines the process before the async runtime
+    // exists: Landlock binds the calling thread and the threads created after
+    // it, so the Tokio workers have to be created after it, not before. That
+    // is why this is not `#[tokio::main]`. Server mode only: a subcommand is
+    // a bare word, and the server's arguments are all flags.
+    let server_mode = argv.get(1).is_none_or(|a| a.starts_with("--"));
+    let sandboxed = if server_mode && argv.iter().any(|a| a == "--sandbox") {
+        let env = |k: &str| std::env::var(k).ok();
+        let outcome = match samyama::sandbox::incompatible(env) {
+            Some(why) => Err(why),
+            None => samyama::sandbox::plan(&argv, env).and_then(|p| samyama::sandbox::apply(&p)),
+        };
+        match outcome {
+            Ok(applied) => Some(applied),
+            Err(e) => {
+                eprintln!("FATAL: {e}");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        None
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build the async runtime")
+        .block_on(async_main(argv, sandboxed));
+}
+
+async fn async_main(argv: Vec<String>, sandboxed: Option<samyama::sandbox::Applied>) {
     match samyama::logging::LogFormat::from_args_and_env(&argv) {
         Ok(format) => samyama::logging::init(format),
         Err(e) => {
             eprintln!("{e}");
             std::process::exit(2);
         }
+    }
+    // Reported through the logger once it exists, so it is JSON in JSON mode.
+    if let Some(a) = &sandboxed {
+        tracing::info!(
+            landlock = a.landlock,
+            denied_syscalls = a.denied_syscalls,
+            "sandbox in force: filesystem limited to the configured paths, programs cannot be started"
+        );
     }
 
     // Subcommands are handled before the demo and the server, so `verify` is a
@@ -39,6 +94,7 @@ async fn main() {
         Some("snapshot-read-only") => std::process::exit(cmd_snapshot_read_only(&argv)),
         Some("results-build") => std::process::exit(cmd_results_build(&argv)),
         Some("convert") => std::process::exit(cmd_convert(&argv)),
+        Some("healthcheck") => std::process::exit(cmd_healthcheck(&argv).await),
         _ => {}
     }
 
@@ -2641,7 +2697,7 @@ async fn start_server() {
         let indexer_tenants = Arc::clone(&shared_tenants);
         tokio::spawn(async move {
             let (vector_index, property_index) = {
-                let guard = indexer_store.read().await;
+                let guard = samyama::store_lock::read(&indexer_store).await;
                 (Arc::clone(&guard.vector_index), Arc::clone(&guard.property_index))
             };
             samyama::graph::GraphStore::start_background_indexer_with_store(

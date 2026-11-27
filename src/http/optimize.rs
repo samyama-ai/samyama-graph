@@ -889,6 +889,24 @@ async fn start_solve(
             format!("unknown algorithm: {}", req.algorithm),
         ))?;
     let budget = req.budget().map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    // Only the single-objective benchmarks are defined at any size. The
+    // others -- ZDT, DTLZ and `uc2_dosing` -- are solved at the catalogue's
+    // `dim` whatever was asked, so a request for 10000 variables ran 6 and
+    // answered 200 (OPT-11, #1798). Refused by name instead; a problem that
+    // grows with the graph is `algo.or.solve`, one variable per node.
+    if let Some(asked) = req.dim {
+        if bench.ty != "single" && asked != bench.dim {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "benchmark {} has a fixed size of {} variables; `dim` {asked} cannot \
+                     change it. Leave `dim` out, or use a single-objective benchmark \
+                     or `algo.or.solve` for a problem of another size",
+                    bench.id, bench.dim
+                ),
+            ));
+        }
+    }
     let constraint_handling = match req.constraint_handling.as_deref() {
         None => None,
         Some(name) => Some(ConstraintHandling::from_name(name).ok_or_else(|| {

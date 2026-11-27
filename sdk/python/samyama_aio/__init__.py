@@ -31,8 +31,8 @@ is the thing being ruled out, so checking the shape would check the wrong half.
 Cancellation
 ------------
 
-Cancelling the task that awaits ``query``, ``query_readonly``, ``query_stream``
-or ``nlq`` -- directly, or through ``asyncio.timeout`` / ``wait_for`` -- stops
+Cancelling the task that awaits ``query``, ``query_readonly``, ``query_stream``,
+``query_arrow``, ``export`` or ``nlq`` -- directly, or through ``asyncio.timeout`` / ``wait_for`` -- stops
 the request (API-06, #1741). Each of those calls passes a
 :class:`samyama.CancelToken` to the blocking call and cancels it when the task
 is cancelled; the worker thread sees it within about 50 ms, drops the request
@@ -161,6 +161,18 @@ class AsyncSamyamaClient:
 
     async def query_readonly(self, cypher: str, graph: str = "default") -> Any:
         return await _cancellable(self._client.query_readonly, cypher, graph)
+
+    async def query_arrow(self, cypher: str, graph: str = "default") -> Any:
+        """A read query's result as a ``pyarrow.Table`` (#2267); see
+        ``SamyamaClient.query_arrow``."""
+        return await _cancellable(self._client.query_arrow, cypher, graph)
+
+    async def export(
+        self, cypher: str, graph: str = "default", format: str = "arrow"
+    ) -> bytes:
+        """A read query's result as Arrow IPC or Parquet bytes (#2267); see
+        ``SamyamaClient.export``."""
+        return await _cancellable(self._client.export, cypher, graph, format)
 
     async def query_stream(self, cypher: str, graph: str = "default") -> "AsyncQueryStream":
         """Stream a read query's rows (#1632); see ``SamyamaClient.query_stream``.

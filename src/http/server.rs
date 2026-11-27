@@ -21,7 +21,7 @@ use super::handler::{
     query_handler, export_handler, import_parquet_handler, status_handler, changes_handler, memory_handler, metrics_handler, slowlog_handler, slowlog_reset_handler, schema_handler, sample_handler,
     import_csv_handler, import_json_handler,
     export_snapshot_handler, restore_snapshot_handler,
-    set_enrich_policy_handler, enrich_handler, verify_handler,
+    set_enrich_policy_handler, enrich_handler, verify_handler, retract_handler,
     nlq_handler, algorithm_catalog_handler,
 };
 use super::vector::{list_indexes_handler, create_index_handler, search_handler};
@@ -202,6 +202,7 @@ pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::a
     if path.starts_with("/api/tenants")
         || path == "/api/snapshot/import"
         || path == "/api/enrich/policy"
+        || path == "/api/retract"
         || path == "/api/slowlog"
     {
         return Role::Admin;
@@ -209,11 +210,17 @@ pub(crate) fn required_role(method: &axum::http::Method, path: &str) -> crate::a
     if *method == Method::POST
         && (path.starts_with("/api/import/")
             || path == "/api/enrich"
+            || path == "/api/verify"
             || path == "/api/vector/indexes")
     {
         return Role::Write;
     }
     if *method == Method::PUT && path == "/api/structure" {
+        return Role::Write;
+    }
+    // Defining or dropping a named subgraph changes the tenant graph's
+    // catalog (#337).
+    if (*method == Method::POST || *method == Method::DELETE) && path.starts_with("/api/subgraphs") {
         return Role::Write;
     }
     Role::Read
@@ -397,6 +404,21 @@ pub struct AuditedQuery {
     pub query_hash: String,
 }
 
+/// Entity-level details supplied by a handler that can describe an agent
+/// mutation without teaching the outer audit middleware to parse bodies.
+#[derive(Clone, Debug)]
+pub struct AuditedChange {
+    pub statement: String,
+    pub node_ids: Vec<u64>,
+    pub edge_ids: Vec<u64>,
+    pub before: serde_json::Value,
+    pub after: serde_json::Value,
+}
+
+/// Request marker present only when the server has an audit log configured.
+#[derive(Clone, Copy, Debug)]
+pub struct AuditEnabled;
+
 /// SHA-256 of a statement, hex. Enough to tell two writes apart or to match one
 /// against a known query, without the text, which carries the data. One
 /// function for both protocols, so the same statement hashes the same on each.
@@ -445,8 +467,9 @@ impl AuditLog {
         path: &str,
         status: u16,
         query: Option<&AuditedQuery>,
+        change: Option<&AuditedChange>,
     ) {
-        let entry = serde_json::json!({
+        let mut entry = serde_json::json!({
             "at": chrono::Utc::now().to_rfc3339(),
             "protocol": "http",
             "subject": subject,
@@ -457,6 +480,15 @@ impl AuditLog {
             "is_write": query.map(|q| q.is_write),
             "query_hash": query.map(|q| q.query_hash.as_str()),
         });
+        if let Some(change) = change {
+            // Details are present only for handlers that can supply an
+            // entity-level diff. Ordinary Cypher literals remain out of logs.
+            entry["statement"] = serde_json::json!(&change.statement);
+            entry["node_ids"] = serde_json::json!(&change.node_ids);
+            entry["edge_ids"] = serde_json::json!(&change.edge_ids);
+            entry["before"] = change.before.clone();
+            entry["after"] = change.after.clone();
+        }
         self.append(&format!("{entry}\n"));
     }
 
@@ -525,6 +557,8 @@ async fn audit(
     }
     let path = req.uri().path().to_string();
 
+    let mut req = req;
+    req.extensions_mut().insert(AuditEnabled);
     let res = next.run(req).await;
     // Read off the *response*: this layer is outermost, so the credential layer
     // has not run yet when the request passes through it on the way in.
@@ -536,7 +570,8 @@ async fn audit(
         .map(|s| s.0.name.clone())
         .unwrap_or_else(|| "unauthenticated".to_string());
     let query = res.extensions().get::<AuditedQuery>();
-    log.record(&subject, method.as_str(), &path, res.status().as_u16(), query);
+    let change = res.extensions().get::<AuditedChange>();
+    log.record(&subject, method.as_str(), &path, res.status().as_u16(), query, change);
     res
 }
 
@@ -777,9 +812,7 @@ impl AppState {
         use tracing::Instrument;
         // Stages of the request's trace (#2077): the wait for the writer's
         // lock is where contention shows.
-        let mut store = self
-            .store
-            .write()
+        let mut store = crate::store_lock::write(&self.store)
             .instrument(tracing::debug_span!("samyama.lock.acquire", mode = "write"))
             .await;
         if let Some(pm) = &self.persistence {
@@ -1072,13 +1105,25 @@ impl HttpServer {
             .route("/api/enrich/policy", post(set_enrich_policy_handler))
             .route("/api/enrich", post(enrich_handler))
             .route("/api/verify", post(verify_handler))
+            .route("/api/retract", post(retract_handler))
             .route("/api/nlq", post(nlq_handler))
             .route("/api/status", get(status_handler))
+            .route("/api/sparql", post(super::sparql::sparql_handler))
             .route("/api/changes", get(changes_handler))
             .route("/api/memory", get(memory_handler))
             .route("/metrics", get(metrics_handler))
             .route("/api/slowlog", get(slowlog_handler).delete(slowlog_reset_handler))
             .route("/api/schema", get(schema_handler))
+            .route(
+                "/api/subgraphs",
+                get(super::subgraphs::list_subgraphs_handler)
+                    .post(super::subgraphs::create_subgraph_handler),
+            )
+            .route(
+                "/api/subgraphs/:name",
+                get(super::subgraphs::get_subgraph_handler)
+                    .delete(super::subgraphs::delete_subgraph_handler),
+            )
             .route("/api/algorithms/catalog", get(algorithm_catalog_handler))
             .route("/api/sample", post(sample_handler))
             .route(
@@ -1293,7 +1338,7 @@ mod tests {
 
         // Write through the state
         {
-            let mut store = state.store.write().await;
+            let mut store = crate::store_lock::write(&state.store).await;
             let n = store.create_node("Test");
             store.get_node_mut(n).unwrap().set_property("key", "value");
         }
@@ -1301,7 +1346,7 @@ mod tests {
         // Read through a clone
         let cloned = state.clone();
         {
-            let store = cloned.store.read().await;
+            let store = crate::store_lock::read(&cloned.store).await;
             assert_eq!(store.node_count(), 1);
         }
     }

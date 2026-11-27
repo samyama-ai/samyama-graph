@@ -1,0 +1,58 @@
+# The Samyama snap (#2203): amd64 + arm64, core24, strict confinement.
+#
+#   sudo snap install samyama
+#   sudo snap set samyama args="--host 0.0.0.0 --auth-file /var/snap/samyama/common/auth.toml"
+#   sudo snap restart samyama
+#
+# The service is `snap.samyama.daemon`; its data lives in $SNAP_COMMON/data
+# (/var/snap/samyama/common/data), which every revision shares and a refresh
+# never copies. $SNAP_DATA is copied in full on each refresh so `snap revert`
+# can restore it, which for a 200 GB store would be 200 GB of disk per refresh.
+# `samyama` is the CLI (`samyama doctor`, `samyama status`, ...).
+#
+# Built and smoke-tested by .github/workflows/snap.yml; tag-release.yml
+# publishes it.
+name: samyama
+base: core24
+adopt-info: samyama
+summary: Samyama graph database
+description: |
+  OpenCypher, vector search, graph algorithms and natural-language query in one
+  binary, speaking RESP on 6379 and HTTP on 8080. The server runs as the
+  `samyama.daemon` service with its data under $SNAP_COMMON; the `samyama`
+  command is the CLI. By default it listens on 127.0.0.1 only.
+grade: stable
+confinement: strict
+
+platforms:
+  amd64:
+  arm64:
+
+apps:
+  daemon:
+    command: bin/samyama-daemon
+    daemon: simple
+    restart-condition: on-failure
+    plugs: [network, network-bind, home, removable-media, hardware-observe, opengl]
+  samyama:
+    command: bin/samyama-cli
+    environment:
+      # `samyama doctor` checks the directory the daemon writes.
+      SAMYAMA_DATA: $SNAP_COMMON/data
+    plugs: [network, home, removable-media]
+
+parts:
+  samyama:
+    plugin: rust
+    source: .
+    rust-channel: stable
+    rust-path: [".", "crates/samyama-cli"]
+    build-packages: [build-essential, cmake, clang, libclang-dev, pkg-config, libssl-dev]
+    override-pull: |
+      craftctl default
+      craftctl set version="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+  wrappers:
+    plugin: dump
+    source: snap/local
+    organize:
+      samyama-daemon.sh: bin/samyama-daemon

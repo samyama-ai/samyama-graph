@@ -296,6 +296,47 @@ fn parse_list(answer: &str) -> Vec<String> {
 pub struct EnrichmentWorker {
     client: NLQClient,
     model: String,
+    /// What the calls made so far cost, for the request's reply (#1732).
+    spent: std::sync::Mutex<Spent>,
+}
+
+/// The model calls an enrichment made: how many, their tokens and their time
+/// (#1732, AI-15).
+///
+/// A token total is `None` when any call left its count unknown -- a provider
+/// that reports none, or a call that failed after the model may have answered
+/// -- because a partial sum would read as an exact, smaller number.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spent {
+    pub calls: u64,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub latency: std::time::Duration,
+}
+
+impl Default for Spent {
+    fn default() -> Self {
+        Spent { calls: 0, prompt_tokens: Some(0), completion_tokens: Some(0), latency: std::time::Duration::ZERO }
+    }
+}
+
+impl Spent {
+    fn add(&mut self, usage: Option<&crate::nlq::client::TokenUsage>, latency: std::time::Duration) {
+        self.calls += 1;
+        self.latency += latency;
+        let sum = |acc: Option<u64>, n: Option<u64>| acc.zip(n).map(|(a, b)| a + b);
+        self.prompt_tokens = sum(self.prompt_tokens, usage.and_then(|u| u.prompt_tokens));
+        self.completion_tokens = sum(self.completion_tokens, usage.and_then(|u| u.completion_tokens));
+    }
+
+    /// The totals as the token counts a provider reports.
+    pub fn usage(&self) -> crate::nlq::client::TokenUsage {
+        crate::nlq::client::TokenUsage {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            total_tokens: self.prompt_tokens.zip(self.completion_tokens).map(|(p, c)| p + c),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -310,7 +351,26 @@ struct RelationshipEnrichmentOutput {
 
 impl EnrichmentWorker {
     pub fn new(client: NLQClient, model: String) -> Self {
-        Self { client, model }
+        Self { client, model, spent: std::sync::Mutex::new(Spent::default()) }
+    }
+
+    /// The model this worker calls.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// What this worker's calls have cost so far.
+    pub fn spent(&self) -> Spent {
+        *self.spent.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Records one call: its usage when it answered, unknown when it failed.
+    fn record<T>(&self, call: &Result<crate::agent::signature::SignatureOutcome<T>, impl std::fmt::Debug>, started: std::time::Instant) {
+        let mut spent = self.spent.lock().unwrap_or_else(|e| e.into_inner());
+        match call {
+            Ok(g) => spent.add(Some(&g.usage), g.latency),
+            Err(_) => spent.add(None, started.elapsed()),
+        }
     }
 
     /// Fill one gap from the LLM. Returns `None` when the model declines (`UNKNOWN`) or returns
@@ -328,14 +388,16 @@ impl EnrichmentWorker {
                 demos: vec![],
                 invariants: vec![],
             };
-            let generated = SignatureRunner::default()
+            let started = std::time::Instant::now();
+            let call = SignatureRunner::default()
                 .invoke_without_store::<_, RelationshipEnrichmentOutput>(
                     &self.client,
                     &signature,
                     &serde_json::json!({"prompt": prompt}),
                 )
-                .await
-                .ok()?;
+                .await;
+            self.record(&call, started);
+            let generated = call.ok()?;
             let targets: Vec<String> = generated
                 .output
                 .targets
@@ -368,14 +430,16 @@ impl EnrichmentWorker {
             demos: vec![],
             invariants: vec![],
         };
-        let generated = SignatureRunner::default()
+        let started = std::time::Instant::now();
+        let call = SignatureRunner::default()
             .invoke_without_store::<_, ScalarEnrichmentOutput>(
                 &self.client,
                 &signature,
                 &serde_json::json!({"prompt": prompt}),
             )
-            .await
-            .ok()?;
+            .await;
+        self.record(&call, started);
+        let generated = call.ok()?;
         let value = generated.output.value.trim();
         if value.is_empty() || value.eq_ignore_ascii_case("UNKNOWN") {
             return None; // honest-decline
@@ -597,7 +661,11 @@ pub fn retract(store: &mut GraphStore, node_ids: &[NodeId]) -> RetractReport {
         let edges: Vec<(crate::graph::EdgeId, NodeId)> = store
             .get_outgoing_edges(id)
             .into_iter()
-            .filter(|e| e.properties.contains_key(GENERATED_PROPERTY))
+            .filter(|e| {
+                store
+                    .edge_properties_merged(e.id)
+                    .contains_key(GENERATED_PROPERTY)
+            })
             .map(|e| (e.id, e.target))
             .collect();
         if marker.is_empty() && edges.is_empty() {
@@ -780,6 +848,70 @@ pub fn verify(config: &EnrichConfig, store: &mut GraphStore, node_ids: &[NodeId]
         let _ = store.set_node_property(TENANT, id, ENRICHMENT_PROPERTY, PropertyValue::Map(root));
     }
     rep
+}
+
+/// Seed one node in the state a verified enrichment leaves behind: an
+/// ingested property, a promoted model-written one, a generated edge, a target
+/// the model created whole, and an ordinary edge beside them.
+///
+/// Here rather than in a test module because two of them need it --
+/// `src/http/handler_cov_tests.rs` for `POST /api/retract` and
+/// `src/http/server_cov_tests.rs` for the audit entry that route writes -- and
+/// a second, hand-written copy of the `_generated` marker is a copy that can
+/// drift from the one [`verify`] actually writes. A route tested against a
+/// marker shape the engine never produces is a route that passes its test and
+/// fails in the field.
+///
+/// Returns the enriched node and the ordinary neighbour retraction must leave
+/// alone.
+#[cfg(test)]
+pub(crate) fn seed_promoted_enrichment(store: &mut GraphStore) -> (NodeId, NodeId) {
+    let mat = Materialize {
+        edge_type: "FAILS_BY".to_string(),
+        target_label: "Mode".to_string(),
+        target_key: "name".to_string(),
+        vocabulary: None,
+    };
+    let spec = |materialize| EnrichSpec {
+        sources: vec![EnrichSource::Llm],
+        trust_floor: 0.0,
+        materialize,
+    };
+    let mut config = EnrichConfig::default();
+    let policies = config.policies.entry("Pump".to_string()).or_default();
+    policies.insert("vendor".to_string(), spec(None));
+    policies.insert("modes".to_string(), spec(Some(mat.clone())));
+
+    let pump = store.create_node("Pump");
+    store
+        .set_node_property(TENANT, pump, "name", PropertyValue::String("P1".into()))
+        .unwrap();
+    let site = store.create_node("Site");
+    store.create_edge(pump, site, "AT").unwrap();
+
+    let outcome = |property: &str, value: &str, targets: Option<Vec<String>>| Outcome {
+        node_id: pump.as_u64(),
+        property: property.to_string(),
+        value: value.to_string(),
+        confidence: 0.9,
+        method: "llm:test".to_string(),
+        prompt_hash: "h".to_string(),
+        materialize: targets.as_ref().map(|_| mat.clone()),
+        targets,
+    };
+    quarantine(store, &outcome("vendor", "Acme", None)).unwrap();
+    quarantine(
+        store,
+        &outcome("modes", "Leak", Some(vec!["Leak".to_string()])),
+    )
+    .unwrap();
+    let rep = verify(&config, store, &[pump]);
+    assert_eq!(
+        (rep.promoted, rep.edges_materialized),
+        (2, 1),
+        "the fixture has to reach the state retraction is about"
+    );
+    (pump, site)
 }
 
 /// Build an [`EnrichmentWorker`] from environment config (same knobs as `/api/nlq`).
