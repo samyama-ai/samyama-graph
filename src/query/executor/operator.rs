@@ -19179,6 +19179,12 @@ impl AlgorithmOperator {
         ("stratifiedsampling", "it groups nodes by their labels, which a projection does not keep"),
         ("or.constrainedshortestpath", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
         ("or.shortestpathwithconstraints", "it reads two relationship properties, a cost and a resource, and a projection keeps one weight"),
+        ("or.facilitylocation", "it reads labelled nodes and their properties, which a projection does not keep"),
+        ("or.pmedian", "it reads labelled nodes and their properties, which a projection does not keep"),
+        ("or.setcover", "it reads labelled nodes and their properties, which a projection does not keep"),
+        ("or.maxcoverage", "it reads labelled nodes and their properties, which a projection does not keep"),
+        ("or.assignment", "it reads labelled nodes and relationship properties, which a projection does not keep"),
+        ("or.mincostflow", "it reads node supplies and two relationship properties, which a projection does not keep"),
     ];
 
     /// The projection `graph` names, or `None` when the call names none.
@@ -23616,6 +23622,11 @@ impl PhysicalOperator for AlgorithmOperator {
                 "wcc" => self.execute_wcc(store)?,
                 "scc" => self.execute_scc(store)?,
                 "weightedpath" => self.execute_weighted_path(store)?,
+                "or.facilitylocation" | "or.pmedian" => self.execute_facility_location(store)?,
+                "or.setcover" => self.execute_set_cover(store)?,
+                "or.maxcoverage" => self.execute_max_coverage(store)?,
+                "or.assignment" => self.execute_assignment(store)?,
+                "or.mincostflow" => self.execute_min_cost_flow(store)?,
                 "or.constrainedshortestpath" | "or.shortestpathwithconstraints" => {
                     self.execute_constrained_shortest_path(store)?
                 }
@@ -23740,6 +23751,11 @@ impl PhysicalOperator for AlgorithmOperator {
                 "wcc" => self.execute_wcc(store)?,
                 "scc" => self.execute_scc(store)?,
                 "weightedpath" => self.execute_weighted_path(store)?,
+                "or.facilitylocation" | "or.pmedian" => self.execute_facility_location(store)?,
+                "or.setcover" => self.execute_set_cover(store)?,
+                "or.maxcoverage" => self.execute_max_coverage(store)?,
+                "or.assignment" => self.execute_assignment(store)?,
+                "or.mincostflow" => self.execute_min_cost_flow(store)?,
                 "or.constrainedshortestpath" | "or.shortestpathwithconstraints" => {
                     self.execute_constrained_shortest_path(store)?
                 }
@@ -30300,6 +30316,11 @@ mod expand_bound_comparison_reads {
 #[cfg(test)]
 #[path = "operator_cov_tests_a.rs"]
 mod cov_tests_a;
+
+// The graph-native optimisation templates (OPT-06, #1770): a child module so
+// it can use this operator's helpers without growing this file further.
+#[path = "or_template_ops.rs"]
+mod or_template_ops;
 
 #[cfg(test)]
 #[path = "operator_cov_tests_b.rs"]

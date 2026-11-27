@@ -1,5 +1,6 @@
 pub mod common;
 pub mod constrained_path;
+pub mod or_templates;
 pub mod cpu_fallback;
 #[cfg(feature = "gpu")]
 pub mod gpu_dispatch;
