@@ -1,0 +1,18 @@
+# Sample config for examples/edge_iot_bridge.rs (#2217).
+#
+#   cargo run --example edge_iot_bridge -- examples/edge_iot_bridge.yaml
+#
+# Keep the readings bounded with a retention rule, once:
+#   CALL db.retention.set('Reading', {maxAge: '1h', maxRecords: 100000})
+broker: mqtt://127.0.0.1:1883
+samyama: http://127.0.0.1:8080
+routes:
+  # factory/<sensor>/temperature  {"value": 21.5}
+  - topic: factory/+/temperature
+    cypher: |
+      MERGE (s:Sensor {id: $sensor})
+      CREATE (s)-[:EMITTED]->(:Reading {celsius: $value, at: $at})
+    params:
+      sensor: topic.1
+      value: payload.value
+      at: received_at

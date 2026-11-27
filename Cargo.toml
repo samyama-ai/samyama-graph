@@ -230,6 +230,10 @@ quick-xml = "0.37"
 # than telling the client to skip verification. A test that disabled
 # verification would pass against a server offering no TLS at all.
 rcgen = "0.14"
+# The edge MQTT bridge (#2217, examples/edge_iot_bridge.rs). An example's
+# dependency only: the server binary does not speak MQTT. No TLS: the bridge
+# runs beside a broker on the same gateway.
+rumqttc = { version = "0.25.1", default-features = false }
 
 # These examples carry `#[cfg(test)]` tests. Cargo defaults an example target to
 # `test = false`, so without this the tests inside them compile and never run —
@@ -244,6 +248,10 @@ test = true
 
 [[example]]
 name = "property_bridge"
+test = true
+
+[[example]]
+name = "edge_iot_bridge"
 test = true
 
 [[example]]
