@@ -47,6 +47,7 @@ pub use samyama_graph_algorithms::{
     a_star, all_shortest_paths, article_rank, random_walk, yens_k_shortest,
     fastrp, node2vec, FastRpConfig, Node2VecConfig,
     assign_groups, entity_leaks, group_leaks, split_names, time_leaks, time_split, GroupLeak,
+    ngram_contamination, Contamination, DEFAULT_NGRAM,
 };
 
 /// Build a GraphView from the store for algorithm execution

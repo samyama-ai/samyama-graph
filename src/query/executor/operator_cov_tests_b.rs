@@ -6839,6 +6839,17 @@ fn catalogue_call(canonical: &str) -> (GraphStore, Vec<Expression>) {
             let args = vec![lmap(&[("strategy", pstr("entity")), ("edgeType", pstr("E"))])];
             return (store, args);
         }
+        // A corpus text that quotes the benchmark item: one contaminated pair.
+        "contamination" => {
+            let mut store = GraphStore::new();
+            let q = "which river flows through the city of paris on its way to the sea";
+            for (label, text) in [("Doc", format!("an article that says {q} in passing")), ("Q", q.to_string())] {
+                let n = store.create_node(label);
+                store.set_node_property(TENANT, n, "text", text).unwrap();
+            }
+            let args = vec![lmap(&[("corpusLabel", pstr("Doc")), ("benchmarkLabel", pstr("Q"))])];
+            return (store, args);
+        }
         _ => vec![],
     };
     (path, args)
