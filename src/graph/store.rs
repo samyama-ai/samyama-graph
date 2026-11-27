@@ -5705,15 +5705,6 @@ NodeDeleted { id, .. } => {
         self.label_index.keys().collect()
     }
 
-    /// Get all edge type names in the graph, sorted by name.
-    ///
-    /// The order is part of the contract (#1509). `edge_type_index` is a
-    /// `HashMap`, whose key order is keyed per instance, so collecting its keys
-    /// gave a different type order on every store and in every process. With
-    /// `get_edges_by_type` ascending by edge id (#1519), walking the types in
-    /// this order and each type's edges in turn is reproducible end to end.
-    /// The sort is over the distinct types only -- a handful of names, not a
-    /// per-edge cost.
     /// The graph's node style (#2029), if it has one.
     pub fn icon_style(&self) -> Option<&crate::snapshot::icons::IconStyle> {
         self.icon_style.as_ref()
@@ -5739,6 +5730,15 @@ NodeDeleted { id, .. } => {
         self.icon_style_source = source;
     }
 
+    /// Get all edge type names in the graph, sorted by name.
+    ///
+    /// The order is part of the contract (#1509). `edge_type_index` is a
+    /// `HashMap`, whose key order is keyed per instance, so collecting its keys
+    /// gave a different type order on every store and in every process. With
+    /// `get_edges_by_type` ascending by edge id (#1519), walking the types in
+    /// this order and each type's edges in turn is reproducible end to end.
+    /// The sort is over the distinct types only -- a handful of names, not a
+    /// per-edge cost.
     pub fn all_edge_types(&self) -> Vec<&EdgeType> {
         let mut types: Vec<&EdgeType> = self.edge_type_index.keys().collect();
         types.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -8043,6 +8043,7 @@ mod tests {
             ("commit_session_transaction", "drops the rollback journal, keeping every write already applied and already bumped; rollback_session_transaction, which does change rows, bumps (#1200 step 6)"),
             ("add_snapshot_sources", "records where the data came from, for the next export's header; no query reads it, and it must not bump: it records the current epoch to tell later writes apart (#1911)"),
             ("record_snapshot_sources", "records where the data came from, for the next export's header; no query reads it, and it must not bump: it records the current epoch to tell later writes apart (#1911)"),
+            ("set_icon_style", "replaces the graph's display style, which only GET /api/icons and a snapshot export read; no query returns it, so no cached result can go stale (#2029)"),
         ];
 
         let src = std::fs::read_to_string(concat!(

@@ -87,7 +87,7 @@ pub async fn get_icons_handler(
     if let Some(resp) = reject_foreign_graph(&graph) {
         return resp;
     }
-    let store = state.store.read().await;
+    let store = crate::store_lock::read(&state.store).await;
     Json(body(&store)).into_response()
 }
 
@@ -145,7 +145,7 @@ pub async fn put_icons_handler(
         }
     };
 
-    let mut store = state.store.write().await;
+    let mut store = crate::store_lock::write(&state.store).await;
     let (labels, edge_types) = schema(&store);
     // Kept as given, labels the graph does not have yet included: a client may
     // style a label before its data arrives. The report says which they are.
