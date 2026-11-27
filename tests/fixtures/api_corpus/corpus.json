@@ -6336,7 +6336,7 @@
       "query": "RETURN 'abc"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:8\n  |\n1 | RETURN 'abc\n  |        ^---\n  |\n  = expected distinct or return_item"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:8\n  |\n1 | RETURN 'abc\n  |        ^---\n  |\n  = expected return_item or keyword"
     },
     "status": 400
   },
@@ -7536,7 +7536,7 @@
       "query": "RETURN 'abc"
     },
     "response": {
-      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:8\n  |\n1 | RETURN 'abc\n  |        ^---\n  |\n  = expected distinct or return_item"
+      "error": "[Samyama.ClientError.Statement.SyntaxError] Parse error:  --> 1:8\n  |\n1 | RETURN 'abc\n  |        ^---\n  |\n  = expected return_item or keyword"
     },
     "status": 400
   },
