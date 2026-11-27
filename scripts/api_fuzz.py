@@ -97,7 +97,8 @@ def main() -> int:
     env["SAMYAMA_TX_TIMEOUT_SECS"] = "2"
     log = open(work / "server.log", "w")
     server = subprocess.Popen(
-        [str(Path(args.bin).resolve()), "--ephemeral", "--port", str(free_port()), "--http-port", str(http)],
+        [str(Path(args.bin).resolve()), "--ephemeral", "--port", str(free_port()), "--http-port", str(http),
+         "--audit-log", str(work / "audit.jsonl")],
         cwd=work, env=env, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
     try:
         deadline = time.time() + 90
