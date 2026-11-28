@@ -199,15 +199,22 @@ fn parse_clause_pipeline(input: &str) -> ParseResult<Query> {
                         match c.as_rule() {
                             Rule::match_clause | Rule::optional_match_clause => {
                                 let optional = c.as_rule() == Rule::optional_match_clause;
+                                let mut as_of = None;
                                 for p in c.into_inner() {
                                     if p.as_rule() == Rule::pattern {
                                         query.clauses.push(Clause::Match(MatchClause {
                                             pattern: parse_pattern(p)?,
                                             optional,
                                         }));
+                                    } else if p.as_rule() == Rule::as_of_clause {
+                                        as_of = Some(parse_as_of_clause(p)?);
                                     } else if p.as_rule() == Rule::using_hint {
                                         query.hints.push(parse_using_hint(p)?);
                                     }
+                                }
+                                if let (Some(at), Some(Clause::Match(m))) = (as_of, query.clauses.last()) {
+                                    let predicate = as_of_predicate(&m.pattern, &at)?;
+                                    query.clauses.push(Clause::Where(WhereClause { predicate }));
                                 }
                             }
                             Rule::where_clause => {
@@ -1723,6 +1730,36 @@ fn and_conjuncts(e: &Expression, out: &mut Vec<Expression>) {
     }
 }
 
+/// AND a WHERE into the block it belongs to: `post_with_where_clause` after a
+/// `WITH`, else `where_clause`. A WHERE that follows an OPTIONAL MATCH is also
+/// recorded against that pattern, conjunct by conjunct (#1231).
+fn merge_where(query: &mut Query, parsed: WhereClause, after_optional: Option<Pattern>) {
+    if let Some(pattern) = after_optional {
+        let mut conjuncts = Vec::new();
+        and_conjuncts(&parsed.predicate, &mut conjuncts);
+        for c in conjuncts {
+            query.optional_where.push((pattern.clone(), c));
+        }
+    }
+    let target = if query.with_split_index.is_some() {
+        &mut query.post_with_where_clause
+    } else {
+        &mut query.where_clause
+    };
+    match target.take() {
+        Some(existing) => {
+            *target = Some(WhereClause {
+                predicate: Expression::Binary {
+                    left: Box::new(existing.predicate),
+                    op: BinaryOp::And,
+                    right: Box::new(parsed.predicate),
+                },
+            });
+        }
+        None => *target = Some(parsed),
+    }
+}
+
 fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -> ParseResult<()> {
     // The pattern of the OPTIONAL MATCH the next clause follows, if it is one:
     // its WHERE belongs to it (#1231).
@@ -1733,30 +1770,31 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
             after_optional = None;
         }
         match rule {
-            Rule::match_clause => {
+            Rule::match_clause | Rule::optional_match_clause => {
+                let optional = rule == Rule::optional_match_clause;
+                let mut as_of = None;
                 for mc_inner in inner.into_inner() {
                     if mc_inner.as_rule() == Rule::pattern {
                         query.match_clauses.push(MatchClause {
                             pattern: parse_pattern(mc_inner)?,
-                            optional: false,
+                            optional,
                         });
+                    } else if mc_inner.as_rule() == Rule::as_of_clause {
+                        as_of = Some(parse_as_of_clause(mc_inner)?);
                     } else if mc_inner.as_rule() == Rule::using_hint {
                         query.hints.push(parse_using_hint(mc_inner)?);
                     }
                 }
-            }
-            Rule::optional_match_clause => {
-                for mc_inner in inner.into_inner() {
-                    if mc_inner.as_rule() == Rule::pattern {
-                        query.match_clauses.push(MatchClause {
-                            pattern: parse_pattern(mc_inner)?,
-                            optional: true,
-                        });
-                    } else if mc_inner.as_rule() == Rule::using_hint {
-                        query.hints.push(parse_using_hint(mc_inner)?);
-                    }
+                let pattern = query.match_clauses.last().map(|m| m.pattern.clone());
+                if let (Some(at), Some(pattern)) = (as_of, pattern.as_ref()) {
+                    // Exactly as if the user had written the WHERE: an
+                    // OPTIONAL MATCH keeps its row and nulls what fails.
+                    let predicate = as_of_predicate(pattern, &at)?;
+                    merge_where(query, WhereClause { predicate }, optional.then(|| pattern.clone()));
                 }
-                after_optional = query.match_clauses.last().map(|m| m.pattern.clone());
+                if optional {
+                    after_optional = pattern;
+                }
             }
             Rule::where_clause => {
                 // Cypher permits a `WHERE` after each `MATCH`. The planner
@@ -1767,30 +1805,7 @@ fn parse_match_statement(pair: pest::iterators::Pair<Rule>, query: &mut Query) -
                 // predicate. Dropping the first WHERE was behind OM27's
                 // timeout + wrong-semantics on the v1.0 mega benchmark.
                 let parsed = parse_where_clause(inner)?;
-                if let Some(pattern) = after_optional.take() {
-                    let mut conjuncts = Vec::new();
-                    and_conjuncts(&parsed.predicate, &mut conjuncts);
-                    for c in conjuncts {
-                        query.optional_where.push((pattern.clone(), c));
-                    }
-                }
-                let target = if query.with_split_index.is_some() {
-                    &mut query.post_with_where_clause
-                } else {
-                    &mut query.where_clause
-                };
-                match target.take() {
-                    Some(existing) => {
-                        *target = Some(WhereClause {
-                            predicate: Expression::Binary {
-                                left: Box::new(existing.predicate),
-                                op: BinaryOp::And,
-                                right: Box::new(parsed.predicate),
-                            },
-                        });
-                    }
-                    None => *target = Some(parsed),
-                }
+                merge_where(query, parsed, after_optional.take());
             }
             Rule::with_clause => {
                 if query.with_clause.is_some() {
@@ -2809,6 +2824,78 @@ fn parse_value(pair: pest::iterators::Pair<Rule>) -> ParseResult<PropertyValue> 
     }
 
     Ok(PropertyValue::Null)
+}
+
+/// The property that opens an entity's valid-time period, read by `AS OF`.
+pub const VALID_FROM: &str = "valid_from";
+/// The property that closes an entity's valid-time period, read by `AS OF`.
+pub const VALID_TO: &str = "valid_to";
+
+fn parse_as_of_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<Expression> {
+    match pair.into_inner().find(|p| p.as_rule() == Rule::expression) {
+        Some(e) => parse_expression(e),
+        None => Err(ParseError::SemanticError("AS OF needs a point in time".to_string())),
+    }
+}
+
+/// `MATCH <pattern> AS OF <at>` as a predicate (NDS-03, #1663).
+///
+/// Every node and relationship the pattern names must be valid at `<at>`:
+/// its period is `[valid_from, valid_to)`, so it holds `<at>` when
+/// `valid_from <= <at> < valid_to`. A missing bound is open, so an entity
+/// with neither property is valid at every time -- data written before
+/// anyone thought about time does not vanish from an `AS OF` query.
+///
+/// This is valid time (when a fact holds in the world), which is spec 04's H1
+/// for NDS-03. Transaction time -- the graph as the database held it at a past
+/// moment -- is H2/H3 and is not what this reads.
+///
+/// A variable-length relationship binds a list, not one relationship, so it
+/// is not filtered; the nodes either side of it are. Anonymous elements have
+/// no name to filter on, so a pattern naming nothing is refused rather than
+/// running as though `AS OF` were not there.
+fn as_of_predicate(pattern: &Pattern, at: &Expression) -> ParseResult<Expression> {
+    let mut names: Vec<&str> = Vec::new();
+    fn add<'a>(names: &mut Vec<&'a str>, v: &'a Option<String>) {
+        if let Some(v) = v {
+            if !names.contains(&v.as_str()) {
+                names.push(v.as_str());
+            }
+        }
+    }
+    for path in &pattern.paths {
+        add(&mut names, &path.start.variable);
+        for seg in &path.segments {
+            if seg.edge.length.is_none() {
+                add(&mut names, &seg.edge.variable);
+            }
+            add(&mut names, &seg.node.variable);
+        }
+    }
+    let prop = |v: &str, p: &str| Expression::Property { variable: v.to_string(), property: p.to_string() };
+    let bin = |l: Expression, op: BinaryOp, r: Expression| Expression::Binary {
+        left: Box::new(l),
+        op,
+        right: Box::new(r),
+    };
+    let open_or = |v: &str, p: &str, op: BinaryOp| {
+        bin(
+            Expression::Unary { op: UnaryOp::IsNull, expr: Box::new(prop(v, p)) },
+            BinaryOp::Or,
+            bin(prop(v, p), op, at.clone()),
+        )
+    };
+    names
+        .into_iter()
+        .flat_map(|v| [open_or(v, VALID_FROM, BinaryOp::Le), open_or(v, VALID_TO, BinaryOp::Gt)])
+        .reduce(|l, r| bin(l, BinaryOp::And, r))
+        .ok_or_else(|| {
+            ParseError::SemanticError(
+                "AS OF filters the nodes and relationships the pattern names; \
+                 this pattern names none -- give one a variable, e.g. `MATCH (n:N) AS OF ...`"
+                    .to_string(),
+            )
+        })
 }
 
 fn parse_where_clause(pair: pest::iterators::Pair<Rule>) -> ParseResult<WhereClause> {
